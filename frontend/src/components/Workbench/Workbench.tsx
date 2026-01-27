@@ -4,10 +4,38 @@ import { Terminal, Code, Play } from 'lucide-react';
 import { EditorPanel } from './EditorPanel';
 import { TerminalPanel } from './TerminalPanel';
 import { FileTree } from './FileTree';
+import { useWebContainer } from '../../hooks/useWebContainer';
 // import { motion } from 'framer-motion';
 
+import { PreviewPanel } from './PreviewPanel';
+
 export const Workbench: React.FC = () => {
-    const [activeTab, setActiveTab] = useState<'preview' | 'code' | 'terminal'>('code');
+    const [activeTab, setActiveTab] = useState<'code' | 'preview' | 'terminal'>('code');
+    const { isLoading, error } = useWebContainer(); // Init WebContainer on mount
+
+    if (error) {
+        return (
+            <div className="h-full flex flex-col items-center justify-center bg-zinc-950 text-red-400 p-4 text-center">
+                <div className="text-xl font-bold mb-2">Failed to start WebContainer</div>
+                <p>{error}</p>
+                <button
+                    onClick={() => window.location.reload()}
+                    className="mt-4 px-4 py-2 bg-zinc-800 rounded hover:bg-zinc-700 text-white"
+                >
+                    Reload
+                </button>
+            </div>
+        );
+    }
+
+    if (isLoading) {
+        return (
+            <div className="h-full flex flex-col items-center justify-center bg-zinc-950 text-white">
+                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-white mb-4"></div>
+                <p className="text-zinc-400">Booting WebContainer...</p>
+            </div>
+        );
+    }
 
     return (
         <div className="h-full flex flex-col bg-zinc-900 overflow-hidden">
@@ -39,7 +67,7 @@ export const Workbench: React.FC = () => {
             {/* Workbench Content */}
             <div className="flex-1 overflow-hidden relative">
                 {activeTab === 'code' && <CodeView />}
-                {activeTab === 'preview' && <PreviewView />}
+                {activeTab === 'preview' && <PreviewPanel />}
                 {activeTab === 'terminal' && <TerminalView />}
             </div>
         </div>
@@ -77,12 +105,6 @@ const CodeView = () => (
 
 
 
-
-const PreviewView = () => (
-    <div className="h-full w-full bg-white flex items-center justify-center text-black">
-        <h1 className="text-2xl font-bold">App Preview</h1>
-    </div>
-);
 
 const TerminalView = () => (
     <TerminalPanel />
