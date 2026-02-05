@@ -1,8 +1,19 @@
 
-import React from 'react';
+import React, { useEffect, useRef } from 'react';
 import { Check, CircleDashed, Loader2 } from 'lucide-react';
+import { useAtomValue } from 'jotai';
+import { messagesAtom } from '../../store/atoms';
 
 export const MessageList: React.FC = () => {
+    const messages = useAtomValue(messagesAtom);
+    const bottomRef = useRef<HTMLDivElement>(null);
+
+    useEffect(() => {
+        if (bottomRef.current) {
+            bottomRef.current.scrollIntoView({ behavior: 'smooth' });
+        }
+    }, [messages]);
+
     return (
         <div className="space-y-6">
             {/* Initial Prompt */}
@@ -28,6 +39,24 @@ export const MessageList: React.FC = () => {
                     <PlanItem status="pending" text="Run build to verify functionality" />
                 </div>
             </div>
+
+            {/* Dynamic Messages */}
+            {messages.map((msg) => (
+                <div
+                    key={msg.id}
+                    className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
+                >
+                    <div
+                        className={`max-w-[80%] p-3 rounded-xl text-sm leading-relaxed ${msg.role === 'user'
+                            ? 'bg-blue-600 text-white rounded-br-none'
+                            : 'bg-zinc-800 text-zinc-300'
+                            }`}
+                    >
+                        {msg.content}
+                    </div>
+                </div>
+            ))}
+            <div ref={bottomRef} />
         </div>
     );
 };
