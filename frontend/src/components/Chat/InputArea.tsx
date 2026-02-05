@@ -61,28 +61,28 @@ export const InputArea: React.FC = () => {
                 />
 
                 {/* Bottom Controls */}
-                <div className="flex items-center justify-between px-4 py-3 bg-zinc-900/50 backdrop-blur-sm mt-auto">
-                    {/* Left: Attachment */}
-                    <button className="p-2 text-zinc-400 hover:text-white transition-colors hover:bg-zinc-800 rounded-lg">
-                        <Paperclip className="w-5 h-5" />
-                    </button>
+                <div className="flex items-center justify-between px-4 py-3 bg-zinc-900/50 backdrop-blur-sm mt-auto border-t border-zinc-800/50">
+                    {/* Left: Attachment & Enhancement */}
+                    <div className="flex items-center gap-2">
+                        <button className="p-2 text-zinc-400 hover:text-white transition-colors hover:bg-zinc-800 rounded-lg group relative" title="Attach photos/videos">
+                            <Paperclip className="w-5 h-5 group-hover:rotate-45 transition-transform" />
+                        </button>
+                    </div>
 
                     {/* Right: Model & Actions */}
                     <div className="flex items-center gap-3">
-                        <button className="flex items-center gap-2 px-3 py-1.5 text-sm font-medium text-zinc-400 hover:text-white bg-zinc-800/50 hover:bg-zinc-800 rounded-lg transition-colors border border-transparent hover:border-zinc-700">
-                            <Zap className="w-4 h-4 text-yellow-500" />
+                        <div className="flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-zinc-400 bg-zinc-800/50 rounded-full border border-zinc-700/50 select-none">
+                            <Zap className="w-3 h-3 text-yellow-500 fill-yellow-500" />
                             <span>Sonnet 4.5</span>
-                        </button>
+                        </div>
 
-                        <div className="h-4 w-[1px] bg-zinc-700 mx-1" />
-
-                        <button className="px-4 py-2 text-sm font-medium text-zinc-300 hover:text-white transition-colors">
+                        <button className="px-4 py-2 text-sm font-medium text-zinc-400 hover:text-white transition-colors">
                             Plan
                         </button>
 
                         <button
                             onClick={handleSendMessage}
-                            className="flex items-center gap-2 px-4 py-2 text-sm font-bold text-white bg-blue-600 hover:bg-blue-500 rounded-lg shadow-lg shadow-blue-900/20 transition-all hover:scale-105 active:scale-95"
+                            className="flex items-center gap-2 px-4 py-2 text-sm font-bold text-white bg-gradient-to-r from-blue-600 to-cyan-600 hover:from-blue-500 hover:to-cyan-500 rounded-xl shadow-lg shadow-blue-900/20 transition-all hover:scale-[1.02] active:scale-[0.98]"
                         >
                             Build now
                             <ArrowRight className="w-4 h-4" />

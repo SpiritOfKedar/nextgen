@@ -22,9 +22,9 @@ export const Hero: React.FC = () => {
                 initial={{ opacity: 0, scale: 0.95 }}
                 animate={{ opacity: 1, scale: 1 }}
                 transition={{ duration: 0.5, delay: 0.1 }}
-                className="text-5xl md:text-7xl font-bold tracking-tighter text-white mb-6"
+                className="text-6xl md:text-8xl font-bold tracking-tight text-white mb-6 font-outfit"
             >
-                What will you <span className="bg-gradient-to-r from-blue-400 to-cyan-300 bg-clip-text text-transparent italic pr-2">build</span> today?
+                What will you <span className="bg-gradient-to-r from-blue-400 via-cyan-400 to-teal-400 bg-clip-text text-transparent italic pr-2">build</span> today?
             </motion.h1>
 
             {/* Subtext */}
