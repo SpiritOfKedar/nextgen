@@ -10,9 +10,9 @@ export const MainLayout: React.FC = () => {
 
     return (
         <div className="h-screen w-full bg-zinc-950 text-white overflow-hidden font-sans">
-            <Group className="group h-full w-full">
+            <Group orientation="horizontal" className="group h-full w-full">
                 {/* Left Panel: Chat/Plan */}
-                <Panel defaultSize={50} minSize={20} className="flex flex-col">
+                <Panel defaultSize="30" minSize="10" maxSize="80" className="flex flex-col">
                     <ChatPanel />
                 </Panel>
 
@@ -20,7 +20,7 @@ export const MainLayout: React.FC = () => {
                 <Separator className="w-1 bg-zinc-800 hover:bg-blue-500 transition-colors" />
 
                 {/* Right Panel: Workbench (Conditional or Panel) */}
-                <Panel minSize={20}>
+                <Panel defaultSize="70" minSize="20">
                     <Workbench />
                 </Panel>
             </Group>

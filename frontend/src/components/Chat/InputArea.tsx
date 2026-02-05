@@ -61,7 +61,7 @@ export const InputArea: React.FC = () => {
                 />
 
                 {/* Bottom Controls */}
-                <div className="flex items-center justify-between px-4 py-3 bg-zinc-900/50 backdrop-blur-sm mt-auto border-t border-zinc-800/50">
+                <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3 bg-zinc-900/50 backdrop-blur-sm mt-auto border-t border-zinc-800/50">
                     {/* Left: Attachment & Enhancement */}
                     <div className="flex items-center gap-2">
                         <button className="p-2 text-zinc-400 hover:text-white transition-colors hover:bg-zinc-800 rounded-lg group relative" title="Attach photos/videos">
