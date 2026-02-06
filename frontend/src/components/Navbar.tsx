@@ -1,12 +1,13 @@
 import React from 'react';
 import { Twitter, Disc, Linkedin, User } from 'lucide-react';
+import logo from '../assets/nextgen-logo.png';
 
 export const Navbar: React.FC = () => {
     return (
         <header className="fixed top-0 left-0 right-0 z-50 flex items-center justify-between px-6 py-4 bg-transparent backdrop-blur-sm">
             <div className="flex items-center gap-8">
-                <a href="/" className="text-xl font-bold tracking-tight text-white hover:opacity-80 transition-opacity">
-                    bolt.new
+                <a href="/" className="block hover:opacity-80 transition-opacity">
+                    <img src={logo} alt="NextGen" className="h-8 w-auto" />
                 </a>
                 <nav className="hidden md:flex items-center gap-6 text-sm font-medium text-zinc-400">
                     <a href="#" className="hover:text-white transition-colors">Community</a>
