@@ -66,13 +66,15 @@ export const ChatPanel: React.FC = () => {
                 </div>
 
                 {/* Messages */}
-                <div className="flex-1 overflow-y-auto p-4 pb-32 custom-scrollbar">
+                <div className="flex-1 overflow-y-auto p-4 pb-48 custom-scrollbar">
                     <MessageList />
                 </div>
 
                 {/* Input Area */}
-                <div className="absolute bottom-0 left-0 w-full px-4 pb-6 pt-10 bg-gradient-to-t from-zinc-950 via-zinc-950 to-transparent z-10">
-                    <InputArea />
+                <div className="sticky bottom-0 left-0 w-full px-4 pb-6 pt-10 bg-gradient-to-t from-zinc-950 via-zinc-950/95 to-transparent z-10 pointer-events-none">
+                    <div className="pointer-events-auto">
+                        <InputArea />
+                    </div>
                 </div>
             </div>
 

@@ -11,10 +11,6 @@ export const chatController = {
             return res.status(400).json({ error: 'Message is required' });
         }
 
-        // Set headers for SSE/Streaming
-        res.setHeader('Content-Type', 'text/plain');
-        res.setHeader('Transfer-Encoding', 'chunked');
-
         try {
             if (!req.user) {
                 return res.status(401).json({ error: 'Unauthorized' });
@@ -22,6 +18,9 @@ export const chatController = {
             const userId = req.user.id;
             const { stream, threadId: newThreadId } = await chatService.generateResponse(message, threadId, userId, model);
 
+            // Set headers for SSE/Streaming only after we have a valid stream
+            res.setHeader('Content-Type', 'text/plain');
+            res.setHeader('Transfer-Encoding', 'chunked');
             // Send new or existing threadId to client
             res.setHeader('X-Thread-Id', newThreadId);
 
@@ -32,7 +31,12 @@ export const chatController = {
             res.end();
         } catch (error) {
             console.error('Chat Error:', error);
-            res.status(500).end();
+            // Only send error JSON if headers haven't been sent yet
+            if (!res.headersSent) {
+                res.status(500).json({ error: error instanceof Error ? error.message : 'Internal Server Error' });
+            } else {
+                res.end();
+            }
         }
     },
 

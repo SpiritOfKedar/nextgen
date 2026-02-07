@@ -11,21 +11,34 @@ import type { BoltAction } from '../lib/boltProtocol';
 // Strip bolt protocol XML tags from content for display in chat
 // Preserves narrative text and generates clean file summaries
 const stripBoltTags = (text: string): string => {
-    // 1. Extract narrative text (content outside bolt tags)
-    // First remove complete boltAction blocks (with content inside)
+    // 1. Remove complete boltAction blocks (with closing tag)
     let narrative = text
-        .replace(/<boltAction[^>]*>[\s\S]*?<\/boltAction>/g, '')
+        .replace(/<boltAction[^>]*>[\s\S]*?<\/boltAction>/g, '');
+
+    // 2. Remove any UNCLOSED boltAction tag and everything after it
+    //    (during streaming, the closing tag hasn't arrived yet)
+    const unclosedActionIdx = narrative.indexOf('<boltAction');
+    if (unclosedActionIdx !== -1) {
+        narrative = narrative.substring(0, unclosedActionIdx);
+    }
+
+    // 3. Remove artifact wrapper tags
+    narrative = narrative
         .replace(/<boltArtifact[^>]*>/g, '')
         .replace(/<\/boltArtifact>/g, '')
-        // Clean up any remaining partial/unclosed tags
-        .replace(/<boltAction[^>]*>/g, '')
         .replace(/<\/boltAction>/g, '')
         .trim();
 
-    // 2. Extract file info for summary
+    // 4. Also strip anything after an unclosed <boltArtifact (streaming edge case)
+    const unclosedArtifactIdx = narrative.indexOf('<boltArtifact');
+    if (unclosedArtifactIdx !== -1) {
+        narrative = narrative.substring(0, unclosedArtifactIdx).trim();
+    }
+
+    // 5. Extract file info for summary
     const fileActions = extractFileActions(text);
 
-    // 3. Build final output
+    // 6. Build final output
     const parts: string[] = [];
 
     // Add file summary if there are files
@@ -148,7 +161,6 @@ export const useChat = () => {
             timestamp: Date.now(),
         };
         setMessages((prev) => [...prev, userMessage]);
-        setIsWorkbenchActive(true);
         setIsLoading(true);
 
         try {
@@ -171,7 +183,10 @@ export const useChat = () => {
                 }),
             });
 
-            if (!response.ok) throw new Error('Failed to send message');
+            if (!response.ok) {
+                const errorText = await response.text().catch(() => '');
+                throw new Error(`Server error (${response.status}): ${errorText || response.statusText}`);
+            }
             // Update threadId if new
             const newThreadId = response.headers.get('X-Thread-Id');
             if (newThreadId && newThreadId !== currentThreadId) {
@@ -194,10 +209,13 @@ export const useChat = () => {
                 {
                     id: assistantMessageId,
                     role: 'assistant',
-                    content: '', // Start empty
+                    content: '', // Start empty, shows spinner
                     timestamp: Date.now(),
                 },
             ]);
+
+            // Open workbench now that we have a valid response
+            setIsWorkbenchActive(true);
 
             const parser = new BoltParser();
 
@@ -248,9 +266,13 @@ export const useChat = () => {
                         if (webContainerInstance) {
                             try {
                                 const process = await webContainerInstance.spawn('sh', ['-c', command]);
+                                // Consume output silently — only log meaningful lines, skip ANSI noise
                                 process.output.pipeTo(new WritableStream({
                                     write(data) {
-                                        console.log(`[Shell] ${data}`);
+                                        const clean = data.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').trim();
+                                        if (clean && clean.length > 1) {
+                                            console.log(`[Shell] ${clean}`);
+                                        }
                                     }
                                 }));
                             } catch (err) {
@@ -271,6 +293,17 @@ export const useChat = () => {
 
         } catch (error) {
             console.error('Chat Error:', error);
+            // Show error as an assistant message so the user knows what happened
+            const errorMsg = error instanceof Error ? error.message : 'Something went wrong';
+            setMessages((prev) => [
+                ...prev,
+                {
+                    id: Date.now() + 2 + '',
+                    role: 'assistant',
+                    content: `⚠️ **Error:** ${errorMsg}\n\nPlease try again. If the problem persists, check that the backend server is running and the API keys are configured.`,
+                    timestamp: Date.now(),
+                },
+            ]);
         } finally {
             setIsLoading(false);
         }
