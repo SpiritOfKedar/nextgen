@@ -1,17 +1,15 @@
-import { useAtom } from 'jotai';
-import { useEffect, useRef } from 'react';
+import { useEffect } from 'react';
 import { useAuth } from '@clerk/clerk-react';
-import { isWorkbenchActiveAtom } from './store/atoms';
 import { useChat } from './hooks/useChat';
 import { LandingPage } from './components/LandingPage';
 import { MainLayout } from './components/Layout/MainLayout';
+import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { AnimatePresence, motion } from 'framer-motion';
 
 function App() {
-  const [isWorkbenchActive] = useAtom(isWorkbenchActiveAtom);
   const { isSignedIn, isLoaded, getToken } = useAuth();
   const { loadThread } = useChat();
-  const hasRestored = useRef(false);
+  const location = useLocation();
 
   // Sync user to MongoDB as soon as they sign in
   useEffect(() => {
@@ -33,39 +31,51 @@ function App() {
     syncUser();
   }, [isLoaded, isSignedIn, getToken]);
 
-  // Restore last session on refresh
+  // Restore thread when landing on /builder with a saved thread
   useEffect(() => {
-    if (!isLoaded || !isSignedIn || hasRestored.current) return;
-    const savedThreadId = localStorage.getItem('currentThreadId');
-    if (savedThreadId) {
-      console.log('[App] Restoring thread:', savedThreadId);
-      hasRestored.current = true;
-      loadThread(savedThreadId);
+    if (!isLoaded || !isSignedIn) return;
+    if (location.pathname === '/builder') {
+      const savedThreadId = localStorage.getItem('currentThreadId');
+      if (savedThreadId) {
+        console.log('[App] Restoring thread:', savedThreadId);
+        loadThread(savedThreadId);
+      }
     }
-  }, [isLoaded, isSignedIn, loadThread]);
+  }, [isLoaded, isSignedIn]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <AnimatePresence mode="wait">
-      {!isWorkbenchActive ? (
-        <motion.div
-          key="landing"
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          exit={{ opacity: 0, scale: 0.98, filter: 'blur(10px)' }}
-          transition={{ duration: 0.5 }}
-        >
-          <LandingPage />
-        </motion.div>
-      ) : (
-        <motion.div
-          key="workbench"
-          initial={{ opacity: 0, scale: 1.02 }}
-          animate={{ opacity: 1, scale: 1 }}
-          transition={{ duration: 0.5 }}
-        >
-          <MainLayout />
-        </motion.div>
-      )}
+      <Routes location={location} key={location.pathname}>
+        <Route
+          path="/"
+          element={
+            <motion.div
+              key="landing"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0, scale: 0.98, filter: 'blur(10px)' }}
+              transition={{ duration: 0.4 }}
+            >
+              <LandingPage />
+            </motion.div>
+          }
+        />
+        <Route
+          path="/builder"
+          element={
+            <motion.div
+              key="workbench"
+              initial={{ opacity: 0, scale: 1.02 }}
+              animate={{ opacity: 1, scale: 1 }}
+              transition={{ duration: 0.4 }}
+              className="h-screen"
+            >
+              <MainLayout />
+            </motion.div>
+          }
+        />
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
     </AnimatePresence>
   );
 }

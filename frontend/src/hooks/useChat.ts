@@ -1,10 +1,11 @@
 import { useCallback, useState } from 'react';
 import { useAtom, useSetAtom, useAtomValue } from 'jotai';
-import { messagesAtom, currentThreadIdAtom, threadsAtom, isWorkbenchActiveAtom, selectedModelAtom } from '../store/atoms';
+import { messagesAtom, currentThreadIdAtom, threadsAtom, selectedModelAtom } from '../store/atoms';
 import { webContainerAtom } from '../store/webContainer';
 import { fileSystemAtom, activeFileAtom } from '../store/fileSystem';
 import type { FileSystemItem, FileNode, FolderNode, ActiveFile } from '../store/fileSystem';
 import { useAuth } from '@clerk/clerk-react';
+import { useNavigate } from 'react-router-dom';
 import { BoltParser } from '../lib/boltProtocol';
 import type { BoltAction } from '../lib/boltProtocol';
 
@@ -140,7 +141,7 @@ export const useChat = () => {
     const [messages, setMessages] = useAtom(messagesAtom);
     const [currentThreadId, setCurrentThreadId] = useAtom(currentThreadIdAtom);
     const setThreads = useSetAtom(threadsAtom);
-    const setIsWorkbenchActive = useSetAtom(isWorkbenchActiveAtom);
+    const navigate = useNavigate();
     const [selectedModel] = useAtom(selectedModelAtom);
     const webContainerInstance = useAtomValue(webContainerAtom);
     const setFileSystem = useSetAtom(fileSystemAtom);
@@ -214,8 +215,8 @@ export const useChat = () => {
                 },
             ]);
 
-            // Open workbench now that we have a valid response
-            setIsWorkbenchActive(true);
+            // Navigate to builder now that we have a valid response
+            navigate('/builder');
 
             const parser = new BoltParser();
 
@@ -392,12 +393,12 @@ export const useChat = () => {
                 setMessages(formattedMessages);
                 setCurrentThreadId(threadId);
                 localStorage.setItem('currentThreadId', threadId);
-                setIsWorkbenchActive(true);
+                navigate('/builder');
             }
         } catch (error) {
             console.error('Failed to load thread', error);
         }
-    }, [getToken, isLoaded, isSignedIn, setMessages, setCurrentThreadId, setIsWorkbenchActive, setFileSystem, setActiveFile, webContainerInstance]);
+    }, [getToken, isLoaded, isSignedIn, setMessages, setCurrentThreadId, navigate, setFileSystem, setActiveFile, webContainerInstance]);
 
     return {
         messages,

@@ -6,12 +6,13 @@ import { PanelLeft, Plus } from 'lucide-react';
 import logo from '../../assets/nextgen-logo.png';
 import { UserButton } from '@clerk/clerk-react';
 import { useSetAtom } from 'jotai';
-import { isWorkbenchActiveAtom, messagesAtom, currentThreadIdAtom } from '../../store/atoms';
+import { messagesAtom, currentThreadIdAtom } from '../../store/atoms';
+import { useNavigate } from 'react-router-dom';
 import { fileSystemAtom, activeFileAtom } from '../../store/fileSystem';
 
 export const ChatPanel: React.FC = () => {
     const [isThreadListOpen, setIsThreadListOpen] = useState(false);
-    const setIsWorkbenchActive = useSetAtom(isWorkbenchActiveAtom);
+    const navigate = useNavigate();
     const setMessages = useSetAtom(messagesAtom);
     const setCurrentThreadId = useSetAtom(currentThreadIdAtom);
     const setFileSystem = useSetAtom(fileSystemAtom);
@@ -46,7 +47,7 @@ export const ChatPanel: React.FC = () => {
                             <PanelLeft className="w-5 h-5" />
                         </button>
                         <button
-                            onClick={() => setIsWorkbenchActive(false)}
+                            onClick={() => navigate('/')}
                             className="hover:opacity-80 transition-opacity"
                         >
                             <img src={logo} alt="NextGen" className="h-6 w-auto" />
