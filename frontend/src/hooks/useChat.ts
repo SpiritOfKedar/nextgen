@@ -9,29 +9,45 @@ import { BoltParser } from '../lib/boltProtocol';
 import type { BoltAction } from '../lib/boltProtocol';
 
 // Strip bolt protocol XML tags from content for display in chat
-// If stripping leaves nothing, generate a summary from file actions
+// Preserves narrative text and generates clean file summaries
 const stripBoltTags = (text: string): string => {
-    const stripped = text
+    // 1. Extract narrative text (content outside bolt tags)
+    // First remove complete boltAction blocks (with content inside)
+    let narrative = text
+        .replace(/<boltAction[^>]*>[\s\S]*?<\/boltAction>/g, '')
         .replace(/<boltArtifact[^>]*>/g, '')
         .replace(/<\/boltArtifact>/g, '')
-        .replace(/<boltAction[^>]*>[\s\S]*?<\/boltAction>/g, '')
+        // Clean up any remaining partial/unclosed tags
         .replace(/<boltAction[^>]*>/g, '')
         .replace(/<\/boltAction>/g, '')
         .trim();
 
-    if (stripped) return stripped;
-
-    // Generate summary from file actions if stripped is empty
+    // 2. Extract file info for summary
     const fileActions = extractFileActions(text);
+
+    // 3. Build final output
+    const parts: string[] = [];
+
+    // Add file summary if there are files
     if (fileActions.length > 0) {
         const fileList = fileActions
             .filter(a => a.filePath)
-            .map(a => `- Creating ${a.filePath}`)
+            .map(a => `- \`${a.filePath}\``)
             .join('\n');
-        return `Generated ${fileActions.length} file${fileActions.length > 1 ? 's' : ''}:\n${fileList}`;
+        parts.push(`Generated ${fileActions.length} file${fileActions.length > 1 ? 's' : ''}:\n${fileList}`);
     }
 
-    return 'Generated code.';
+    // Add narrative if present (clean up excessive whitespace)
+    if (narrative) {
+        const cleaned = narrative
+            .replace(/\n{3,}/g, '\n\n')  // Collapse 3+ newlines to 2
+            .trim();
+        if (cleaned) {
+            parts.push(cleaned);
+        }
+    }
+
+    return parts.join('\n\n') || 'Generated code.';
 };
 
 // Extract all file actions from a complete message (non-streaming)
