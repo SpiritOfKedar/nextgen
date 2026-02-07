@@ -3,7 +3,7 @@ import React from 'react';
 import { useAtom, useAtomValue } from 'jotai';
 import { File, Folder, FileJson, FileCode, ChevronRight, ChevronDown } from 'lucide-react';
 import { fileSystemAtom, activeFileAtom } from '../../store/fileSystem';
-import type { FileSystemItem, FolderNode, FileNode } from '../../store/fileSystem';
+import type { FileSystemItem, FolderNode } from '../../store/fileSystem';
 
 export const FileTree: React.FC = () => {
     const fileSystem = useAtomValue(fileSystemAtom);
@@ -15,29 +15,22 @@ export const FileTree: React.FC = () => {
             </div>
             <div className="flex-1 overflow-y-auto p-2 space-y-0.5 custom-scrollbar">
                 {fileSystem.map((item, index) => (
-                    <FileTreeNode key={index} item={item} depth={0} />
+                    <FileTreeNode key={index} item={item} depth={0} parentPath="" />
                 ))}
             </div>
         </div>
     );
 };
 
-const FileTreeNode: React.FC<{ item: FileSystemItem, depth: number }> = ({ item, depth }) => {
-    // Note: handling folder open state purely locally might desync if we want programmatic control
-    // But for now, local state for folders + global state for file selection is fine.
-    // Ideally we'd modify the atom to toggle isOpen.
-
-    // For simplicity in this step, let's just make folders toggleable locally first.
-    // If we need to persist open state, we update the atom.
-
-    // Let's implement full atom updates for proper state consistency.
+const FileTreeNode: React.FC<{ item: FileSystemItem, depth: number, parentPath: string }> = ({ item, depth, parentPath }) => {
     const [fileSystem, setFileSystem] = useAtom(fileSystemAtom);
     const [activeFile, setActiveFile] = useAtom(activeFileAtom);
+
+    const currentPath = parentPath ? `${parentPath}/${item.name}` : item.name;
 
     const toggleFolder = () => {
         if (item.type !== 'folder') return;
 
-        // Helper to recursively find and toggle
         const toggleItem = (nodes: FileSystemItem[]): FileSystemItem[] => {
             return nodes.map(node => {
                 if (node === item) {
@@ -55,13 +48,13 @@ const FileTreeNode: React.FC<{ item: FileSystemItem, depth: number }> = ({ item,
 
     const handleFileClick = () => {
         if (item.type === 'file') {
-            setActiveFile(item as FileNode);
+            setActiveFile({ path: currentPath, name: item.name, content: item.content });
         }
     };
 
     const isFolder = item.type === 'folder';
     const isOpen = (item as FolderNode).isOpen;
-    const isActive = activeFile?.name === item.name; // Simple name check for now, ideally path
+    const isActive = activeFile?.path === currentPath;
 
     return (
         <div className="select-none">
@@ -89,7 +82,7 @@ const FileTreeNode: React.FC<{ item: FileSystemItem, depth: number }> = ({ item,
             {isFolder && isOpen && (item as FolderNode).children && (
                 <div>
                     {(item as FolderNode).children.map((child, idx) => (
-                        <FileTreeNode key={idx} item={child} depth={depth + 1} />
+                        <FileTreeNode key={idx} item={child} depth={depth + 1} parentPath={currentPath} />
                     ))}
                 </div>
             )}
@@ -101,5 +94,6 @@ const FileIcon = ({ name }: { name: string }) => {
     if (name.endsWith('.tsx') || name.endsWith('.ts')) return <FileCode className="w-4 h-4 text-blue-400" />;
     if (name.endsWith('.css')) return <File className="w-4 h-4 text-sky-300" />;
     if (name.endsWith('.json')) return <FileJson className="w-4 h-4 text-yellow-400" />;
+    if (name.endsWith('.html')) return <File className="w-4 h-4 text-orange-400" />;
     return <File className="w-4 h-4 text-zinc-500" />;
 };

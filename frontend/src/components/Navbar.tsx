@@ -1,5 +1,6 @@
 import React from 'react';
-import { Twitter, Disc, Linkedin, User } from 'lucide-react';
+import { Twitter, Disc, Linkedin } from 'lucide-react';
+import { SignInButton, SignedIn, SignedOut, UserButton } from '@clerk/clerk-react'
 import logo from '../assets/nextgen-logo.png';
 
 export const Navbar: React.FC = () => {
@@ -22,9 +23,16 @@ export const Navbar: React.FC = () => {
                 <a href="#" className="hover:text-white transition-colors"><Disc className="w-5 h-5" /></a>
                 <a href="#" className="hover:text-white transition-colors"><Linkedin className="w-5 h-5" /></a>
                 <a href="#" className="hover:text-white transition-colors"><Twitter className="w-5 h-5" /></a>
-                <button className="flex items-center justify-center w-8 h-8 rounded-full bg-zinc-800 hover:bg-zinc-700 text-white transition-colors">
-                    <User className="w-4 h-4" />
-                </button>
+                <SignedIn>
+                    <UserButton />
+                </SignedIn>
+                <SignedOut>
+                    <SignInButton mode="modal">
+                        <button className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-500 transition-colors">
+                            Sign In
+                        </button>
+                    </SignInButton>
+                </SignedOut>
             </div>
         </header>
     );

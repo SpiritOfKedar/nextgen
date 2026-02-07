@@ -2,11 +2,7 @@ import React from 'react';
 import { Panel, Group, Separator } from 'react-resizable-panels';
 import { ChatPanel } from '../Chat/ChatPanel';
 import { Workbench } from '../Workbench/Workbench';
-// import { useAtomValue } from 'jotai';
-// import { isWorkbenchActiveAtom } from '../../store/atoms';
-
 export const MainLayout: React.FC = () => {
-    // const isWorkbenchActive = useAtomValue(isWorkbenchActiveAtom);
 
     return (
         <div className="h-screen w-full bg-zinc-950 text-white overflow-hidden font-sans">

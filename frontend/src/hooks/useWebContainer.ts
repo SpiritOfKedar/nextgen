@@ -41,11 +41,12 @@ export const useWebContainer = () => {
                     setServerUrl(url);
                 });
 
-                // Mount files only if this is the first time we set it in this session context
-                // (Though mounting multiple times on the same instance is generally okay, it overwrites)
-                console.log('Mounting files...');
-                const tree = convertToWebContainerTree(fileSystem);
-                await instance.mount(tree);
+                // Mount files if there are any in the file system
+                if (fileSystem.length > 0) {
+                    console.log('Mounting files...');
+                    const tree = convertToWebContainerTree(fileSystem);
+                    await instance.mount(tree);
+                }
 
                 setIsLoading(false);
             } catch (err) {
