@@ -1,6 +1,6 @@
 
 import React, { useEffect, useRef } from 'react';
-import { Check, CircleDashed, Loader2 } from 'lucide-react';
+import { FileCode, Terminal as TerminalIcon } from 'lucide-react';
 import { useAtomValue } from 'jotai';
 import { messagesAtom } from '../../store/atoms';
 
@@ -14,45 +14,33 @@ export const MessageList: React.FC = () => {
         }
     }, [messages]);
 
+    if (messages.length === 0) {
+        return (
+            <div className="flex items-center justify-center h-full text-zinc-500 text-sm">
+                Send a message to start building
+            </div>
+        );
+    }
+
     return (
-        <div className="space-y-6">
-            {/* Initial Prompt */}
-            <div className="text-zinc-400 text-sm">
-                I'll build a fully functional to-do list application with Bolt Database backend.
-            </div>
-
-            {/* Plan Component */}
-            <div className="space-y-4">
-                <div className="flex items-center gap-2 text-zinc-400 text-sm font-semibold uppercase tracking-wider">
-                    <span className="i-ph-list-dashes" /> Plan
-                </div>
-
-                <div className="space-y-3 pl-2 border-l-2 border-zinc-800">
-                    <PlanItem status="completed" text="Create database migration for todos table" />
-                    <PlanItem status="completed" text="Set up Bolt Database client" />
-                    <PlanItem status="current" text="Building to-do list UI components">
-                        <div className="ml-6 mt-1 text-xs text-zinc-500 font-mono flex items-center gap-2">
-                            <span className="inline-block w-1.5 h-1.5 rounded-full bg-zinc-500" />
-                            Reading <span className="text-zinc-300 bg-zinc-800 px-1 rounded">src/App.tsx</span>
-                        </div>
-                    </PlanItem>
-                    <PlanItem status="pending" text="Run build to verify functionality" />
-                </div>
-            </div>
-
-            {/* Dynamic Messages */}
+        <div className="space-y-4">
             {messages.map((msg) => (
                 <div
                     key={msg.id}
                     className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
                 >
                     <div
-                        className={`max-w-[80%] p-3 rounded-xl text-sm leading-relaxed ${msg.role === 'user'
-                            ? 'bg-blue-600 text-white rounded-br-none'
-                            : 'bg-zinc-800 text-zinc-300'
-                            }`}
+                        className={`max-w-[85%] rounded-xl text-sm leading-relaxed ${
+                            msg.role === 'user'
+                                ? 'bg-blue-600 text-white rounded-br-none p-3'
+                                : 'text-zinc-300'
+                        }`}
                     >
-                        {msg.content}
+                        {msg.role === 'assistant' ? (
+                            <AssistantMessage content={msg.content} />
+                        ) : (
+                            msg.content
+                        )}
                     </div>
                 </div>
             ))}
@@ -61,34 +49,46 @@ export const MessageList: React.FC = () => {
     );
 };
 
-interface PlanItemProps {
-    status: 'completed' | 'current' | 'pending';
-    text: string;
-    children?: React.ReactNode;
-}
-
-const PlanItem: React.FC<PlanItemProps> = ({ status, text, children }) => {
-    let Icon;
-    let textColor = "text-zinc-400";
-
-    if (status === 'completed') {
-        Icon = <Check className="w-5 h-5 text-green-500" />;
-        textColor = "text-zinc-300";
-    } else if (status === 'current') {
-        Icon = <Loader2 className="w-5 h-5 text-blue-500 animate-spin" />;
-        textColor = "text-zinc-200";
-    } else {
-        Icon = <CircleDashed className="w-5 h-5 text-zinc-600" />;
-        textColor = "text-zinc-500";
+// Renders assistant messages with file/shell action indicators
+const AssistantMessage: React.FC<{ content: string }> = ({ content }) => {
+    if (!content) {
+        return (
+            <div className="flex items-center gap-2 text-zinc-500">
+                <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-zinc-400" />
+                <span className="text-xs">Generating...</span>
+            </div>
+        );
     }
 
+    // Split content into lines and render
+    const lines = content.split('\n').filter(l => l.trim());
+
     return (
-        <div className="group">
-            <div className={`flex items-start gap-3 ${textColor}`}>
-                <div className="mt-0.5">{Icon}</div>
-                <span className="leading-relaxed">{text}</span>
-            </div>
-            {children}
+        <div className="space-y-2">
+            {lines.map((line, i) => {
+                // Detect file creation lines like "- Creating src/App.tsx"
+                const fileMatch = line.match(/(?:creating|writing|updating|adding)\s+[`']?([\w/.\-]+\.[\w]+)[`']?/i);
+                const shellMatch = line.match(/(?:installing|running|executing)\s+/i);
+
+                if (fileMatch) {
+                    return (
+                        <div key={i} className="flex items-center gap-2 px-3 py-1.5 bg-zinc-800/50 rounded-lg border border-zinc-700/50">
+                            <FileCode className="w-3.5 h-3.5 text-blue-400 shrink-0" />
+                            <span className="text-xs text-zinc-300">{line.replace(/^[-•*]\s*/, '')}</span>
+                        </div>
+                    );
+                }
+                if (shellMatch) {
+                    return (
+                        <div key={i} className="flex items-center gap-2 px-3 py-1.5 bg-zinc-800/50 rounded-lg border border-zinc-700/50">
+                            <TerminalIcon className="w-3.5 h-3.5 text-green-400 shrink-0" />
+                            <span className="text-xs text-zinc-300">{line.replace(/^[-•*]\s*/, '')}</span>
+                        </div>
+                    );
+                }
+
+                return <p key={i} className="text-zinc-300 text-sm leading-relaxed">{line}</p>;
+            })}
         </div>
     );
 };

@@ -4,19 +4,34 @@ import Editor, { useMonaco } from '@monaco-editor/react';
 import { useAtom, useAtomValue } from 'jotai';
 import { activeFileAtom, fileSystemAtom } from '../../store/fileSystem';
 import type { FolderNode, FileSystemItem } from '../../store/fileSystem';
+import { webContainerAtom } from '../../store/webContainer';
 
 interface EditorPanelProps {
     readOnly?: boolean;
 }
 
+const getLanguage = (fileName: string): string => {
+    const ext = fileName.split('.').pop()?.toLowerCase();
+    switch (ext) {
+        case 'ts': case 'tsx': return 'typescript';
+        case 'js': case 'jsx': return 'javascript';
+        case 'css': return 'css';
+        case 'html': return 'html';
+        case 'json': return 'json';
+        case 'md': return 'markdown';
+        case 'svg': case 'xml': return 'xml';
+        default: return 'plaintext';
+    }
+};
+
 export const EditorPanel: React.FC<EditorPanelProps> = ({
     readOnly = false
 }) => {
     const monaco = useMonaco();
-    const activeFile = useAtomValue(activeFileAtom);
+    const [activeFile, setActiveFile] = useAtom(activeFileAtom);
     const [fileSystem, setFileSystem] = useAtom(fileSystemAtom);
+    const webContainerInstance = useAtomValue(webContainerAtom);
 
-    // Initial load
     useEffect(() => {
         if (monaco) {
             monaco.editor.defineTheme('bolt-dark', {
@@ -24,36 +39,44 @@ export const EditorPanel: React.FC<EditorPanelProps> = ({
                 inherit: true,
                 rules: [],
                 colors: {
-                    'editor.background': '#09090b', // zinc-950
+                    'editor.background': '#09090b',
                 }
             });
             monaco.editor.setTheme('bolt-dark');
         }
     }, [monaco]);
 
-    // Handle content change: update the file system state
     const handleEditorChange = (value: string | undefined) => {
         if (!activeFile || value === undefined) return;
 
-        // Recursive update helper
-        const updateContent = (nodes: FileSystemItem[]): FileSystemItem[] => {
+        // Update file system atom tree
+        const updateContent = (nodes: FileSystemItem[], segments: string[]): FileSystemItem[] => {
+            const [current, ...rest] = segments;
             return nodes.map(node => {
-                if (node.name === activeFile.name && node.type === 'file') {
+                if (rest.length === 0 && node.name === current && node.type === 'file') {
                     return { ...node, content: value };
                 }
-                if (node.type === 'folder' && node.children) {
-                    return { ...node, children: updateContent(node.children) };
+                if (node.type === 'folder' && node.name === current && node.children) {
+                    return { ...node, children: updateContent(node.children, rest) };
                 }
                 return node;
             });
         };
 
-        const newFileSystem = updateContent(fileSystem) as FolderNode[];
+        const pathSegments = activeFile.path.split('/');
+        const newFileSystem = updateContent(fileSystem, pathSegments) as FolderNode[];
         setFileSystem(newFileSystem);
 
-        // Also update the active file atom itself so it stays in sync if we read from it elsewhere
-        // Note: activeFileAtom here is a copy, but in a real app we might rely on ID/Path.
-        // For now, this just triggers re-renders if needed.
+        // Keep activeFile in sync
+        setActiveFile({ ...activeFile, content: value });
+
+        // Write change to WebContainer
+        if (webContainerInstance) {
+            const wcPath = '/' + activeFile.path.replace(/^\//, '');
+            webContainerInstance.fs.writeFile(wcPath, value).catch(err => {
+                console.error(`[Editor] Failed to write ${wcPath}:`, err);
+            });
+        }
     };
 
     if (!activeFile) {
@@ -68,10 +91,14 @@ export const EditorPanel: React.FC<EditorPanelProps> = ({
 
     return (
         <div className="h-full w-full">
+            {/* Tab bar */}
+            <div className="h-8 border-b border-zinc-800 flex items-center px-3 bg-zinc-950 shrink-0">
+                <span className="text-xs text-zinc-400 truncate">{activeFile.path}</span>
+            </div>
             <Editor
-                height="100%"
-                defaultLanguage="typescript" // Should be dynamic based on ext
-                path={activeFile.name} // Important for Monaco model management
+                height="calc(100% - 32px)"
+                language={getLanguage(activeFile.name)}
+                path={activeFile.path}
                 value={activeFile.content}
                 onChange={handleEditorChange}
                 theme="bolt-dark"

@@ -1,28 +1,29 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { motion } from 'framer-motion';
-import { Paperclip, ArrowRight, Zap } from 'lucide-react';
-import { useSetAtom } from 'jotai';
-import { isWorkbenchActiveAtom, messagesAtom, type Message } from '../../store/atoms';
+import { Paperclip, ArrowRight } from 'lucide-react';
+import { useChat } from '../../hooks/useChat';
+import { ModelSelector } from './ModelSelector';
 
 export const InputArea: React.FC = () => {
     const [isFocused, setIsFocused] = useState(false);
     const [inputValue, setInputValue] = useState('');
-    const setIsWorkbenchActive = useSetAtom(isWorkbenchActiveAtom);
-    const setMessages = useSetAtom(messagesAtom);
+    const { sendMessage, isLoading } = useChat();
+    const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-    const handleSendMessage = () => {
-        if (!inputValue.trim()) return;
+    // Auto-resize textarea
+    useEffect(() => {
+        if (textareaRef.current) {
+            textareaRef.current.style.height = 'auto';
+            textareaRef.current.style.height = Math.min(textareaRef.current.scrollHeight, 400) + 'px';
+        }
+    }, [inputValue]);
 
-        const newMessage: Message = {
-            id: Date.now().toString(),
-            role: 'user',
-            content: inputValue,
-            timestamp: Date.now(),
-        };
-
-        setMessages((prev) => [...prev, newMessage]);
+    const handleSendMessage = async () => {
+        if (!inputValue.trim() || isLoading) return;
+        const content = inputValue;
         setInputValue('');
-        setIsWorkbenchActive(true);
+        if (textareaRef.current) textareaRef.current.style.height = 'auto'; // Reset height
+        await sendMessage(content);
     };
 
     const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -33,28 +34,39 @@ export const InputArea: React.FC = () => {
     };
 
     return (
-        <div className="w-full max-w-3xl mx-auto mb-10 px-4">
+        <div className="w-full max-w-4xl mx-auto px-4">
             <motion.div
-                className={`relative flex flex-col w-full bg-[#09090b] border rounded-3xl overflow-hidden transition-all duration-300 ${isFocused ? 'border-zinc-700 shadow-xl shadow-black/40' : 'border-zinc-800'}`}
+                className={`
+                    relative flex flex-col w-full 
+                    bg-zinc-900/80 backdrop-blur-xl 
+                    border 
+                    rounded-2xl overflow-hidden 
+                    transition-all duration-300 ease-out
+                    ${isFocused
+                        ? 'border-zinc-700/80 shadow-[0_0_40px_-10px_rgba(0,0,0,0.5)] ring-1 ring-zinc-700/50'
+                        : 'border-zinc-800/50 shadow-sm'
+                    }
+                `}
                 onFocus={() => setIsFocused(true)}
                 onBlur={() => setIsFocused(false)}
                 initial={{ y: 20, opacity: 0 }}
                 animate={{ y: 0, opacity: 1 }}
-                transition={{ delay: 0.3 }}
+                transition={{ delay: 0.1, duration: 0.4 }}
             >
                 <textarea
-                    className="w-full p-6 bg-transparent text-white placeholder-zinc-500 resize-none focus:outline-none text-lg leading-relaxed min-h-[140px] max-h-[400px]"
-                    placeholder="Describe your app..."
-                    rows={4}
+                    ref={textareaRef}
+                    className="w-full py-5 px-6 bg-transparent text-zinc-100 placeholder-zinc-500/80 resize-none focus:outline-none text-base md:text-lg leading-relaxed min-h-[100px] max-h-[400px] scrollbar-hide"
+                    placeholder="Describe your app idea..."
                     value={inputValue}
                     onChange={(e) => setInputValue(e.target.value)}
                     onKeyDown={handleKeyDown}
+                    style={{ overflow: 'hidden' }}
                 />
 
                 {/* Bottom Controls */}
-                <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4 bg-transparent mt-auto">
+                <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 px-4 py-3 bg-zinc-900/40 border-t border-white/5">
                     {/* Left: Attachment */}
-                    <div className="relative">
+                    <div className="flex items-center gap-2">
                         <input
                             type="file"
                             id="file-upload"
@@ -63,35 +75,40 @@ export const InputArea: React.FC = () => {
                         />
                         <button
                             onClick={() => document.getElementById('file-upload')?.click()}
-                            className="flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-zinc-400 hover:text-white hover:bg-zinc-800/50 rounded-lg transition-colors group"
+                            className="flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-zinc-400 hover:text-zinc-200 hover:bg-white/5 rounded-full transition-colors group"
                         >
-                            <Paperclip className="w-4 h-4" />
+                            <Paperclip className="w-3.5 h-3.5 group-hover:text-blue-400 transition-colors" />
                             <span>Add files</span>
                         </button>
                     </div>
 
                     {/* Right: Actions */}
-                    <div className="flex items-center gap-4">
-                        <div className="flex items-center gap-1.5 text-xs font-medium text-zinc-400">
-                            <Zap className="w-3 h-3 text-zinc-500" />
-                            <span>Sonnet 4.5</span>
-                        </div>
+                    <div className="flex items-center gap-2 justify-end">
+                        <ModelSelector side="top" />
 
                         <button
                             onClick={handleSendMessage}
-                            className={`flex items-center gap-2 px-4 py-2 text-sm font-semibold text-white bg-blue-600 hover:bg-blue-500 rounded-lg shadow-md shadow-blue-500/10 transition-all ${!inputValue.trim() ? 'opacity-50 cursor-not-allowed' : 'hover:scale-[1.02] active:scale-[0.98]'}`}
-                            disabled={!inputValue.trim()}
+                            className={`
+                                flex items-center gap-2 px-3.5 py-1.5 
+                                text-sm font-semibold text-white 
+                                bg-blue-600 hover:bg-blue-500 
+                                rounded-lg 
+                                shadow-[0_0_15px_-3px_rgba(37,99,235,0.4)] hover:shadow-[0_0_20px_-3px_rgba(37,99,235,0.6)]
+                                transition-all duration-200
+                                ${!inputValue.trim() || isLoading ? 'opacity-50 cursor-not-allowed grayscale' : 'hover:scale-[1.02] active:scale-[0.98]'}
+                            `}
+                            disabled={!inputValue.trim() || isLoading}
                         >
-                            <span>Build</span>
-                            <ArrowRight className="w-4 h-4 ml-1" />
+                            <span className="text-xs uppercase tracking-wide">{isLoading ? 'Building...' : 'Build'}</span>
+                            <ArrowRight className="w-3.5 h-3.5" />
                         </button>
                     </div>
                 </div>
             </motion.div>
 
-            <div className="text-center mt-6">
-                <p className="text-xs text-zinc-500 font-medium">
-                    Use <span className="text-zinc-400 transition-colors">Shift + Return</span> for new line
+            <div className="text-center mt-4">
+                <p className="text-[10px] uppercase tracking-widest text-zinc-600 font-medium">
+                    Shift + Return for new line
                 </p>
             </div>
         </div>
