@@ -222,7 +222,9 @@ export const useChat = () => {
             navigate('/builder');
 
             const parser = new BoltParser();
+            const pendingShellCommands: string[] = [];
 
+            // ── Phase 1: Read the stream — write files immediately, queue shell commands ──
             while (true) {
                 const { done, value } = await reader.read();
                 if (done) break;
@@ -230,7 +232,7 @@ export const useChat = () => {
                 const chunk = decoder.decode(value);
                 accumulatedContent += chunk;
 
-                // Parse for artifacts
+                // Parse for artifacts (parser now returns ALL complete actions per call)
                 const actions = parser.parse(chunk);
 
                 // Get WC instance — atom or module fallback
@@ -241,7 +243,7 @@ export const useChat = () => {
                         const path = action.filePath;
                         const fileContent = action.content;
 
-                        // Write to WebContainer
+                        // Write to WebContainer immediately so files are ready
                         if (wc) {
                             try {
                                 const absPath = '/' + path.replace(/^\//, '');
@@ -267,41 +269,10 @@ export const useChat = () => {
                         setActiveFile({ path: path.replace(/^\//, ''), name: fileName, content: fileContent });
                     }
                     if (action.type === 'shell') {
-                        const command = action.content.trim();
-
-                        if (wc) {
-                            try {
-                                writeShellOutput(`\r\n\x1b[36m❯ ${command}\x1b[0m\r\n`);
-
-                                // Parse command into program + args and spawn directly.
-                                // We do NOT use jsh -c because jsh doesn't exit after
-                                // the command finishes, so await proc.exit hangs forever.
-                                const parts = command.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) || [command];
-                                const program = parts[0];
-                                let args = parts.slice(1).map((a: string) => a.replace(/^["']|["']$/g, ''));
-
-                                // Prevent ERESOLVE peer-dep failures
-                                if (program === 'npm' && args[0] === 'install') {
-                                    if (!args.includes('--legacy-peer-deps')) {
-                                        args.push('--legacy-peer-deps');
-                                    }
-                                }
-
-                                const proc = await wc.spawn(program, args, { cwd: '/' });
-                                proc.output.pipeTo(new WritableStream({
-                                    write(data) { writeShellOutput(data); }
-                                }));
-
-                                // For long-running commands like "npm run dev", don't block.
-                                // For install commands, we MUST wait for completion.
-                                const isLongRunning = /\b(dev|start|serve|watch)\b/.test(command);
-                                if (!isLongRunning) {
-                                    await proc.exit;
-                                }
-                            } catch (err) {
-                                console.error(`[Bolt] spawn failed for "${command}":`, err);
-                            }
-                        }
+                        // Queue shell commands — don't execute during stream reading
+                        // because `await proc.exit` would block the reader and cause
+                        // subsequent actions to be missed.
+                        pendingShellCommands.push(action.content.trim());
                     }
                 }
 
@@ -312,6 +283,68 @@ export const useChat = () => {
                             : msg
                     )
                 );
+            }
+
+            // Flush any remaining buffered actions from the parser
+            const remaining = parser.parse('');
+            for (const action of remaining) {
+                if (action.type === 'file' && action.filePath) {
+                    const path = action.filePath;
+                    const fileContent = action.content;
+                    const wc = webContainerInstance ?? getWebContainerInstance();
+                    if (wc) {
+                        try {
+                            const absPath = '/' + path.replace(/^\//, '');
+                            const dir = absPath.substring(0, absPath.lastIndexOf('/'));
+                            if (dir && dir !== '/') {
+                                try { await wc.fs.mkdir(dir, { recursive: true }); } catch { /* exists */ }
+                            }
+                            await wc.fs.writeFile(absPath, fileContent);
+                        } catch (err) {
+                            console.error(`[Bolt] Failed to write ${path}:`, err);
+                        }
+                    }
+                    setFileSystem((prev) => upsertFile(prev, path, fileContent));
+                    const fileName = path.split('/').pop()!;
+                    setActiveFile({ path: path.replace(/^\//, ''), name: fileName, content: fileContent });
+                }
+                if (action.type === 'shell') {
+                    pendingShellCommands.push(action.content.trim());
+                }
+            }
+
+            // ── Phase 2: Execute queued shell commands sequentially ──
+            const wc = webContainerInstance ?? getWebContainerInstance();
+            if (wc && pendingShellCommands.length > 0) {
+                for (const command of pendingShellCommands) {
+                    try {
+                        writeShellOutput(`\r\n\x1b[36m❯ ${command}\x1b[0m\r\n`);
+
+                        const parts = command.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) || [command];
+                        const program = parts[0];
+                        let args = parts.slice(1).map((a: string) => a.replace(/^["']|["']$/g, ''));
+
+                        // Prevent ERESOLVE peer-dep failures
+                        if (program === 'npm' && args[0] === 'install') {
+                            if (!args.includes('--legacy-peer-deps')) {
+                                args.push('--legacy-peer-deps');
+                            }
+                        }
+
+                        const proc = await wc.spawn(program, args, { cwd: '/' });
+                        proc.output.pipeTo(new WritableStream({
+                            write(data) { writeShellOutput(data); }
+                        }));
+
+                        // For long-running commands like "npm run dev", don't block.
+                        const isLongRunning = /\b(dev|start|serve|watch)\b/.test(command);
+                        if (!isLongRunning) {
+                            await proc.exit;
+                        }
+                    } catch (err) {
+                        console.error(`[Bolt] spawn failed for "${command}":`, err);
+                    }
+                }
             }
 
         } catch (error) {
