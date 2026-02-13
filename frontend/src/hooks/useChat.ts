@@ -179,7 +179,10 @@ export const useChat = () => {
                 },
                 body: JSON.stringify({
                     message: content,
-                    threadId: currentThreadId,
+                    // Read threadId from localStorage for freshest value —
+                    // the atom value in the closure may be stale if LandingPage
+                    // just cleared it before this async function continues.
+                    threadId: localStorage.getItem('currentThreadId') || null,
                     model: selectedModel,
                 }),
             });
