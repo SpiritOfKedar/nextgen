@@ -72,10 +72,8 @@ export const ChatPanel: React.FC = () => {
                 </div>
 
                 {/* Input Area */}
-                <div className="sticky bottom-0 left-0 w-full px-4 pb-6 pt-10 bg-gradient-to-t from-zinc-950 via-zinc-950/95 to-transparent z-10 pointer-events-none">
-                    <div className="pointer-events-auto">
-                        <InputArea />
-                    </div>
+                <div className="sticky bottom-0 left-0 w-full px-4 pb-6 pt-10 bg-linear-to-t from-zinc-950 via-zinc-950/95 to-transparent z-20">
+                    <InputArea />
                 </div>
             </div>
 
