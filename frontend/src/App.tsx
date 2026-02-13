@@ -1,6 +1,5 @@
 import { useEffect } from 'react';
 import { useAuth } from '@clerk/clerk-react';
-import { useChat } from './hooks/useChat';
 import { LandingPage } from './components/LandingPage';
 import { MainLayout } from './components/Layout/MainLayout';
 import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
@@ -8,7 +7,6 @@ import { AnimatePresence, motion } from 'framer-motion';
 
 function App() {
   const { isSignedIn, isLoaded, getToken } = useAuth();
-  const { loadThread } = useChat();
   const location = useLocation();
 
   // Sync user to MongoDB as soon as they sign in
@@ -30,18 +28,6 @@ function App() {
     };
     syncUser();
   }, [isLoaded, isSignedIn, getToken]);
-
-  // Restore thread when landing on /builder with a saved thread
-  useEffect(() => {
-    if (!isLoaded || !isSignedIn) return;
-    if (location.pathname === '/builder') {
-      const savedThreadId = localStorage.getItem('currentThreadId');
-      if (savedThreadId) {
-        console.log('[App] Restoring thread:', savedThreadId);
-        loadThread(savedThreadId);
-      }
-    }
-  }, [isLoaded, isSignedIn]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <AnimatePresence mode="wait">

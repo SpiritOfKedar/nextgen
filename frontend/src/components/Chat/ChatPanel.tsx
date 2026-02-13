@@ -1,22 +1,48 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { InputArea } from './InputArea';
 import { MessageList } from './MessageList';
 import { ThreadList } from './ThreadList';
 import { PanelLeft, Plus } from 'lucide-react';
 import logo from '../../assets/nextgen-logo.png';
-import { UserButton } from '@clerk/clerk-react';
-import { useSetAtom } from 'jotai';
+import { UserButton, useAuth } from '@clerk/clerk-react';
+import { useSetAtom, useAtom } from 'jotai';
 import { messagesAtom, currentThreadIdAtom } from '../../store/atoms';
 import { useNavigate } from 'react-router-dom';
 import { fileSystemAtom, activeFileAtom } from '../../store/fileSystem';
+import { useChat } from '../../hooks/useChat';
 
 export const ChatPanel: React.FC = () => {
     const [isThreadListOpen, setIsThreadListOpen] = useState(false);
     const navigate = useNavigate();
-    const setMessages = useSetAtom(messagesAtom);
-    const setCurrentThreadId = useSetAtom(currentThreadIdAtom);
+    const [messages, setMessages] = useAtom(messagesAtom);
+    const [currentThreadId, setCurrentThreadId] = useAtom(currentThreadIdAtom);
     const setFileSystem = useSetAtom(fileSystemAtom);
     const setActiveFile = useSetAtom(activeFileAtom);
+
+    const { fetchThreads, loadThread } = useChat();
+    const { isLoaded, isSignedIn } = useAuth();
+    const hasRestoredSession = useRef(false);
+
+    // Pre-fetch thread list as soon as auth is ready
+    useEffect(() => {
+        if (isLoaded && isSignedIn) {
+            fetchThreads();
+        }
+    }, [isLoaded, isSignedIn, fetchThreads]);
+
+    // Auto-restore saved thread if builder has no messages yet
+    useEffect(() => {
+        if (
+            !hasRestoredSession.current &&
+            isLoaded &&
+            isSignedIn &&
+            currentThreadId &&
+            messages.length === 0
+        ) {
+            hasRestoredSession.current = true;
+            loadThread(currentThreadId);
+        }
+    }, [isLoaded, isSignedIn, currentThreadId, loadThread, messages.length]);
 
     const handleNewChat = () => {
         setMessages([]);
@@ -24,6 +50,7 @@ export const ChatPanel: React.FC = () => {
         setFileSystem([]);
         setActiveFile(null);
         localStorage.removeItem('currentThreadId');
+        hasRestoredSession.current = true; // prevent re-restore after manual clear
     };
 
     return (
