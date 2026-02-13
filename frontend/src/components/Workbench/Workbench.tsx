@@ -68,7 +68,7 @@ export const Workbench: React.FC = () => {
             <div className="flex-1 overflow-hidden relative">
                 {activeTab === 'code' && <CodeView />}
                 {activeTab === 'preview' && <PreviewPanel />}
-                {activeTab === 'terminal' && <TerminalView />}
+                {activeTab === 'terminal' && <TerminalPanel />}
             </div>
         </div>
     );
@@ -99,13 +99,4 @@ const CodeView = () => (
             <EditorPanel />
         </div>
     </div>
-);
-
-
-
-
-
-
-const TerminalView = () => (
-    <TerminalPanel />
 );

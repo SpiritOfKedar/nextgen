@@ -1,7 +1,8 @@
 import { useCallback, useState } from 'react';
 import { useAtom, useSetAtom, useAtomValue } from 'jotai';
 import { messagesAtom, currentThreadIdAtom, threadsAtom, selectedModelAtom } from '../store/atoms';
-import { webContainerAtom } from '../store/webContainer';
+import { webContainerAtom, writeShellOutput } from '../store/webContainer';
+import { getWebContainerInstance } from './useWebContainer';
 import { fileSystemAtom, activeFileAtom } from '../store/fileSystem';
 import type { FileSystemItem, FileNode, FolderNode, ActiveFile } from '../store/fileSystem';
 import { useAuth } from '@clerk/clerk-react';
@@ -170,7 +171,6 @@ export const useChat = () => {
                 console.error('[useChat] Failed to get token. Aborting send.');
                 return;
             }
-            console.log('[useChat] Got token, sending message...');
             const response = await fetch(`${API_URL}/chat`, {
                 method: 'POST',
                 headers: {
@@ -230,25 +230,27 @@ export const useChat = () => {
                 // Parse for artifacts
                 const actions = parser.parse(chunk);
 
+                // Get WC instance — atom or module fallback
+                const wc = webContainerInstance ?? getWebContainerInstance();
+
                 for (const action of actions) {
                     if (action.type === 'file' && action.filePath) {
                         const path = action.filePath;
                         const fileContent = action.content;
-                        console.log(`[Bolt] Writing file: ${path}`);
 
                         // Write to WebContainer
-                        if (webContainerInstance) {
+                        if (wc) {
                             try {
-                                // Ensure parent directories exist
-                                const dir = path.substring(0, path.lastIndexOf('/'));
-                                if (dir) {
+                                const absPath = '/' + path.replace(/^\//, '');
+                                const dir = absPath.substring(0, absPath.lastIndexOf('/'));
+                                if (dir && dir !== '/') {
                                     try {
-                                        await webContainerInstance.fs.mkdir(dir, { recursive: true });
+                                        await wc.fs.mkdir(dir, { recursive: true });
                                     } catch {
                                         // Directory may already exist, ignore
                                     }
                                 }
-                                await webContainerInstance.fs.writeFile('/' + path.replace(/^\//, ''), fileContent);
+                                await wc.fs.writeFile(absPath, fileContent);
                             } catch (err) {
                                 console.error(`[Bolt] Failed to write ${path}:`, err);
                             }
@@ -263,21 +265,38 @@ export const useChat = () => {
                     }
                     if (action.type === 'shell') {
                         const command = action.content.trim();
-                        console.log(`[Bolt] Executing shell: ${command}`);
-                        if (webContainerInstance) {
+
+                        if (wc) {
                             try {
-                                const process = await webContainerInstance.spawn('sh', ['-c', command]);
-                                // Consume output silently — only log meaningful lines, skip ANSI noise
-                                process.output.pipeTo(new WritableStream({
-                                    write(data) {
-                                        const clean = data.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').trim();
-                                        if (clean && clean.length > 1) {
-                                            console.log(`[Shell] ${clean}`);
-                                        }
+                                writeShellOutput(`\r\n\x1b[36m❯ ${command}\x1b[0m\r\n`);
+
+                                // Parse command into program + args and spawn directly.
+                                // We do NOT use jsh -c because jsh doesn't exit after
+                                // the command finishes, so await proc.exit hangs forever.
+                                const parts = command.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) || [command];
+                                const program = parts[0];
+                                let args = parts.slice(1).map((a: string) => a.replace(/^["']|["']$/g, ''));
+
+                                // Prevent ERESOLVE peer-dep failures
+                                if (program === 'npm' && args[0] === 'install') {
+                                    if (!args.includes('--legacy-peer-deps')) {
+                                        args.push('--legacy-peer-deps');
                                     }
+                                }
+
+                                const proc = await wc.spawn(program, args, { cwd: '/' });
+                                proc.output.pipeTo(new WritableStream({
+                                    write(data) { writeShellOutput(data); }
                                 }));
+
+                                // For long-running commands like "npm run dev", don't block.
+                                // For install commands, we MUST wait for completion.
+                                const isLongRunning = /\b(dev|start|serve|watch)\b/.test(command);
+                                if (!isLongRunning) {
+                                    await proc.exit;
+                                }
                             } catch (err) {
-                                console.error(`[Bolt] Failed to execute shell:`, err);
+                                console.error(`[Bolt] spawn failed for "${command}":`, err);
                             }
                         }
                     }
@@ -338,38 +357,180 @@ export const useChat = () => {
             if (res.ok) {
                 const rawMessages = await res.json();
 
+                // Get the WebContainer instance — prefer atom, fallback to module singleton
+                const wc = webContainerInstance ?? getWebContainerInstance();
+
                 // Rebuild file system from all assistant messages
                 let restoredFileSystem: FileSystemItem[] = [];
                 let lastFile: ActiveFile | null = null;
+
+                // Collect ALL file paths and contents
+                const fileMap = new Map<string, string>();
 
                 for (const m of rawMessages) {
                     if (m.role === 'assistant') {
                         const fileActions = extractFileActions(m.content);
                         for (const action of fileActions) {
                             if (action.filePath) {
+                                const normalizedPath = action.filePath.replace(/^\//, '');
                                 restoredFileSystem = upsertFile(restoredFileSystem, action.filePath, action.content);
                                 const fileName = action.filePath.split('/').pop()!;
-                                lastFile = { path: action.filePath.replace(/^\//, ''), name: fileName, content: action.content };
-
-                                // Write to WebContainer too
-                                if (webContainerInstance) {
-                                    try {
-                                        const dir = action.filePath.substring(0, action.filePath.lastIndexOf('/'));
-                                        if (dir) {
-                                            try {
-                                                await webContainerInstance.fs.mkdir(dir, { recursive: true });
-                                            } catch { /* ignore */ }
-                                        }
-                                        await webContainerInstance.fs.writeFile(
-                                            '/' + action.filePath.replace(/^\//, ''),
-                                            action.content
-                                        );
-                                    } catch (err) {
-                                        console.error(`[loadThread] Failed to write ${action.filePath}:`, err);
-                                    }
-                                }
+                                lastFile = { path: normalizedPath, name: fileName, content: action.content };
+                                fileMap.set(normalizedPath, action.content);
                             }
                         }
+                    }
+                }
+
+                // Write all files to WebContainer
+                if (wc && fileMap.size > 0) {
+                    // If the AI didn't generate package.json, index.html, or vite.config,
+                    // provide sensible defaults so npm install can work.
+                    if (!fileMap.has('package.json')) {
+                        const defaultPkg = JSON.stringify({
+                            name: 'restored-project',
+                            private: true,
+                            version: '0.0.0',
+                            type: 'module',
+                            scripts: { dev: 'vite', build: 'vite build' },
+                            dependencies: {
+                                'react': '^18.3.1',
+                                'react-dom': '^18.3.1',
+                                'lucide-react': '^0.400.0',
+                                'clsx': '^2.1.0',
+                                'tailwind-merge': '^2.2.0',
+                                'class-variance-authority': '^0.7.0',
+                                '@radix-ui/react-slot': '^1.0.0',
+                            },
+                            devDependencies: {
+                                '@types/react': '^18.3.0',
+                                '@types/react-dom': '^18.3.0',
+                                '@vitejs/plugin-react': '^4.3.0',
+                                'typescript': '^5.5.0',
+                                'vite': '^5.4.0',
+                                'tailwindcss': '^4.0.0',
+                                '@tailwindcss/vite': '^4.0.0',
+                            },
+                        }, null, 2);
+                        fileMap.set('package.json', defaultPkg);
+                        restoredFileSystem = upsertFile(restoredFileSystem, 'package.json', defaultPkg);
+                    }
+
+                    if (!fileMap.has('index.html')) {
+                        const defaultHtml = `<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>App</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>`;
+                        fileMap.set('index.html', defaultHtml);
+                    }
+
+                    if (!fileMap.has('vite.config.ts')) {
+                        const defaultVite = `import { defineConfig } from 'vite';
+import react from '@vitejs/plugin-react';
+import tailwindcss from '@tailwindcss/vite';
+
+export default defineConfig({
+  plugins: [react(), tailwindcss()],
+});
+`;
+                        fileMap.set('vite.config.ts', defaultVite);
+                    }
+
+                    if (!fileMap.has('tsconfig.json')) {
+                        const defaultTsconfig = JSON.stringify({
+                            compilerOptions: {
+                                target: 'ES2020',
+                                useDefineForClassFields: true,
+                                lib: ['ES2020', 'DOM', 'DOM.Iterable'],
+                                module: 'ESNext',
+                                skipLibCheck: true,
+                                moduleResolution: 'bundler',
+                                allowImportingTsExtensions: true,
+                                resolveJsonModule: true,
+                                isolatedModules: true,
+                                noEmit: true,
+                                jsx: 'react-jsx',
+                                strict: true,
+                            },
+                            include: ['src'],
+                        }, null, 2);
+                        fileMap.set('tsconfig.json', defaultTsconfig);
+                    }
+
+                    // Tailwind v4: ensure src/index.css uses @import "tailwindcss" (not v3 directives)
+                    const existingCss = fileMap.get('src/index.css') || '';
+                    if (!existingCss.includes('@import "tailwindcss"') && !existingCss.includes("@import 'tailwindcss'")) {
+                        // Prepend the v4 import to whatever CSS exists (or create fresh)
+                        const fixedCss = '@import "tailwindcss";\n' + existingCss.replace(/@tailwind\s+(base|components|utilities);?\s*/g, '');
+                        fileMap.set('src/index.css', fixedCss);
+                    }
+
+                    // Ensure src/main.tsx imports index.css
+                    if (!fileMap.has('src/main.tsx')) {
+                        const defaultMain = `import { StrictMode } from 'react';
+import { createRoot } from 'react-dom/client';
+import './index.css';
+import App from './App';
+
+createRoot(document.getElementById('root')!).render(
+  <StrictMode>
+    <App />
+  </StrictMode>
+);
+`;
+                        fileMap.set('src/main.tsx', defaultMain);
+                    } else {
+                        // Make sure existing main.tsx imports index.css
+                        const mainContent = fileMap.get('src/main.tsx')!;
+                        if (!mainContent.includes('index.css')) {
+                            fileMap.set('src/main.tsx', "import './index.css';\n" + mainContent);
+                        }
+                    }
+
+                    // Write each file using fs.writeFile with proper directory creation
+                    for (const [filePath, content] of fileMap) {
+                        try {
+                            const absPath = '/' + filePath;
+                            const dir = absPath.substring(0, absPath.lastIndexOf('/'));
+                            if (dir && dir !== '/') {
+                                try { await wc.fs.mkdir(dir, { recursive: true }); } catch { /* exists */ }
+                            }
+                            await wc.fs.writeFile(absPath, content);
+                        } catch (err) {
+                            console.error(`[loadThread] Failed to write ${filePath}:`, err);
+                        }
+                    }
+
+                    // Run npm install then npm run dev using direct spawn
+                    try {
+                        writeShellOutput('\r\n\x1b[36m⬢ Installing dependencies...\x1b[0m\r\n');
+                        const installProc = await wc.spawn('npm', ['install', '--no-audit', '--no-fund', '--legacy-peer-deps'], { cwd: '/' });
+                        installProc.output.pipeTo(new WritableStream({
+                            write(data) { writeShellOutput(data); }
+                        }));
+                        const installExit = await installProc.exit;
+
+                        if (installExit === 0) {
+                            writeShellOutput('\r\n\x1b[36m⬢ Starting dev server...\x1b[0m\r\n');
+                            const devProc = await wc.spawn('npm', ['run', 'dev'], { cwd: '/' });
+                            devProc.output.pipeTo(new WritableStream({
+                                write(data) { writeShellOutput(data); }
+                            }));
+                            // Don't await — long-running server
+                        } else {
+                            writeShellOutput(`\r\n\x1b[31m✗ npm install failed (exit ${installExit})\x1b[0m\r\n`);
+                        }
+                    } catch (err) {
+                        console.error('[loadThread] install error:', err);
+                        writeShellOutput(`\r\n\x1b[31m✗ Install error: ${err}\x1b[0m\r\n`);
                     }
                 }
 

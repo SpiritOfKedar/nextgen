@@ -5,10 +5,11 @@ import { ThreadList } from './ThreadList';
 import { PanelLeft, Plus } from 'lucide-react';
 import logo from '../../assets/nextgen-logo.png';
 import { UserButton, useAuth } from '@clerk/clerk-react';
-import { useSetAtom, useAtom } from 'jotai';
+import { useSetAtom, useAtom, useAtomValue } from 'jotai';
 import { messagesAtom, currentThreadIdAtom } from '../../store/atoms';
 import { useNavigate } from 'react-router-dom';
 import { fileSystemAtom, activeFileAtom } from '../../store/fileSystem';
+import { webContainerAtom } from '../../store/webContainer';
 import { useChat } from '../../hooks/useChat';
 
 export const ChatPanel: React.FC = () => {
@@ -18,6 +19,7 @@ export const ChatPanel: React.FC = () => {
     const [currentThreadId, setCurrentThreadId] = useAtom(currentThreadIdAtom);
     const setFileSystem = useSetAtom(fileSystemAtom);
     const setActiveFile = useSetAtom(activeFileAtom);
+    const webContainer = useAtomValue(webContainerAtom);
 
     const { fetchThreads, loadThread } = useChat();
     const { isLoaded, isSignedIn } = useAuth();
@@ -30,19 +32,24 @@ export const ChatPanel: React.FC = () => {
         }
     }, [isLoaded, isSignedIn, fetchThreads]);
 
-    // Auto-restore saved thread if builder has no messages yet
+    // Auto-restore saved thread — wait for BOTH auth AND WebContainer to be ready
+    // so that loadThread can write files and spawn install/dev processes.
+    // hasRestoredSession is set SYNCHRONOUSLY before the async call so
+    // React re-renders (from loadThread changing atoms mid-flight) cannot
+    // trigger the effect a second time.
     useEffect(() => {
         if (
-            !hasRestoredSession.current &&
-            isLoaded &&
-            isSignedIn &&
-            currentThreadId &&
-            messages.length === 0
-        ) {
-            hasRestoredSession.current = true;
-            loadThread(currentThreadId);
-        }
-    }, [isLoaded, isSignedIn, currentThreadId, loadThread, messages.length]);
+            hasRestoredSession.current ||
+            !isLoaded ||
+            !isSignedIn ||
+            !webContainer ||
+            !currentThreadId ||
+            messages.length !== 0
+        ) return;
+
+        hasRestoredSession.current = true;   // ← set immediately, before async work
+        loadThread(currentThreadId);
+    }, [isLoaded, isSignedIn, webContainer, currentThreadId, loadThread, messages.length]);
 
     const handleNewChat = () => {
         setMessages([]);
