@@ -61,5 +61,17 @@ export const chatController = {
             console.error('Thread Error:', error);
             res.status(500).json({ error: 'Failed to fetch thread' });
         }
+    },
+
+    async getThreadFiles(req: Request, res: Response) {
+        try {
+            if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+            const { threadId } = req.params;
+            const files = await chatService.getThreadFiles(threadId as string, req.user.id);
+            res.json(files);
+        } catch (error) {
+            console.error('Thread Files Error:', error);
+            res.status(500).json({ error: 'Failed to fetch thread files' });
+        }
     }
 };

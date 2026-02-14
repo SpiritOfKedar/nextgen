@@ -16,6 +16,8 @@ router.post('/chat', authMiddleware, chatController.sendMessage);
 router.get('/chat/history', authMiddleware, chatController.getHistory);
 // @ts-ignore
 router.get('/chat/:threadId', authMiddleware, chatController.getThread);
+// @ts-ignore
+router.get('/chat/:threadId/files', authMiddleware, chatController.getThreadFiles);
 
 router.get('/', (req, res) => {
     res.json({ message: 'Welcome to NextGen API' });
