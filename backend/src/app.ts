@@ -7,7 +7,18 @@ import apiRouter from './routes';
 
 // Middleware
 app.use(cors({
-    origin: process.env.FRONTEND_URL || 'http://localhost:5173',
+    origin: (origin, callback) => {
+        // Allow requests with no origin (e.g. curl, server-to-server)
+        if (!origin) return callback(null, true);
+        // Allow any localhost origin in development
+        if (/^https?:\/\/localhost(:\d+)?$/.test(origin)) {
+            return callback(null, origin);
+        }
+        // Also allow the configured FRONTEND_URL
+        const allowed = process.env.FRONTEND_URL || 'http://localhost:5173';
+        if (origin === allowed) return callback(null, origin);
+        callback(new Error(`CORS: origin ${origin} not allowed`));
+    },
     credentials: true,
     exposedHeaders: ['X-Thread-Id'],
 }));

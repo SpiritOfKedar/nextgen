@@ -172,8 +172,37 @@ export class ChatService {
         // 3. Update Thread timestamp
         await Thread.findByIdAndUpdate(threadId, { updatedAt: new Date() });
 
-        // 4. Fetch Conversation History
-        const messages = await Message.find({ threadId }).sort({ createdAt: 1 });
+        // 4. Build smart context — inject file snapshot + recent messages only
+        const thread = await Thread.findById(threadId);
+        const fileSnapshot = thread?.files || [];
+
+        // Build an enhanced system prompt with the current file state
+        let enhancedSystemPrompt = SYSTEM_PROMPT;
+        if (fileSnapshot.length > 0) {
+            enhancedSystemPrompt += '\n\n--- CURRENT PROJECT FILES ---\n';
+            enhancedSystemPrompt += 'Below is the current state of ALL files in the user\'s project. ';
+            enhancedSystemPrompt += 'When the user asks for modifications, update ONLY the changed files (do not re-emit unchanged files).\n';
+            for (const f of fileSnapshot) {
+                enhancedSystemPrompt += `\n--- ${f.filePath} ---\n${f.content}\n`;
+            }
+            enhancedSystemPrompt += '\n--- END OF PROJECT FILES ---\n';
+        }
+
+        // Fetch only recent messages (last 10) for conversational context,
+        // use stripped content since full codebase is already in the system prompt.
+        const recentMessages = await Message.find({ threadId })
+            .sort({ createdAt: -1 })
+            .limit(10)
+            .lean();
+        recentMessages.reverse(); // chronological order
+
+        // Use display content (stripped) for conversation context to save tokens
+        const messages = recentMessages.map(m => ({
+            role: m.role,
+            content: m.content || '(no content)',
+        }));
+
+        console.log(`[ChatService] Context: ${fileSnapshot.length} files in snapshot, ${messages.length} recent messages`);
 
         // 5. Generate AI Response
         let stream;
@@ -184,13 +213,13 @@ export class ChatService {
             } else {
                 switch (modelConfig.provider) {
                     case 'openai':
-                        stream = await this.streamOpenAI(messages, modelConfig.apiModelId);
+                        stream = await this.streamOpenAI(messages, modelConfig.apiModelId, enhancedSystemPrompt);
                         break;
                     case 'anthropic':
-                        stream = await this.streamAnthropic(messages, modelConfig.apiModelId);
+                        stream = await this.streamAnthropic(messages, modelConfig.apiModelId, enhancedSystemPrompt);
                         break;
                     case 'google':
-                        stream = await this.streamGemini(messages, modelConfig.apiModelId);
+                        stream = await this.streamGemini(messages, modelConfig.apiModelId, enhancedSystemPrompt);
                         break;
                     default:
                         stream = this.mockStream(`Unknown provider: ${modelConfig.provider}. Using mock.`, threadId!);
@@ -261,19 +290,14 @@ export class ChatService {
         return m.content;
     }
 
-    private async *streamOpenAI(messages: any[], apiModelId: string) {
+    private async *streamOpenAI(messages: any[], apiModelId: string, systemPrompt: string) {
         if (!this.openai) throw new Error('OpenAI API Key not configured');
-
-        const formattedMessages = messages.map(m => ({
-            role: m.role,
-            content: this.getMessageContent(m)
-        }));
 
         const stream = await this.openai.chat.completions.create({
             model: apiModelId,
             messages: [
-                { role: 'system', content: SYSTEM_PROMPT },
-                ...formattedMessages
+                { role: 'system', content: systemPrompt },
+                ...messages
             ],
             stream: true,
         });
@@ -284,19 +308,30 @@ export class ChatService {
         }
     }
 
-    private async *streamAnthropic(messages: any[], apiModelId: string) {
+    private async *streamAnthropic(messages: any[], apiModelId: string, systemPrompt: string) {
         if (!this.anthropic) throw new Error('Anthropic API Key not configured');
 
-        const formattedMessages = messages.map(m => ({
-            role: m.role,
-            content: this.getMessageContent(m)
-        }));
+        // Anthropic requires strictly alternating user/assistant messages.
+        // Merge consecutive same-role messages to avoid 400 errors.
+        const merged: { role: 'user' | 'assistant'; content: string }[] = [];
+        for (const m of messages) {
+            if (merged.length > 0 && merged[merged.length - 1].role === m.role) {
+                merged[merged.length - 1].content += '\n\n' + m.content;
+            } else {
+                merged.push({ role: m.role, content: m.content });
+            }
+        }
+
+        // Ensure the conversation starts with a user message
+        if (merged.length > 0 && merged[0].role !== 'user') {
+            merged.unshift({ role: 'user', content: '(conversation continued)' });
+        }
 
         const stream = await this.anthropic.messages.create({
             model: apiModelId,
-            max_tokens: 16384,
-            system: SYSTEM_PROMPT,
-            messages: formattedMessages,
+            max_tokens: 8192,
+            system: systemPrompt,
+            messages: merged,
             stream: true,
         });
 
@@ -307,7 +342,7 @@ export class ChatService {
         }
     }
 
-    private async *streamGemini(messages: any[], apiModelId: string) {
+    private async *streamGemini(messages: any[], apiModelId: string, systemPrompt: string) {
         if (!this.gemini) throw new Error('Gemini API Key not configured');
 
         // Import the safety settings types
@@ -315,7 +350,7 @@ export class ChatService {
 
         const model = this.gemini.getGenerativeModel({
             model: apiModelId,
-            systemInstruction: SYSTEM_PROMPT,
+            systemInstruction: systemPrompt,
             generationConfig: {
                 temperature: 0.7,
             },
@@ -331,7 +366,7 @@ export class ChatService {
         // Gemini history format (exclude last message which is the new user prompt)
         const history = messages.slice(0, -1).map(m => ({
             role: m.role === 'assistant' ? 'model' : 'user',
-            parts: [{ text: this.getMessageContent(m) }]
+            parts: [{ text: m.content }]
         }));
 
         const chat = model.startChat({

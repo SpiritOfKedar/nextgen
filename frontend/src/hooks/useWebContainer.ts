@@ -63,7 +63,7 @@ export const useWebContainer = () => {
                     try {
                         const shellProcess = await instance.spawn('jsh', {
                             terminal: { cols: 80, rows: 24 },
-                            env: { FORCE_COLOR: '1', TERM: 'xterm-256color', HOME: '/' },
+                            env: { FORCE_COLOR: '1', TERM: 'xterm-256color' },
                         });
 
                         shellProcess.output.pipeTo(
@@ -76,13 +76,8 @@ export const useWebContainer = () => {
 
                         const writer = shellProcess.input.getWriter();
 
-                        // Navigate to filesystem root BEFORE signaling ready.
-                        // All files are written to / via fs.writeFile, so the
-                        // shell CWD must match — otherwise npm can't find package.json.
-                        await writer.write('cd /\n');
-
-                        // Give jsh time to execute `cd /` before anyone sends more commands.
-                        await new Promise(r => setTimeout(r, 500));
+                        // Shell CWD will default to the WebContainer's default working directory
+                        // which avoids permission errors when npm attempts to build.
 
                         setShellWriter(writer);
                         setShellReady(true);

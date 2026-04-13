@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useState, useRef } from 'react';
 import { useAtom, useSetAtom, useAtomValue } from 'jotai';
 import { messagesAtom, currentThreadIdAtom, threadsAtom, selectedModelAtom } from '../store/atoms';
 import { webContainerAtom, serverUrlAtom, writeShellOutput } from '../store/webContainer';
@@ -229,7 +229,12 @@ export const useChat = () => {
     const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001/api';
 
     const sendMessage = async (content: string) => {
-        if (!content.trim() || !isLoaded || !isSignedIn) return;
+        if (!content.trim() || !isLoaded || !isSignedIn) {
+            console.warn('[useChat] sendMessage blocked:', { hasContent: !!content.trim(), isLoaded, isSignedIn });
+            return;
+        }
+
+        console.log('[useChat] sendMessage called:', { content: content.substring(0, 50), model: selectedModel });
 
         // Optimistic UI update
         const userMessage = {
@@ -247,6 +252,7 @@ export const useChat = () => {
                 console.error('[useChat] Failed to get token. Aborting send.');
                 return;
             }
+            console.log('[useChat] Sending to API...', { threadId: localStorage.getItem('currentThreadId'), model: selectedModel });
             const response = await fetch(`${API_URL}/chat`, {
                 method: 'POST',
                 headers: {
@@ -262,6 +268,8 @@ export const useChat = () => {
                     model: selectedModel,
                 }),
             });
+
+            console.log('[useChat] API response:', { status: response.status, ok: response.ok });
 
             if (!response.ok) {
                 const errorText = await response.text().catch(() => '');
@@ -427,8 +435,7 @@ export const useChat = () => {
                         const args = parts.slice(1).map((a: string) => a.replace(/^["']|["']$/g, ''));
 
                         const proc = await wc.spawn(program, args, {
-                            cwd: '/',
-                            env: { PATH: '/usr/local/bin:/usr/bin:/bin', HOME: '/', FORCE_COLOR: '1' },
+                            env: { FORCE_COLOR: '1' },
                         });
                         proc.output.pipeTo(new WritableStream({
                             write(data) { writeShellOutput(data); }
@@ -486,9 +493,13 @@ export const useChat = () => {
         }
     }, [getToken, isLoaded, isSignedIn, setThreads]);
 
+    // Global flag specifically to prevent concurrent loadThread executions during hot-reloads
+    const loadThreadInProgress = useRef(false);
+
     const loadThread = useCallback(async (threadId: string) => {
-        if (!isLoaded || !isSignedIn) return;
+        if (!isLoaded || !isSignedIn || loadThreadInProgress.current) return;
         try {
+            loadThreadInProgress.current = true;
             const token = await getToken();
             if (!token) return;
 
@@ -669,15 +680,15 @@ createRoot(document.getElementById('root')!).render(
                 // Remove old project files so we don't get stale leftovers from a
                 // previous thread. Only remove known project directories/files.
                 for (const name of ['src', 'public', 'node_modules', 'package.json', 'package-lock.json', 'index.html', 'vite.config.ts', 'tsconfig.json']) {
-                    try { await wc.fs.rm('/' + name, { recursive: true }); } catch { /* doesn't exist */ }
+                    try { await wc.fs.rm(name, { recursive: true }); } catch { /* doesn't exist */ }
                 }
 
                 // Write each file using fs.writeFile with proper directory creation
                 for (const [filePath, content] of fileMap) {
                     try {
-                        const absPath = '/' + filePath;
+                        const absPath = filePath.startsWith('/') ? filePath.substring(1) : filePath;
                         const dir = absPath.substring(0, absPath.lastIndexOf('/'));
-                        if (dir && dir !== '/') {
+                        if (dir && dir !== '') {
                             try { await wc.fs.mkdir(dir, { recursive: true }); } catch { /* exists */ }
                         }
                         await wc.fs.writeFile(absPath, content);
@@ -690,8 +701,7 @@ createRoot(document.getElementById('root')!).render(
                 try {
                     writeShellOutput('\r\n\x1b[36m⬢ Installing dependencies...\x1b[0m\r\n');
                     const installProc = await wc.spawn('npm', ['install', '--no-audit', '--no-fund', '--legacy-peer-deps'], {
-                        cwd: '/',
-                        env: { PATH: '/usr/local/bin:/usr/bin:/bin', HOME: '/', FORCE_COLOR: '1' },
+                        env: { FORCE_COLOR: '1' },
                     });
                     installProc.output.pipeTo(new WritableStream({
                         write(data) { writeShellOutput(data); }
@@ -703,8 +713,7 @@ createRoot(document.getElementById('root')!).render(
                     if (installExit === 0) {
                         writeShellOutput('\r\n\x1b[36m⬢ Starting dev server...\x1b[0m\r\n');
                         const devProc = await wc.spawn('npm', ['run', 'dev'], {
-                            cwd: '/',
-                            env: { PATH: '/usr/local/bin:/usr/bin:/bin', HOME: '/', FORCE_COLOR: '1' },
+                            env: { FORCE_COLOR: '1' },
                         });
                         devProc.output.pipeTo(new WritableStream({
                             write(data) { writeShellOutput(data); }
@@ -743,6 +752,8 @@ createRoot(document.getElementById('root')!).render(
             navigate('/builder');
         } catch (error) {
             console.error('Failed to load thread', error);
+        } finally {
+            loadThreadInProgress.current = false;
         }
     }, [getToken, isLoaded, isSignedIn, setMessages, setCurrentThreadId, navigate, setFileSystem, setActiveFile, setServerUrl, webContainerInstance]);
 

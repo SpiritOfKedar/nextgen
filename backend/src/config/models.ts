@@ -11,7 +11,7 @@ export const AVAILABLE_MODELS: AIModel[] = [
         id: 'gemini-2.5-flash',
         label: 'Gemini 2.5 Flash',
         provider: 'google',
-        apiModelId: 'gemini-2.5-flash'
+        apiModelId: 'gemini-3-flash-preview'
     },
     {
         id: 'gpt-4o-mini',
@@ -29,31 +29,31 @@ export const AVAILABLE_MODELS: AIModel[] = [
         id: 'gemini-3-pro',
         label: 'Gemini 3 Pro',
         provider: 'google',
-        apiModelId: 'gemini-1.5-pro' // Mapping to best available
+        apiModelId: 'gemini-3-flash-preview'
     },
     {
         id: 'claude-opus-4.5',
         label: 'Claude Opus 4.5',
         provider: 'anthropic',
-        apiModelId: 'claude-opus-4-0-20250514'
+        apiModelId: 'claude-haiku-4-5'
     },
     {
         id: 'claude-opus-4.6',
         label: 'Claude Opus 4.6',
         provider: 'anthropic',
-        apiModelId: 'claude-opus-4-0-20250514'
+        apiModelId: 'claude-haiku-4-5'
     },
     {
         id: 'claude-sonnet-4.5',
         label: 'Claude Sonnet 4.5',
         provider: 'anthropic',
-        apiModelId: 'claude-sonnet-4-20250514'
+        apiModelId: 'claude-haiku-4-5'
     },
     {
         id: 'claude-haiku-4.5',
         label: 'Claude Haiku 4.5',
         provider: 'anthropic',
-        apiModelId: 'claude-3-5-haiku-latest'
+        apiModelId: 'claude-haiku-4-5'
     }
 ];
 
