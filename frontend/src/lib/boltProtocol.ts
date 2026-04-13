@@ -80,11 +80,29 @@ export class BoltParser {
                         this.buffer = this.buffer.substring(closeIndex + closeTag.length);
                         madeProgress = true;
                         continue;
+                    } else {
+                        // No closing tag yet — accumulate the buffer into the action
+                        // content BUT keep the last 20 chars in buffer in case the
+                        // closing tag was split across chunks (e.g. "</boltAc" + "tion>")
+                        const safeLen = Math.max(0, this.buffer.length - 20);
+                        if (safeLen > 0) {
+                            this.currentAction.content += this.buffer.substring(0, safeLen);
+                            this.buffer = this.buffer.substring(safeLen);
+                            // Don't set madeProgress — we're just accumulating, not
+                            // completing an action. Prevents infinite loop.
+                        }
                     }
                 }
             }
         }
 
         return actionsFound;
+    }
+
+    /** Reset parser state — use when switching threads */
+    reset() {
+        this.buffer = '';
+        this.currentArtifact = null;
+        this.currentAction = null;
     }
 }

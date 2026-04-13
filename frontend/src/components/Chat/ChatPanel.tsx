@@ -9,7 +9,7 @@ import { useSetAtom, useAtom, useAtomValue } from 'jotai';
 import { messagesAtom, currentThreadIdAtom } from '../../store/atoms';
 import { useNavigate } from 'react-router-dom';
 import { fileSystemAtom, activeFileAtom } from '../../store/fileSystem';
-import { webContainerAtom } from '../../store/webContainer';
+import { webContainerAtom, serverUrlAtom } from '../../store/webContainer';
 import { useChat } from '../../hooks/useChat';
 
 export const ChatPanel: React.FC = () => {
@@ -19,6 +19,7 @@ export const ChatPanel: React.FC = () => {
     const [currentThreadId, setCurrentThreadId] = useAtom(currentThreadIdAtom);
     const setFileSystem = useSetAtom(fileSystemAtom);
     const setActiveFile = useSetAtom(activeFileAtom);
+    const setServerUrl = useSetAtom(serverUrlAtom);
     const webContainer = useAtomValue(webContainerAtom);
 
     const { fetchThreads, loadThread } = useChat();
@@ -56,6 +57,7 @@ export const ChatPanel: React.FC = () => {
         setCurrentThreadId(null);
         setFileSystem([]);
         setActiveFile(null);
+        setServerUrl(null);
         localStorage.removeItem('currentThreadId');
         hasRestoredSession.current = true; // prevent re-restore after manual clear
     };

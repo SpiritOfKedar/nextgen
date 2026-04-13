@@ -99,7 +99,12 @@ export const TerminalPanel: React.FC = () => {
 
         // Forward keystrokes → shell stdin
         term.onData((data) => {
-            shellWriterRef.current?.write(data);
+            const writer = shellWriterRef.current;
+            if (writer) {
+                writer.write(data).catch(() => {
+                    // Writer may be closed — ignore
+                });
+            }
         });
 
         // Forward resize → shell process

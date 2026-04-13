@@ -35,25 +35,25 @@ export const AVAILABLE_MODELS: AIModel[] = [
         id: 'claude-opus-4.5',
         label: 'Claude Opus 4.5',
         provider: 'anthropic',
-        apiModelId: 'claude-3-opus-latest'
+        apiModelId: 'claude-opus-4-0-20250514'
     },
     {
         id: 'claude-opus-4.6',
         label: 'Claude Opus 4.6',
         provider: 'anthropic',
-        apiModelId: 'claude-3-opus-latest'
+        apiModelId: 'claude-opus-4-0-20250514'
     },
     {
         id: 'claude-sonnet-4.5',
         label: 'Claude Sonnet 4.5',
         provider: 'anthropic',
-        apiModelId: 'claude-3-5-sonnet-latest'
+        apiModelId: 'claude-sonnet-4-20250514'
     },
     {
         id: 'claude-haiku-4.5',
         label: 'Claude Haiku 4.5',
         provider: 'anthropic',
-        apiModelId: 'claude-3-haiku-20240307'
+        apiModelId: 'claude-3-5-haiku-latest'
     }
 ];
 

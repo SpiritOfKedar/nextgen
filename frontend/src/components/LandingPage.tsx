@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useRef } from 'react';
 import { Navbar } from './Navbar';
 import { Hero } from './Hero';
 import { InputArea } from './Chat/InputArea';
@@ -8,20 +8,27 @@ import { BackgroundGrid } from './Layout/BackgroundGrid';
 import { useSetAtom } from 'jotai';
 import { messagesAtom, currentThreadIdAtom } from '../store/atoms';
 import { fileSystemAtom, activeFileAtom } from '../store/fileSystem';
+import { serverUrlAtom } from '../store/webContainer';
 
 export const LandingPage: React.FC = () => {
     const setMessages = useSetAtom(messagesAtom);
     const setCurrentThreadId = useSetAtom(currentThreadIdAtom);
     const setFileSystem = useSetAtom(fileSystemAtom);
     const setActiveFile = useSetAtom(activeFileAtom);
+    const setServerUrl = useSetAtom(serverUrlAtom);
+    const didClear = useRef(false);
 
-    // Landing page = new conversation. Clear any stale thread state so the
-    // next sendMessage creates a fresh thread instead of appending to the old one.
+    // Landing page = new conversation. Clear stale thread state ONCE so the
+    // next sendMessage creates a fresh thread. The ref prevents re-clearing
+    // if a loadThread navigates away and React re-runs the effect.
     useEffect(() => {
+        if (didClear.current) return;
+        didClear.current = true;
         setMessages([]);
         setCurrentThreadId(null);
         setFileSystem([]);
         setActiveFile(null);
+        setServerUrl(null);
         localStorage.removeItem('currentThreadId');
     }, []); // eslint-disable-line react-hooks/exhaustive-deps
 

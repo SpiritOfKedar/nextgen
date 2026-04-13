@@ -1,7 +1,7 @@
 import { useCallback, useState } from 'react';
 import { useAtom, useSetAtom, useAtomValue } from 'jotai';
 import { messagesAtom, currentThreadIdAtom, threadsAtom, selectedModelAtom } from '../store/atoms';
-import { webContainerAtom, writeShellOutput } from '../store/webContainer';
+import { webContainerAtom, serverUrlAtom, writeShellOutput } from '../store/webContainer';
 import { getWebContainerInstance } from './useWebContainer';
 import { fileSystemAtom, activeFileAtom } from '../store/fileSystem';
 import type { FileSystemItem, FileNode, FolderNode, ActiveFile } from '../store/fileSystem';
@@ -222,6 +222,7 @@ export const useChat = () => {
     const webContainerInstance = useAtomValue(webContainerAtom);
     const setFileSystem = useSetAtom(fileSystemAtom);
     const setActiveFile = useSetAtom(activeFileAtom);
+    const setServerUrl = useSetAtom(serverUrlAtom);
 
     const [isLoading, setIsLoading] = useState(false);
 
@@ -398,6 +399,8 @@ export const useChat = () => {
             await patchMissingDependencies(writtenFiles, webContainerInstance ?? getWebContainerInstance(), setFileSystem);
 
             // ── Phase 2: Execute queued shell commands sequentially ──
+            // Use the shared jsh shell so the terminal shows the output and
+            // PATH resolution works (fixes ENOENT for npm/npx).
             const wc = webContainerInstance ?? getWebContainerInstance();
             if (wc && pendingShellCommands.length > 0) {
                 for (const command of pendingShellCommands) {
@@ -409,39 +412,41 @@ export const useChat = () => {
 
                         writeShellOutput(`\r\n\x1b[36m❯ ${command}\x1b[0m\r\n`);
 
-                        const parts = command.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) || [command];
-                        const program = parts[0];
-                        let args = parts.slice(1).map((a: string) => a.replace(/^["']|["']$/g, ''));
-
-                        // Prevent ERESOLVE peer-dep failures & speed up installs
-                        if (program === 'npm' && args[0] === 'install') {
-                            if (!args.includes('--legacy-peer-deps')) {
-                                args.push('--legacy-peer-deps');
-                            }
-                            if (!args.includes('--prefer-offline')) {
-                                args.push('--prefer-offline');
-                            }
+                        // Append --legacy-peer-deps for npm install
+                        let adjustedCommand = command;
+                        if (/^npm\s+install\b/.test(command) && !command.includes('--legacy-peer-deps')) {
+                            adjustedCommand += ' --legacy-peer-deps';
                         }
 
-                        const proc = await wc.spawn(program, args, { cwd: '/' });
+                        // For long-running commands like "npm run dev", fire and forget
+                        const isLongRunning = /\b(dev|start|serve|watch)\b/.test(command);
+
+                        // Spawn the command directly (better process control than piping to jsh)
+                        const parts = adjustedCommand.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) || [adjustedCommand];
+                        const program = parts[0];
+                        const args = parts.slice(1).map((a: string) => a.replace(/^["']|["']$/g, ''));
+
+                        const proc = await wc.spawn(program, args, {
+                            cwd: '/',
+                            env: { PATH: '/usr/local/bin:/usr/bin:/bin', HOME: '/', FORCE_COLOR: '1' },
+                        });
                         proc.output.pipeTo(new WritableStream({
                             write(data) { writeShellOutput(data); }
                         }));
 
-                        // For long-running commands like "npm run dev", don't block.
-                        const isLongRunning = /\b(dev|start|serve|watch)\b/.test(command);
                         if (!isLongRunning) {
-                            // Add timeout to prevent hanging forever
                             const exitPromise = proc.exit;
-                            const timeoutPromise = new Promise<number>((resolve) => setTimeout(() => resolve(-1), 120000));
+                            const timeoutPromise = new Promise<number>((resolve) => setTimeout(() => resolve(-1), 120_000));
                             const exitCode = await Promise.race([exitPromise, timeoutPromise]);
                             if (exitCode === -1) {
                                 writeShellOutput(`\r\n\x1b[33m⚠ Command timed out after 120s: ${command}\x1b[0m\r\n`);
+                            } else if (exitCode !== 0) {
+                                writeShellOutput(`\r\n\x1b[33m⚠ Command exited with code ${exitCode}: ${command}\x1b[0m\r\n`);
                             }
                         }
                     } catch (err) {
                         console.error(`[Bolt] spawn failed for "${command}":`, err);
-                        writeShellOutput(`\r\n\x1b[31m✗ Failed: ${command}\x1b[0m\r\n`);
+                        writeShellOutput(`\r\n\x1b[31m✗ Failed: ${command} — ${err}\x1b[0m\r\n`);
                     }
                 }
             }
@@ -486,6 +491,11 @@ export const useChat = () => {
         try {
             const token = await getToken();
             if (!token) return;
+
+            // ── Clear stale state immediately ──
+            setServerUrl(null); // Reset preview URL for the new thread
+            setFileSystem([]);
+            setActiveFile(null);
 
             // Fetch messages and thread files in parallel
             const [messagesRes, filesRes] = await Promise.all([
@@ -655,6 +665,13 @@ createRoot(document.getElementById('root')!).render(
                 // Patch missing dependencies before writing files
                 await patchMissingDependencies(fileMap, wc, setFileSystem);
 
+                // ── Clean WebContainer filesystem before writing new thread files ──
+                // Remove old project files so we don't get stale leftovers from a
+                // previous thread. Only remove known project directories/files.
+                for (const name of ['src', 'public', 'node_modules', 'package.json', 'package-lock.json', 'index.html', 'vite.config.ts', 'tsconfig.json']) {
+                    try { await wc.fs.rm('/' + name, { recursive: true }); } catch { /* doesn't exist */ }
+                }
+
                 // Write each file using fs.writeFile with proper directory creation
                 for (const [filePath, content] of fileMap) {
                     try {
@@ -672,20 +689,30 @@ createRoot(document.getElementById('root')!).render(
                 // Run npm install then npm run dev using direct spawn
                 try {
                     writeShellOutput('\r\n\x1b[36m⬢ Installing dependencies...\x1b[0m\r\n');
-                    const installProc = await wc.spawn('npm', ['install', '--no-audit', '--no-fund', '--legacy-peer-deps', '--prefer-offline'], { cwd: '/' });
+                    const installProc = await wc.spawn('npm', ['install', '--no-audit', '--no-fund', '--legacy-peer-deps'], {
+                        cwd: '/',
+                        env: { PATH: '/usr/local/bin:/usr/bin:/bin', HOME: '/', FORCE_COLOR: '1' },
+                    });
                     installProc.output.pipeTo(new WritableStream({
                         write(data) { writeShellOutput(data); }
                     }));
-                    const installExit = await installProc.exit;
+
+                    const installTimeout = new Promise<number>((r) => setTimeout(() => r(-1), 180_000));
+                    const installExit = await Promise.race([installProc.exit, installTimeout]);
 
                     if (installExit === 0) {
                         writeShellOutput('\r\n\x1b[36m⬢ Starting dev server...\x1b[0m\r\n');
-                        const devProc = await wc.spawn('npm', ['run', 'dev'], { cwd: '/' });
+                        const devProc = await wc.spawn('npm', ['run', 'dev'], {
+                            cwd: '/',
+                            env: { PATH: '/usr/local/bin:/usr/bin:/bin', HOME: '/', FORCE_COLOR: '1' },
+                        });
                         devProc.output.pipeTo(new WritableStream({
                             write(data) { writeShellOutput(data); }
                         }));
+                        // dev server is long-running, don't await
                     } else {
-                        writeShellOutput(`\r\n\x1b[31m✗ npm install failed (exit ${installExit})\x1b[0m\r\n`);
+                        const msg = installExit === -1 ? 'npm install timed out (180s)' : `npm install failed (exit ${installExit})`;
+                        writeShellOutput(`\r\n\x1b[31m✗ ${msg}\x1b[0m\r\n`);
                     }
                 } catch (err) {
                     console.error('[loadThread] install error:', err);
@@ -717,7 +744,7 @@ createRoot(document.getElementById('root')!).render(
         } catch (error) {
             console.error('Failed to load thread', error);
         }
-    }, [getToken, isLoaded, isSignedIn, setMessages, setCurrentThreadId, navigate, setFileSystem, setActiveFile, webContainerInstance]);
+    }, [getToken, isLoaded, isSignedIn, setMessages, setCurrentThreadId, navigate, setFileSystem, setActiveFile, setServerUrl, webContainerInstance]);
 
     return {
         messages,

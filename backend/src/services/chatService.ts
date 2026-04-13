@@ -294,7 +294,7 @@ export class ChatService {
 
         const stream = await this.anthropic.messages.create({
             model: apiModelId,
-            max_tokens: 4096,
+            max_tokens: 16384,
             system: SYSTEM_PROMPT,
             messages: formattedMessages,
             stream: true,
