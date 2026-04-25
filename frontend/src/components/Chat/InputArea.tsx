@@ -5,10 +5,10 @@ import { useChat } from '../../hooks/useChat';
 import { ModelSelector } from './ModelSelector';
 
 export const InputArea: React.FC = () => {
-    const [isFocused, setIsFocused] = useState(false);
     const [inputValue, setInputValue] = useState('');
     const { sendMessage, isLoading } = useChat();
     const textareaRef = useRef<HTMLTextAreaElement>(null);
+    const fileInputRef = useRef<HTMLInputElement>(null);
 
     // Auto-resize textarea
     useEffect(() => {
@@ -38,24 +38,20 @@ export const InputArea: React.FC = () => {
             <motion.div
                 className={`
                     relative flex flex-col w-full 
-                    bg-zinc-900/80 backdrop-blur-xl 
+                    bg-zinc-900/85 backdrop-blur-xl 
                     border 
-                    rounded-2xl overflow-hidden 
+                    rounded-xl overflow-hidden 
+                    border-zinc-800/70 shadow-sm
                     transition-all duration-300 ease-out
-                    ${isFocused
-                        ? 'border-zinc-700/80 shadow-[0_0_40px_-10px_rgba(0,0,0,0.5)] ring-1 ring-zinc-700/50'
-                        : 'border-zinc-800/50 shadow-sm'
-                    }
+                    focus-within:border-zinc-700/80 focus-within:shadow-lg focus-within:ring-1 focus-within:ring-zinc-700/40
                 `}
-                onFocus={() => setIsFocused(true)}
-                onBlur={() => setIsFocused(false)}
                 initial={{ y: 20, opacity: 0 }}
                 animate={{ y: 0, opacity: 1 }}
                 transition={{ delay: 0.1, duration: 0.4 }}
             >
                 <textarea
                     ref={textareaRef}
-                    className="w-full py-5 px-6 bg-transparent text-zinc-100 placeholder-zinc-500/80 resize-none focus:outline-none text-base md:text-lg leading-relaxed min-h-[100px] max-h-[400px] scrollbar-hide"
+                    className="w-full py-3.5 px-5 bg-transparent text-zinc-100 placeholder-zinc-500/80 resize-none focus:outline-none text-base leading-relaxed min-h-[76px] max-h-[360px] scrollbar-hide"
                     placeholder="Describe your app idea..."
                     value={inputValue}
                     onChange={(e) => setInputValue(e.target.value)}
@@ -63,46 +59,46 @@ export const InputArea: React.FC = () => {
                     style={{ overflow: 'hidden' }}
                 />
 
-                {/* Bottom Controls */}
-                <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 px-4 py-3 bg-zinc-900/40 border-t border-white/5">
-                    {/* Left: Attachment */}
-                    <div className="flex items-center gap-2">
-                        <input
-                            type="file"
-                            id="file-upload"
-                            className="hidden"
-                            onChange={(e) => console.log('File selected:', e.target.files?.[0]?.name)}
-                        />
-                        <button
-                            onClick={() => document.getElementById('file-upload')?.click()}
-                            className="flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-zinc-400 hover:text-zinc-200 hover:bg-white/5 rounded-full transition-colors group"
-                        >
-                            <Paperclip className="w-3.5 h-3.5 group-hover:text-blue-400 transition-colors" />
-                            <span>Add files</span>
-                        </button>
-                    </div>
+                {/* Grid: middle column minmax(0,1fr) shrinks so Build never clips (card uses overflow-hidden) */}
+                <div className="grid w-full min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 px-2.5 py-2 bg-zinc-900/60 border-t border-zinc-800/70">
+                    <input
+                        type="file"
+                        id="file-upload"
+                        ref={fileInputRef}
+                        className="hidden"
+                        onChange={(e) => console.log('File selected:', e.target.files?.[0]?.name)}
+                    />
 
-                    {/* Right: Actions */}
-                    <div className="flex items-center gap-2 justify-end">
+                    <button
+                        type="button"
+                        onClick={() => fileInputRef.current?.click()}
+                        className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-zinc-700/80 bg-zinc-900 text-zinc-300 hover:text-zinc-100 hover:bg-zinc-800/70 transition-colors"
+                        title="Add files"
+                        aria-label="Add files"
+                    >
+                        <Paperclip className="w-3.5 h-3.5 text-zinc-400" />
+                    </button>
+
+                    <div className="min-w-0 w-full flex justify-start overflow-hidden">
                         <ModelSelector side="top" />
-
-                        <button
-                            onClick={handleSendMessage}
-                            className={`
-                                flex items-center gap-2 px-3.5 py-1.5 
-                                text-sm font-semibold text-white 
-                                bg-blue-600 hover:bg-blue-500 
-                                rounded-lg 
-                                shadow-[0_0_15px_-3px_rgba(37,99,235,0.4)] hover:shadow-[0_0_20px_-3px_rgba(37,99,235,0.6)]
-                                transition-all duration-200
-                                ${!inputValue.trim() || isLoading ? 'opacity-50 cursor-not-allowed grayscale' : 'hover:scale-[1.02] active:scale-[0.98]'}
-                            `}
-                            disabled={!inputValue.trim() || isLoading}
-                        >
-                            <span className="text-xs uppercase tracking-wide">{isLoading ? 'Building...' : 'Build'}</span>
-                            <ArrowRight className="w-3.5 h-3.5" />
-                        </button>
                     </div>
+
+                    <button
+                        type="button"
+                        onClick={handleSendMessage}
+                        className={`
+                            inline-flex shrink-0 items-center justify-center gap-1 h-8 px-2.5
+                            text-[10px] font-semibold uppercase tracking-wide
+                            rounded-md border transition-colors duration-150
+                            ${!inputValue.trim() || isLoading
+                                ? 'cursor-not-allowed border-zinc-700 bg-zinc-800 text-zinc-500'
+                                : 'border-blue-500/70 bg-blue-600/90 text-white hover:bg-blue-600 hover:border-blue-400/80'}
+                        `}
+                        disabled={!inputValue.trim() || isLoading}
+                    >
+                        <span className="whitespace-nowrap">{isLoading ? 'Building' : 'Build'}</span>
+                        <ArrowRight className="w-3 h-3 shrink-0" />
+                    </button>
                 </div>
             </motion.div>
 

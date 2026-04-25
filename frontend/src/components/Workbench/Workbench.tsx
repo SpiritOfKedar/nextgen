@@ -90,7 +90,7 @@ const TabButton = ({ active, onClick, icon, label }: any) => (
 const CodeView = () => (
     <div className="h-full flex">
         {/* File Tree */}
-        <div className="w-56 border-r border-zinc-800 bg-zinc-950/50 flex flex-col">
+        <div className="hidden md:flex md:w-44 lg:w-52 border-r border-zinc-800 bg-zinc-950/50 flex-col">
             <FileTree />
         </div>
 

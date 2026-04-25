@@ -1,46 +1,44 @@
-import { Message } from '../models/Message';
-import { Thread } from '../models/Thread';
 import OpenAI from 'openai';
 import Anthropic from '@anthropic-ai/sdk';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import dotenv from 'dotenv';
 import { SYSTEM_PROMPT } from '../prompts/systemPrompt';
 import { getModelConfig } from '../config/models';
+import { withThreadLock, withTransaction } from '../config/db';
+import * as threadsRepo from '../repositories/threads';
+import * as messagesRepo from '../repositories/messages';
+import * as chunksRepo from '../repositories/messageChunks';
+import * as fileVersionsRepo from '../repositories/fileVersions';
+import * as shellCommandsRepo from '../repositories/shellCommands';
+import * as blobsRepo from '../repositories/blobs';
+import { MessageRow } from '../repositories/types';
 
 dotenv.config();
 
-// ── Helpers to extract bolt protocol actions from raw AI text ──
+// ── Bolt protocol parsing helpers (unchanged from previous service) ──
 
 interface ExtractedFile {
     filePath: string;
     content: string;
 }
 
-/**
- * Extract all <boltAction type="file" filePath="...">...</boltAction> from raw text.
- */
-function extractFilesFromRaw(raw: string): ExtractedFile[] {
+const extractFilesFromRaw = (raw: string): ExtractedFile[] => {
     const files: ExtractedFile[] = [];
-    // Handles attributes in either order
     const regex = /<boltAction\s+[^>]*?type="file"[^>]*?filePath="([^"]+)"[^>]*>([\s\S]*?)<\/boltAction>/g;
     let m;
     while ((m = regex.exec(raw)) !== null) {
         files.push({ filePath: m[1], content: m[2] });
     }
-    // Reverse attribute order
     const regex2 = /<boltAction\s+[^>]*?filePath="([^"]+)"[^>]*?type="file"[^>]*>([\s\S]*?)<\/boltAction>/g;
     while ((m = regex2.exec(raw)) !== null) {
-        if (!files.some(f => f.filePath === m![1])) {
+        if (!files.some((f) => f.filePath === m![1])) {
             files.push({ filePath: m[1], content: m[2] });
         }
     }
     return files;
-}
+};
 
-/**
- * Extract shell commands from raw text.
- */
-function extractShellCommands(raw: string): string[] {
+const extractShellCommands = (raw: string): string[] => {
     const cmds: string[] = [];
     const regex = /<boltAction\s+[^>]*?type="shell"[^>]*>([\s\S]*?)<\/boltAction>/g;
     let m;
@@ -48,34 +46,26 @@ function extractShellCommands(raw: string): string[] {
         cmds.push(m[1].trim());
     }
     return cmds;
-}
+};
 
-/**
- * Strip bolt XML tags from raw content for display-friendly text.
- */
-function stripBoltTags(raw: string): string {
-    return raw
+const stripBoltTags = (raw: string): string =>
+    raw
         .replace(/<boltAction[^>]*>[\s\S]*?<\/boltAction>/g, '')
         .replace(/<boltArtifact[^>]*>/g, '')
         .replace(/<\/boltArtifact>/g, '')
         .replace(/\n{3,}/g, '\n\n')
         .trim() || 'Generated code.';
-}
 
-// Built-in Node/browser modules and local paths — never add these to package.json
+// ── Auto-patch missing third-party deps in package.json (unchanged) ──
+
 const BUILTIN_MODULES = new Set([
     'react', 'react-dom', 'react/jsx-runtime',
     'fs', 'path', 'os', 'url', 'util', 'crypto', 'stream', 'events', 'http', 'https',
     'child_process', 'assert', 'buffer', 'querystring', 'zlib', 'net', 'tls',
 ]);
 
-/**
- * Scan all generated source files for import statements and compare against
- * the package.json dependencies. If any third-party packages are imported but
- * not listed, patch the package.json to include them.
- */
-function patchMissingDeps(files: ExtractedFile[]): ExtractedFile[] {
-    const pkgFile = files.find(f => f.filePath === 'package.json');
+const patchMissingDeps = (files: ExtractedFile[]): ExtractedFile[] => {
+    const pkgFile = files.find((f) => f.filePath === 'package.json');
     if (!pkgFile) return files;
 
     let pkg: any;
@@ -85,21 +75,17 @@ function patchMissingDeps(files: ExtractedFile[]): ExtractedFile[] {
         ...Object.keys(pkg.dependencies || {}),
         ...Object.keys(pkg.devDependencies || {}),
     ]);
-
-    // Scan every .ts/.tsx/.js/.jsx file for imports
     const importRegex = /(?:import\s+[\s\S]*?from\s+['"]([^'"./][^'"]*?)['"]|require\s*\(\s*['"]([^'"./][^'"]*?)['"]\s*\))/g;
     const missingPackages = new Set<string>();
 
     for (const f of files) {
         if (!/\.(tsx?|jsx?|mts|cts)$/.test(f.filePath)) continue;
         let match;
-        // Reset lastIndex for each file
         importRegex.lastIndex = 0;
         const content = f.content;
         while ((match = importRegex.exec(content)) !== null) {
             const raw = match[1] || match[2];
             if (!raw) continue;
-            // Get the package name (handle scoped packages like @foo/bar)
             const pkgName = raw.startsWith('@')
                 ? raw.split('/').slice(0, 2).join('/')
                 : raw.split('/')[0];
@@ -110,21 +96,63 @@ function patchMissingDeps(files: ExtractedFile[]): ExtractedFile[] {
     }
 
     if (missingPackages.size === 0) return files;
-
-    console.log('[ChatService] Auto-patching missing deps:', [...missingPackages]);
-
-    // Add missing packages with "latest" version
     if (!pkg.dependencies) pkg.dependencies = {};
-    for (const p of missingPackages) {
-        pkg.dependencies[p] = 'latest';
-    }
-
-    // Replace the package.json in the files list
-    return files.map(f =>
+    for (const p of missingPackages) pkg.dependencies[p] = 'latest';
+    return files.map((f) =>
         f.filePath === 'package.json'
             ? { ...f, content: JSON.stringify(pkg, null, 2) }
-            : f
+            : f,
     );
+};
+
+// ── Streaming chunk flusher: batches deltas to message_chunks ──
+
+const FLUSH_INTERVAL_MS = 250;
+const FLUSH_BYTE_THRESHOLD = 2048;
+
+class ChunkFlusher {
+    private buffer: string[] = [];
+    private bufferedBytes = 0;
+    private nextIdx = 0;
+    private timer: NodeJS.Timeout | null = null;
+    private inFlight: Promise<void> = Promise.resolve();
+
+    constructor(private readonly messageId: string) {}
+
+    push(delta: string): void {
+        if (!delta) return;
+        this.buffer.push(delta);
+        this.bufferedBytes += Buffer.byteLength(delta, 'utf8');
+        if (this.bufferedBytes >= FLUSH_BYTE_THRESHOLD) {
+            this.flushNow();
+        } else if (!this.timer) {
+            this.timer = setTimeout(() => this.flushNow(), FLUSH_INTERVAL_MS);
+        }
+    }
+
+    private flushNow(): void {
+        if (this.timer) {
+            clearTimeout(this.timer);
+            this.timer = null;
+        }
+        if (this.buffer.length === 0) return;
+        const deltas = this.buffer;
+        const startIdx = this.nextIdx;
+        this.nextIdx += deltas.length;
+        this.buffer = [];
+        this.bufferedBytes = 0;
+        // Chain inserts so they always commit in order.
+        this.inFlight = this.inFlight.then(() =>
+            chunksRepo.insertBatch(this.messageId, startIdx, deltas).catch((err) => {
+                console.error('[ChunkFlusher] insert failed:', err);
+            }),
+        );
+    }
+
+    async flushAndWait(): Promise<void> {
+        this.flushNow();
+        await this.inFlight;
+    }
 }
 
 export class ChatService {
@@ -133,50 +161,85 @@ export class ChatService {
     private gemini: GoogleGenerativeAI | null = null;
 
     private isValidKey(key: string | undefined): boolean {
-        // Reject missing, empty, or placeholder keys like "sk-..."
         return !!key && key.length > 10 && !key.endsWith('...');
     }
 
     constructor() {
         if (this.isValidKey(process.env.OPENAI_API_KEY)) {
             this.openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-            console.log('[ChatService] OpenAI client initialized');
         }
         if (this.isValidKey(process.env.ANTHROPIC_API_KEY)) {
             this.anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-            console.log('[ChatService] Anthropic client initialized');
         }
         if (this.isValidKey(process.env.GEMINI_API_KEY)) {
             this.gemini = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
         }
     }
 
-    async generateResponse(messageContent: string, threadId: string | null, userId: string, model: string = 'gpt-4o'): Promise<{ stream: AsyncGenerator<string>, threadId: string }> {
-        // 1. Create Thread if not exists
+    /**
+     * Main entry point. Returns a stream that the controller pipes to the
+     * client. The stream:
+     *   1. Emits AI text deltas as they arrive.
+     *   2. Persists each delta to message_chunks (batched flushes).
+     *   3. On end, transactionally finalizes the assistant message and
+     *      appends file_versions + shell_commands.
+     *   4. On error/abort, marks the assistant message accordingly.
+     */
+    async generateResponse(
+        messageContent: string,
+        threadIdParam: string | null,
+        userId: string,
+        model: string = 'gpt-4o',
+    ): Promise<{ stream: AsyncGenerator<string>; threadId: string }> {
+        // 1. Resolve / create thread (outside the per-thread lock since a brand
+        //    new thread can't have concurrent traffic yet).
+        let threadId = threadIdParam;
         if (!threadId) {
             const title = messageContent.substring(0, 50) + (messageContent.length > 50 ? '...' : '');
-            const thread = await Thread.create({
-                userId,
-                title,
-            });
-            threadId = thread._id.toString();
+            const thread = await threadsRepo.create(userId, title);
+            threadId = thread.id;
         }
 
-        // 2. Save User Message
-        await Message.create({
-            content: messageContent,
-            role: 'user',
-            threadId
+        // 2. Inside the per-thread advisory lock: allocate seq for both the
+        //    user msg and the assistant placeholder, then commit so the lock
+        //    is released before the AI call (which can take many seconds).
+        const { assistantMessageId } = await withThreadLock(threadId, async (tx) => {
+            const userSeq = await messagesRepo.nextSeq(threadId!, tx);
+            await messagesRepo.insert(
+                {
+                    threadId: threadId!,
+                    userId,
+                    role: 'user',
+                    seq: userSeq,
+                    content: messageContent,
+                    status: 'complete',
+                },
+                tx,
+            );
+            const assistantSeq = userSeq + 1;
+            const assistant = await messagesRepo.insert(
+                {
+                    threadId: threadId!,
+                    userId,
+                    role: 'assistant',
+                    seq: assistantSeq,
+                    model,
+                    status: 'streaming',
+                },
+                tx,
+            );
+            await threadsRepo.touch(threadId!, tx);
+            return { assistantMessageId: assistant.id };
         });
 
-        // 3. Update Thread timestamp
-        await Thread.findByIdAndUpdate(threadId, { updatedAt: new Date() });
+        // 3. Build context: current snapshot + recent message tail.
+        const snapshotRows = await fileVersionsRepo.currentSnapshot(threadId);
+        const blobMap = await blobsRepo.getBlobs(snapshotRows.map((r) => r.current_blob_sha256));
+        const fileSnapshot = snapshotRows.map((r) => ({
+            filePath: r.file_path,
+            content: blobMap.get(r.current_blob_sha256) ?? '',
+        }));
 
-        // 4. Build smart context — inject file snapshot + recent messages only
-        const thread = await Thread.findById(threadId);
-        const fileSnapshot = thread?.files || [];
-
-        // Build an enhanced system prompt with the current file state
         let enhancedSystemPrompt = SYSTEM_PROMPT;
         if (fileSnapshot.length > 0) {
             enhancedSystemPrompt += '\n\n--- CURRENT PROJECT FILES ---\n';
@@ -188,145 +251,175 @@ export class ChatService {
             enhancedSystemPrompt += '\n--- END OF PROJECT FILES ---\n';
         }
 
-        // Fetch only recent messages (last 10) for conversational context,
-        // use stripped content since full codebase is already in the system prompt.
-        const recentMessages = await Message.find({ threadId })
-            .sort({ createdAt: -1 })
-            .limit(10)
-            .lean();
-        recentMessages.reverse(); // chronological order
-
-        // Use display content (stripped) for conversation context to save tokens
-        const messages = recentMessages.map(m => ({
+        const recentRows = await messagesRepo.recentForThread(threadId, 10);
+        const messages = recentRows.map((m) => ({
             role: m.role,
             content: m.content || '(no content)',
         }));
 
-        console.log(`[ChatService] Context: ${fileSnapshot.length} files in snapshot, ${messages.length} recent messages`);
+        console.log(`[ChatService] Context: ${fileSnapshot.length} files, ${messages.length} recent messages`);
 
-        // 5. Generate AI Response
-        let stream;
+        // 4. Provider stream selection.
+        let providerStream: AsyncGenerator<string>;
         try {
             const modelConfig = getModelConfig(model);
             if (!modelConfig) {
-                stream = this.mockStream(`Unknown model: ${model}. Using mock.`, threadId!);
+                providerStream = this.mockStream(`Unknown model: ${model}. Using mock.`);
             } else {
                 switch (modelConfig.provider) {
                     case 'openai':
-                        stream = await this.streamOpenAI(messages, modelConfig.apiModelId, enhancedSystemPrompt);
+                        providerStream = this.streamOpenAI(messages, modelConfig.apiModelId, enhancedSystemPrompt);
                         break;
                     case 'anthropic':
-                        stream = await this.streamAnthropic(messages, modelConfig.apiModelId, enhancedSystemPrompt);
+                        providerStream = this.streamAnthropic(messages, modelConfig.apiModelId, enhancedSystemPrompt);
                         break;
                     case 'google':
-                        stream = await this.streamGemini(messages, modelConfig.apiModelId, enhancedSystemPrompt);
+                        providerStream = this.streamGemini(messages, modelConfig.apiModelId, enhancedSystemPrompt);
                         break;
                     default:
-                        stream = this.mockStream(`Unknown provider: ${modelConfig.provider}. Using mock.`, threadId!);
+                        providerStream = this.mockStream(`Unknown provider: ${modelConfig.provider}. Using mock.`);
                 }
             }
         } catch (error) {
-            console.error(`Error with model ${model}:`, error);
-            stream = this.mockStream(`Error with ${model}: ${error instanceof Error ? error.message : 'Unknown error'}. Falling back to mock.`, threadId!);
+            console.error(`Error selecting model ${model}:`, error);
+            providerStream = this.mockStream(`Error with ${model}: ${error instanceof Error ? error.message : 'Unknown error'}. Falling back to mock.`);
         }
 
-        return { stream: this.saveStreamToDb(stream, threadId!), threadId: threadId! };
-    }
-
-    private async *saveStreamToDb(stream: AsyncGenerator<string>, threadId: string) {
-        let fullResponse = '';
-        for await (const chunk of stream) {
-            fullResponse += chunk;
-            yield chunk;
-        }
-
-        // Extract files and shell commands from the raw response
-        const extractedFiles = extractFilesFromRaw(fullResponse);
-        const shellCommands = extractShellCommands(fullResponse);
-        const displayContent = stripBoltTags(fullResponse);
-
-        // Save message with both raw and display content + extracted files
-        await Message.create({
-            content: displayContent,
-            rawContent: fullResponse.trim(),
-            role: 'assistant',
+        return {
+            stream: this.persistAndYield(providerStream, threadId, assistantMessageId),
             threadId,
-            files: extractedFiles,
-            shellCommands,
-        });
-
-        // Update thread's consolidated file snapshot
-        // (merge new files on top of existing ones — later files overwrite earlier ones)
-        if (extractedFiles.length > 0) {
-            const thread = await Thread.findById(threadId);
-            if (thread) {
-                const fileMap = new Map<string, string>();
-                // Start with existing thread files
-                for (const f of (thread.files || [])) {
-                    fileMap.set(f.filePath, f.content);
-                }
-                // Overlay new files
-                for (const f of extractedFiles) {
-                    fileMap.set(f.filePath, f.content);
-                }
-                const consolidatedFiles = Array.from(fileMap.entries()).map(([filePath, content]) => ({ filePath, content }));
-                await Thread.findByIdAndUpdate(threadId, {
-                    updatedAt: new Date(),
-                    files: consolidatedFiles,
-                });
-            }
-        }
+        };
     }
 
     /**
-     * For conversation history, use rawContent for assistant messages (preserves bolt XML)
-     * so the AI has full context of what code was previously generated.
-     * Falls back to content for user messages or older messages without rawContent.
+     * Wraps the provider stream:
+     *   - mirror each chunk to message_chunks (batched flush)
+     *   - yield each chunk to the HTTP response
+     *   - on end, finalize the assistant message + persist files transactionally
+     *   - on error, mark the message as 'error' but keep what we got
      */
-    private getMessageContent(m: any): string {
-        if (m.role === 'assistant' && m.rawContent) {
-            return m.rawContent;
+    private async *persistAndYield(
+        stream: AsyncGenerator<string>,
+        threadId: string,
+        assistantMessageId: string,
+    ): AsyncGenerator<string> {
+        const flusher = new ChunkFlusher(assistantMessageId);
+        let fullResponse = '';
+
+        try {
+            for await (const chunk of stream) {
+                fullResponse += chunk;
+                flusher.push(chunk);
+                yield chunk;
+            }
+        } catch (err) {
+            console.error('[ChatService] Stream error:', err);
+            await flusher.flushAndWait();
+            await messagesRepo.markAborted(
+                assistantMessageId,
+                err instanceof Error ? err.message : String(err),
+            );
+            yield `\n\n[error: stream interrupted — partial response saved]`;
+            return;
         }
-        return m.content;
+
+        await flusher.flushAndWait();
+
+        // Finalize: parse, hash + upload blobs, version files, save shell cmds,
+        // mark message complete — all in one transaction.
+        try {
+            const extractedFiles = patchMissingDeps(extractFilesFromRaw(fullResponse));
+            const shellCommands = extractShellCommands(fullResponse);
+            const displayContent = stripBoltTags(fullResponse);
+
+            // Hash + upload blobs OUTSIDE the transaction (Storage upload may
+            // be slow; code_blobs row insert inside the upload is idempotent).
+            const fileShas: { filePath: string; sha: string }[] = [];
+            for (const f of extractedFiles) {
+                const sha = await blobsRepo.putBlob(f.content);
+                fileShas.push({ filePath: f.filePath, sha });
+            }
+
+            await withThreadLock(threadId, async (tx) => {
+                await messagesRepo.finalize(
+                    {
+                        id: assistantMessageId,
+                        content: displayContent,
+                        rawContent: fullResponse.trim(),
+                        status: 'complete',
+                    },
+                    tx,
+                );
+                for (const { filePath, sha } of fileShas) {
+                    await fileVersionsRepo.insert(
+                        {
+                            threadId,
+                            messageId: assistantMessageId,
+                            filePath,
+                            blobSha256: sha,
+                        },
+                        tx,
+                    );
+                }
+                if (shellCommands.length > 0) {
+                    await shellCommandsRepo.insertBatch(threadId, assistantMessageId, shellCommands, tx);
+                }
+                await threadsRepo.touch(threadId, tx);
+            });
+        } catch (err) {
+            console.error('[ChatService] Finalize failed:', err);
+            try {
+                await withTransaction(async (tx) => {
+                    await messagesRepo.finalize(
+                        {
+                            id: assistantMessageId,
+                            content: stripBoltTags(fullResponse),
+                            rawContent: fullResponse.trim(),
+                            status: 'error',
+                            error: err instanceof Error ? err.message : String(err),
+                        },
+                        tx,
+                    );
+                });
+            } catch (innerErr) {
+                console.error('[ChatService] Failed to mark message errored:', innerErr);
+            }
+            // Tell the client so they know to retry.
+            yield `\n\n[error: response not fully persisted]`;
+        }
     }
 
-    private async *streamOpenAI(messages: any[], apiModelId: string, systemPrompt: string) {
-        if (!this.openai) throw new Error('OpenAI API Key not configured');
+    // ── Provider streams (unchanged behavior, just no DB I/O here) ──
 
+    private async *streamOpenAI(messages: { role: string; content: string }[], apiModelId: string, systemPrompt: string) {
+        if (!this.openai) throw new Error('OpenAI API Key not configured');
         const stream = await this.openai.chat.completions.create({
             model: apiModelId,
             messages: [
                 { role: 'system', content: systemPrompt },
-                ...messages
+                ...(messages as any),
             ],
             stream: true,
         });
-
         for await (const chunk of stream) {
             const content = chunk.choices[0]?.delta?.content || '';
             if (content) yield content;
         }
     }
 
-    private async *streamAnthropic(messages: any[], apiModelId: string, systemPrompt: string) {
+    private async *streamAnthropic(messages: { role: string; content: string }[], apiModelId: string, systemPrompt: string) {
         if (!this.anthropic) throw new Error('Anthropic API Key not configured');
-
-        // Anthropic requires strictly alternating user/assistant messages.
-        // Merge consecutive same-role messages to avoid 400 errors.
         const merged: { role: 'user' | 'assistant'; content: string }[] = [];
         for (const m of messages) {
             if (merged.length > 0 && merged[merged.length - 1].role === m.role) {
                 merged[merged.length - 1].content += '\n\n' + m.content;
             } else {
-                merged.push({ role: m.role, content: m.content });
+                merged.push({ role: m.role as 'user' | 'assistant', content: m.content });
             }
         }
-
-        // Ensure the conversation starts with a user message
         if (merged.length > 0 && merged[0].role !== 'user') {
             merged.unshift({ role: 'user', content: '(conversation continued)' });
         }
-
         const stream = await this.anthropic.messages.create({
             model: apiModelId,
             max_tokens: 8192,
@@ -334,7 +427,6 @@ export class ChatService {
             messages: merged,
             stream: true,
         });
-
         for await (const chunk of stream) {
             if (chunk.type === 'content_block_delta' && chunk.delta.type === 'text_delta') {
                 yield chunk.delta.text;
@@ -342,19 +434,13 @@ export class ChatService {
         }
     }
 
-    private async *streamGemini(messages: any[], apiModelId: string, systemPrompt: string) {
+    private async *streamGemini(messages: { role: string; content: string }[], apiModelId: string, systemPrompt: string) {
         if (!this.gemini) throw new Error('Gemini API Key not configured');
-
-        // Import the safety settings types
         const { HarmCategory, HarmBlockThreshold } = await import('@google/generative-ai');
-
         const model = this.gemini.getGenerativeModel({
             model: apiModelId,
             systemInstruction: systemPrompt,
-            generationConfig: {
-                temperature: 0.7,
-            },
-            // Disable RECITATION blocking — this is the #1 cause of truncated code
+            generationConfig: { temperature: 0.7 },
             safetySettings: [
                 { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
                 { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
@@ -362,65 +448,86 @@ export class ChatService {
                 { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE },
             ],
         });
-
-        // Gemini history format (exclude last message which is the new user prompt)
-        const history = messages.slice(0, -1).map(m => ({
+        const history = messages.slice(0, -1).map((m) => ({
             role: m.role === 'assistant' ? 'model' : 'user',
-            parts: [{ text: m.content }]
+            parts: [{ text: m.content }],
         }));
-
-        const chat = model.startChat({
-            history: history
-        });
-
+        const chat = model.startChat({ history });
         const lastMessage = messages[messages.length - 1];
         const result = await chat.sendMessageStream(lastMessage.content);
-
-        // Read individual stream chunks — each chunk.text() can throw if
-        // that specific candidate was blocked (e.g. RECITATION).
-        // We catch per-chunk so any content streamed before the block is preserved.
         for await (const chunk of result.stream) {
             try {
-                const chunkText = chunk.text();
-                yield chunkText;
+                yield chunk.text();
             } catch (chunkError: any) {
-                // Log but don't re-throw — we want to keep the partial content
                 console.warn('[Gemini] Chunk blocked:', chunkError?.message || chunkError);
-                // Yield a user-friendly notice so the frontend knows what happened
                 yield '\n\n⚠️ _The AI response was partially blocked by the content filter (RECITATION). The generated code above has been saved._';
-                break; // Stop reading further chunks
+                break;
             }
         }
     }
 
-    private async *mockStream(message: string, threadId: string) {
-        const responseText = `(Mock Response) You said: ${message}. Using mock because API failed or not selected.`;
-        const chunks = responseText.split(' ');
-
-        for (const chunk of chunks) {
-            const token = chunk + ' ';
-            yield token;
-            await new Promise(resolve => setTimeout(resolve, 50));
+    private async *mockStream(message: string): AsyncGenerator<string> {
+        const responseText = `(Mock Response) ${message}`;
+        for (const word of responseText.split(' ')) {
+            yield word + ' ';
+            await new Promise((r) => setTimeout(r, 50));
         }
     }
 
+    // ── Read APIs used by the controller ──
+
     async getUserThreads(userId: string) {
-        return Thread.find({ userId }).sort({ updatedAt: -1 });
+        const rows = await threadsRepo.listForUser(userId);
+        return rows.map(this.mapThread);
     }
 
     async getThreadMessages(threadId: string, userId: string) {
-        const thread = await Thread.findOne({ _id: threadId, userId });
-        if (!thread) {
-            throw new Error('Thread not found or unauthorized');
-        }
-        return Message.find({ threadId }).sort({ createdAt: 1 });
+        const thread = await threadsRepo.findByIdForUser(threadId, userId);
+        if (!thread) throw new Error('Thread not found or unauthorized');
+        const rows = await messagesRepo.listForThread(threadId);
+        return Promise.all(rows.map((m) => this.mapMessage(m)));
     }
 
     async getThreadFiles(threadId: string, userId: string) {
-        const thread = await Thread.findOne({ _id: threadId, userId });
-        if (!thread) {
-            throw new Error('Thread not found or unauthorized');
+        const thread = await threadsRepo.findByIdForUser(threadId, userId);
+        if (!thread) throw new Error('Thread not found or unauthorized');
+        const snap = await fileVersionsRepo.currentSnapshot(threadId);
+        if (snap.length === 0) return [];
+        const blobs = await blobsRepo.getBlobs(snap.map((s) => s.current_blob_sha256));
+        return snap.map((s) => ({
+            filePath: s.file_path,
+            content: blobs.get(s.current_blob_sha256) ?? '',
+        }));
+    }
+
+    private mapThread(row: { id: string; title: string; created_at: string; updated_at: string }) {
+        return {
+            _id: row.id,
+            id: row.id,
+            title: row.title,
+            createdAt: row.created_at,
+            updatedAt: row.updated_at,
+        };
+    }
+
+    private async mapMessage(row: MessageRow) {
+        // For an in-flight streaming message, hydrate live content from chunks
+        // so a reconnecting client sees what's been generated so far.
+        let content = row.content;
+        if (row.status === 'streaming' && !content) {
+            content = await chunksRepo.concatenate(row.id);
         }
-        return thread.files || [];
+        return {
+            _id: row.id,
+            id: row.id,
+            threadId: row.thread_id,
+            role: row.role,
+            seq: Number(row.seq),
+            content,
+            rawContent: row.raw_content ?? '',
+            status: row.status,
+            model: row.model,
+            createdAt: row.created_at,
+        };
     }
 }

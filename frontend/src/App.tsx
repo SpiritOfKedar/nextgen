@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { useAuth } from '@clerk/clerk-react';
 import { LandingPage } from './components/LandingPage';
 import { MainLayout } from './components/Layout/MainLayout';
@@ -8,11 +8,13 @@ import { AnimatePresence, motion } from 'framer-motion';
 function App() {
   const { isSignedIn, isLoaded, getToken } = useAuth();
   const location = useLocation();
+  const hasSyncedUser = useRef(false);
 
   // Sync user to MongoDB as soon as they sign in
   useEffect(() => {
+    if (!isLoaded || !isSignedIn || hasSyncedUser.current) return;
+
     const syncUser = async () => {
-      if (!isLoaded || !isSignedIn) return;
       try {
         const token = await getToken();
         if (!token) return;
@@ -22,6 +24,7 @@ function App() {
           headers: { Authorization: `Bearer ${token}` },
         });
         console.log('[App] User synced to MongoDB');
+        hasSyncedUser.current = true;
       } catch (err) {
         console.error('[App] Failed to sync user:', err);
       }
@@ -54,7 +57,7 @@ function App() {
               initial={{ opacity: 0, scale: 1.02 }}
               animate={{ opacity: 1, scale: 1 }}
               transition={{ duration: 0.4 }}
-              className="h-screen"
+              className="h-[100dvh]"
             >
               <MainLayout />
             </motion.div>

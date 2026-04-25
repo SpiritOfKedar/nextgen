@@ -9,6 +9,7 @@ interface ThreadListProps {
     isOpen: boolean;
     onClose: () => void;
 }
+const SIDEBAR_WIDTH = 220;
 
 const formatRelativeDate = (dateStr: string) => {
     const date = new Date(dateStr);
@@ -52,11 +53,11 @@ export const ThreadList: React.FC<ThreadListProps> = ({ isOpen, onClose }) => {
 
     return (
         <motion.div
-            initial={{ x: -260, opacity: 0 }}
-            animate={{ x: isOpen ? 0 : -260, opacity: isOpen ? 1 : 0 }}
+            initial={{ x: -SIDEBAR_WIDTH, opacity: 0 }}
+            animate={{ x: isOpen ? 0 : -SIDEBAR_WIDTH, opacity: isOpen ? 1 : 0 }}
             transition={{ type: "spring", stiffness: 300, damping: 30 }}
-            className={`fixed inset-y-0 left-0 z-50 w-64 bg-zinc-950 border-r border-zinc-800 transform ${isOpen ? 'translate-x-0' : '-translate-x-full'
-                } md:relative md:translate-x-0 md:w-64 flex flex-col`}
+            className={`fixed inset-y-0 left-0 z-50 w-[220px] bg-zinc-950 border-r border-zinc-800 transform ${isOpen ? 'translate-x-0' : '-translate-x-full'
+                } md:relative md:translate-x-0 md:w-56 flex flex-col`}
             style={{ display: isOpen ? 'flex' : 'none' }}
         >
 

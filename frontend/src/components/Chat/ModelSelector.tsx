@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'framer-motion';
+import { twMerge } from 'tailwind-merge';
 import { Zap, Check, ChevronUp, Sparkles } from 'lucide-react';
 import { useAtom } from 'jotai';
 import { selectedModelAtom } from '../../store/atoms';
@@ -72,7 +73,10 @@ const PROVIDER_COLORS: Record<string, string> = {
     google: '#3b82f6',
 };
 
-export const ModelSelector: React.FC<{ side?: 'top' | 'bottom' }> = ({ side = 'top' }) => {
+export const ModelSelector: React.FC<{ side?: 'top' | 'bottom'; className?: string }> = ({
+    side = 'top',
+    className = '',
+}) => {
     const [selectedModelId, setSelectedModelId] = useAtom(selectedModelAtom);
     const [isOpen, setIsOpen] = useState(false);
     const buttonRef = useRef<HTMLButtonElement>(null);
@@ -251,18 +255,19 @@ export const ModelSelector: React.FC<{ side?: 'top' | 'bottom' }> = ({ side = 't
             <button
                 ref={buttonRef}
                 onClick={() => setIsOpen(!isOpen)}
-                className={`
-                    flex items-center gap-2 px-3 py-1.5 
-                    text-xs font-medium text-zinc-300 
-                    bg-zinc-800/50 hover:bg-zinc-700/60 
-                    border border-zinc-700/50 hover:border-zinc-600 
-                    rounded-lg transition-all duration-150
-                    ${isOpen ? 'bg-zinc-700/60 border-zinc-600 text-zinc-100' : ''}
-                `}
+                className={twMerge(
+                    'inline-flex h-8 min-w-0 w-full max-w-[12.5rem] items-center gap-1.5 px-2',
+                    'text-[11px] font-medium text-zinc-200',
+                    'bg-zinc-900 hover:bg-zinc-800/80',
+                    'border border-zinc-700/80 hover:border-zinc-600',
+                    'rounded-md transition-colors duration-150',
+                    isOpen ? 'bg-zinc-800 border-zinc-600 text-zinc-100' : null,
+                    className,
+                )}
             >
-                <Zap className="w-3.5 h-3.5 text-zinc-500" />
-                <span>{selectedModel.label}</span>
-                <ChevronUp className={`w-3 h-3 text-zinc-500 transition-transform duration-200 ${isOpen ? '' : 'rotate-180'}`} />
+                <Zap className="w-3 h-3 shrink-0 text-zinc-500" />
+                <span className="min-w-0 flex-1 truncate text-left">{selectedModel.label}</span>
+                <ChevronUp className={`w-2.5 h-2.5 shrink-0 text-zinc-500 transition-transform duration-200 ${isOpen ? '' : 'rotate-180'}`} />
             </button>
 
             {createPortal(dropdown, document.body)}

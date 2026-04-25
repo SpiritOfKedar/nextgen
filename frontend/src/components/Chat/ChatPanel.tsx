@@ -25,12 +25,13 @@ export const ChatPanel: React.FC = () => {
     const { fetchThreads, loadThread } = useChat();
     const { isLoaded, isSignedIn } = useAuth();
     const hasRestoredSession = useRef(false);
+    const hasPrefetchedThreads = useRef(false);
 
     // Pre-fetch thread list as soon as auth is ready
     useEffect(() => {
-        if (isLoaded && isSignedIn) {
-            fetchThreads();
-        }
+        if (!isLoaded || !isSignedIn || hasPrefetchedThreads.current) return;
+        hasPrefetchedThreads.current = true;
+        fetchThreads();
     }, [isLoaded, isSignedIn, fetchThreads]);
 
     // Auto-restore saved thread — wait for BOTH auth AND WebContainer to be ready
@@ -77,7 +78,7 @@ export const ChatPanel: React.FC = () => {
                     <div className="flex items-center gap-3">
                         <button
                             onClick={() => setIsThreadListOpen(!isThreadListOpen)}
-                            className="p-2 hover:bg-zinc-800 rounded-lg text-zinc-400 hover:text-white transition-colors"
+                            className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-zinc-800 bg-zinc-900/70 text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800/90 transition-colors"
                             title={isThreadListOpen ? "Close history" : "Open history"}
                         >
                             <PanelLeft className="w-5 h-5" />
@@ -93,7 +94,7 @@ export const ChatPanel: React.FC = () => {
                     <div className="flex items-center gap-2">
                         <button
                             onClick={handleNewChat}
-                            className="p-2 text-zinc-400 hover:text-white hover:bg-zinc-800 rounded-lg transition-all"
+                            className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-zinc-800 bg-zinc-900/70 text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800/90 transition-colors"
                             title="New Chat"
                         >
                             <Plus className="w-5 h-5" />

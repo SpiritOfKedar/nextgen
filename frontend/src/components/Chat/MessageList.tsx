@@ -1,6 +1,6 @@
 
 import React, { useEffect, useRef, useState, useCallback, memo } from 'react';
-import { Check, Copy, FileCode, Terminal as TerminalIcon, ChevronDown, ChevronRight, Sparkles } from 'lucide-react';
+import { Check, Copy, FileCode, ChevronDown, ChevronRight, Sparkles } from 'lucide-react';
 import { useAtomValue } from 'jotai';
 import { messagesAtom } from '../../store/atoms';
 import ReactMarkdown from 'react-markdown';
