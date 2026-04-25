@@ -4,6 +4,8 @@ import { useAtom, useSetAtom } from 'jotai';
 import {
     webContainerAtom,
     serverUrlAtom,
+    previewStatusAtom,
+    previewStatusMessageAtom,
     shellInputWriterAtom,
     shellReadyAtom,
     writeShellOutput,
@@ -23,6 +25,8 @@ export function getWebContainerInstance(): WebContainer | null {
 export const useWebContainer = () => {
     const [webContainer, setWebContainer] = useAtom(webContainerAtom);
     const setServerUrl = useSetAtom(serverUrlAtom);
+    const setPreviewStatus = useSetAtom(previewStatusAtom);
+    const setPreviewStatusMessage = useSetAtom(previewStatusMessageAtom);
     const setShellWriter = useSetAtom(shellInputWriterAtom);
     const setShellReady = useSetAtom(shellReadyAtom);
     const [isLoading, setIsLoading] = useState(!_instance);
@@ -38,6 +42,8 @@ export const useWebContainer = () => {
             // Already booted (e.g. HMR, re-mount)
             if (_instance) {
                 setWebContainer(_instance);
+                setPreviewStatus('starting');
+                setPreviewStatusMessage('WebContainer is ready. Waiting for the app dev server...');
                 setIsLoading(false);
                 return;
             }
@@ -51,10 +57,14 @@ export const useWebContainer = () => {
                 const instance = await _bootPromise;
                 _instance = instance;
                 setWebContainer(instance);
+                setPreviewStatus('starting');
+                setPreviewStatusMessage('WebContainer booted. Waiting for npm install and npm run dev...');
 
                 instance.on('server-ready', (_, url) => {
                     console.log('[WebContainer] Server Ready:', url);
                     setServerUrl(url);
+                    setPreviewStatus('ready');
+                    setPreviewStatusMessage(`Dev server is live at ${url}`);
                 });
 
                 // ── Spawn persistent jsh shell (once) ──────────────────
@@ -103,12 +113,17 @@ export const useWebContainer = () => {
                 setIsLoading(false);
             } catch (err) {
                 console.error('[WebContainer] Boot failed:', err);
-                setError(err instanceof Error ? err.message : 'Unknown error');
+                const message = err instanceof Error ? err.message : 'Unknown error';
+                setError(message);
+                setPreviewStatus('error');
+                setPreviewStatusMessage(`WebContainer failed to boot: ${message}`);
                 setIsLoading(false);
                 _bootPromise = null; // Allow retry
             }
         };
 
+        setPreviewStatus('booting');
+        setPreviewStatusMessage('Booting WebContainer runtime...');
         boot();
     }, []); // eslint-disable-line react-hooks/exhaustive-deps
 

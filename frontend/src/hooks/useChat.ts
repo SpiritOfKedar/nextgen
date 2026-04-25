@@ -1,7 +1,7 @@
 import { useCallback, useState, useRef } from 'react';
 import { useAtom, useSetAtom, useAtomValue } from 'jotai';
 import { messagesAtom, currentThreadIdAtom, threadsAtom, selectedModelAtom } from '../store/atoms';
-import { webContainerAtom, serverUrlAtom, writeShellOutput } from '../store/webContainer';
+import { previewStatusAtom, previewStatusMessageAtom, webContainerAtom, serverUrlAtom, writeShellOutput } from '../store/webContainer';
 import { getWebContainerInstance } from './useWebContainer';
 import { fileSystemAtom, activeFileAtom } from '../store/fileSystem';
 import type { FileSystemItem, FileNode, FolderNode, ActiveFile } from '../store/fileSystem';
@@ -185,6 +185,50 @@ const getRootPackageJsonFromMap = (writtenFiles: Map<string, string>): string | 
     return undefined;
 };
 
+/** Readable valid root package.json on disk (WebContainer may use `package.json` or `/package.json`). */
+async function hasValidRootPackageJsonOnDisk(wc: any): Promise<boolean> {
+    for (const p of ['package.json', '/package.json']) {
+        try {
+            const raw = await wc.fs.readFile(p, 'utf-8');
+            if (!raw?.trim()) continue;
+            JSON.parse(raw);
+            return true;
+        } catch {
+            /* missing or invalid */
+        }
+    }
+    return false;
+}
+
+/**
+ * Recover from broken npm state: package-lock.json exists but package.json is missing/invalid
+ * (interrupted install, rm, or path mismatch). Removes stale lock and writes minimal package.json.
+ */
+async function repairRootForNpm(wc: any, announce = true): Promise<void> {
+    if (!wc) return;
+    if (await hasValidRootPackageJsonOnDisk(wc)) return;
+
+    for (const lock of ['package-lock.json', '/package-lock.json']) {
+        try {
+            await wc.fs.rm(lock);
+        } catch {
+            /* */
+        }
+    }
+    for (const p of ['package.json', '/package.json']) {
+        try {
+            await wc.fs.writeFile(p, MINIMAL_ROOT_PACKAGE_JSON);
+        } catch {
+            /* try alternate path */
+        }
+    }
+    if (announce) {
+        writeShellOutput(
+            '\r\n\x1b[33m⚠ Missing or invalid package.json (stale lock or interrupted install). Removed package-lock.json and wrote minimal package.json.\x1b[0m\r\n',
+        );
+    }
+}
+
 /**
  * Models sometimes skip package.json or emit npm shell actions anyway. WebContainer runs npm in `/`,
  * so missing root package.json yields ENOENT. Write a minimal scaffold before npm runs.
@@ -208,25 +252,27 @@ async function ensureRootPackageJsonExists(
     }
 
     if (wc) {
-        try {
-            const existing = await wc.fs.readFile('/package.json', 'utf-8');
-            if (existing?.trim()) {
-                try {
-                    JSON.parse(existing);
-                    writtenFiles.set('package.json', existing);
-                    setFileSystem((prev) => upsertFile(prev, 'package.json', existing));
-                    return;
-                } catch {
-                    // replace invalid file on disk
+        for (const p of ['/package.json', 'package.json']) {
+            try {
+                const existing = await wc.fs.readFile(p, 'utf-8');
+                if (existing?.trim()) {
+                    try {
+                        JSON.parse(existing);
+                        writtenFiles.set('package.json', existing);
+                        setFileSystem((prev) => upsertFile(prev, 'package.json', existing));
+                        return;
+                    } catch {
+                        /* invalid JSON — fall through to rewrite */
+                    }
                 }
+            } catch {
+                /* missing */
             }
-        } catch {
-            // missing
         }
         try {
-            await wc.fs.writeFile('/package.json', MINIMAL_ROOT_PACKAGE_JSON);
+            await repairRootForNpm(wc, false);
         } catch (err) {
-            console.error('[useChat] Failed to write fallback package.json:', err);
+            console.error('[useChat] Failed to repair/write fallback package.json:', err);
             return;
         }
     }
@@ -255,6 +301,59 @@ const normalizeShellCommandQueue = (commands: string[]): string[] => {
     const devs = unique.filter(isNpmDev);
     const rest = unique.filter((c) => !isNpmInstall(c) && !isNpmDev(c));
     return [...installs, ...devs, ...rest];
+};
+
+const normalizeWebContainerPath = (path: string): string => {
+    const normalized = path.replace(/\\/g, '/').trim();
+    if (!normalized) return '/';
+    const parts = normalized.split('/').filter(Boolean);
+    return `/${parts.join('/')}`;
+};
+
+const resolveWorkingDirectory = (currentDir: string, targetPath: string): string => {
+    const cleaned = targetPath.trim().replace(/^["']|["']$/g, '');
+    if (!cleaned || cleaned === '.') return currentDir;
+    if (cleaned === '/') return '/';
+    if (cleaned === '..') {
+        const parts = currentDir.split('/').filter(Boolean);
+        return parts.length <= 1 ? '/' : `/${parts.slice(0, -1).join('/')}`;
+    }
+    if (cleaned.startsWith('/')) {
+        return normalizeWebContainerPath(cleaned);
+    }
+    const base = currentDir === '/' ? '' : currentDir;
+    return normalizeWebContainerPath(`${base}/${cleaned}`);
+};
+
+const splitCdAndCommand = (command: string): { nextDir: string | null; remainder: string | null } => {
+    const trimmed = command.trim();
+    const chained = trimmed.match(/^cd\s+(.+?)\s*&&\s*(.+)$/i);
+    if (chained) {
+        return {
+            nextDir: chained[1].trim(),
+            remainder: chained[2].trim(),
+        };
+    }
+    const onlyCd = trimmed.match(/^cd\s+(.+)$/i);
+    if (onlyCd) {
+        return {
+            nextDir: onlyCd[1].trim(),
+            remainder: null,
+        };
+    }
+    return { nextDir: null, remainder: trimmed };
+};
+
+const inferProjectDirectory = (writtenFiles: Map<string, string>): string => {
+    if (writtenFiles.has('package.json')) return '/';
+    for (const key of writtenFiles.keys()) {
+        const normalized = normalizeWrittenPath(key);
+        if (!normalized.endsWith('/package.json')) continue;
+        const dir = normalized.slice(0, -'/package.json'.length);
+        if (!dir || dir === 'node_modules') continue;
+        return normalizeWebContainerPath(dir);
+    }
+    return '/';
 };
 
 /**
@@ -335,6 +434,8 @@ export const useChat = () => {
     const setFileSystem = useSetAtom(fileSystemAtom);
     const setActiveFile = useSetAtom(activeFileAtom);
     const setServerUrl = useSetAtom(serverUrlAtom);
+    const setPreviewStatus = useSetAtom(previewStatusAtom);
+    const setPreviewStatusMessage = useSetAtom(previewStatusMessageAtom);
 
     const [isLoading, setIsLoading] = useState(false);
 
@@ -526,23 +627,37 @@ export const useChat = () => {
             const wc = wcForNpm;
             const shellQueue = normalizeShellCommandQueue(pendingShellCommands);
             if (wc && shellQueue.length > 0) {
+                setPreviewStatus('starting');
+                setPreviewStatusMessage('Running install/start commands inside the sandbox...');
+                let commandCwd = inferProjectDirectory(writtenFiles);
                 for (const command of shellQueue) {
                     try {
                         // Skip useless/dangerous commands
                         if (!command || /^\s*$/.test(command)) continue;            // empty
-                        if (/^\s*cd(\s|$)/.test(command)) continue;                 // cd (shell builtin, hangs spawn)
-                        if (/^\s*(echo|pwd|ls|cat|mkdir)\s/.test(command)) continue; // informational only
+                        if (/^\s*(echo|pwd|ls|cat)\s/.test(command)) continue;       // informational only
 
-                        writeShellOutput(`\r\n\x1b[36m❯ ${command}\x1b[0m\r\n`);
+                        const { nextDir, remainder } = splitCdAndCommand(command);
+                        if (nextDir) {
+                            commandCwd = resolveWorkingDirectory(commandCwd, nextDir);
+                            writeShellOutput(`\r\n\x1b[2mcd ${commandCwd}\x1b[0m\r\n`);
+                            if (!remainder) continue;
+                        }
+                        if (!remainder || /^\s*$/.test(remainder)) continue;
+
+                        writeShellOutput(`\r\n\x1b[36m❯ [${commandCwd}] ${remainder}\x1b[0m\r\n`);
 
                         // Append --legacy-peer-deps for npm install
-                        let adjustedCommand = command;
-                        if (/^npm\s+install\b/.test(command) && !command.includes('--legacy-peer-deps')) {
+                        let adjustedCommand = remainder;
+                        if (/^npm\s+(install|i)\b/i.test(remainder.trim()) && !remainder.includes('--legacy-peer-deps')) {
                             adjustedCommand += ' --legacy-peer-deps';
                         }
 
                         // For long-running commands like "npm run dev", fire and forget
-                        const isLongRunning = /\b(dev|start|serve|watch)\b/.test(command);
+                        const isLongRunning = /\b(dev|start|serve|watch)\b/.test(remainder);
+
+                        if (/^npm\s+(install|i)\b/i.test(adjustedCommand.trim())) {
+                            await repairRootForNpm(wc, true);
+                        }
 
                         // Spawn the command directly (better process control than piping to jsh)
                         const parts = adjustedCommand.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) || [adjustedCommand];
@@ -551,6 +666,7 @@ export const useChat = () => {
 
                         const proc = await wc.spawn(program, args, {
                             env: { FORCE_COLOR: '1' },
+                            cwd: commandCwd,
                         });
                         proc.output.pipeTo(new WritableStream({
                             write(data) { writeShellOutput(data); }
@@ -558,16 +674,29 @@ export const useChat = () => {
 
                         if (!isLongRunning) {
                             const exitPromise = proc.exit;
-                            const timeoutPromise = new Promise<number>((resolve) => setTimeout(() => resolve(-1), 120_000));
+                            // npm install in WebContainer often exceeds 2m (cold cache + registry I/O).
+                            const installTimeoutMs =
+                                /^npm\s+(install|i)\b/i.test(remainder.trim()) ? 300_000 : 120_000;
+                            const timeoutPromise = new Promise<number>((resolve) =>
+                                setTimeout(() => resolve(-1), installTimeoutMs),
+                            );
                             const exitCode = await Promise.race([exitPromise, timeoutPromise]);
                             if (exitCode === -1) {
-                                writeShellOutput(`\r\n\x1b[33m⚠ Command timed out after 120s: ${command}\x1b[0m\r\n`);
+                                setPreviewStatus('error');
+                                setPreviewStatusMessage(`Command timed out: ${remainder}`);
+                                writeShellOutput(
+                                    `\r\n\x1b[33m⚠ Command timed out after ${installTimeoutMs / 1000}s: ${remainder}\x1b[0m\r\n`,
+                                );
                             } else if (exitCode !== 0) {
-                                writeShellOutput(`\r\n\x1b[33m⚠ Command exited with code ${exitCode}: ${command}\x1b[0m\r\n`);
+                                setPreviewStatus('error');
+                                setPreviewStatusMessage(`Command failed (${exitCode}): ${remainder}`);
+                                writeShellOutput(`\r\n\x1b[33m⚠ Command exited with code ${exitCode}: ${remainder}\x1b[0m\r\n`);
                             }
                         }
                     } catch (err) {
                         console.error(`[Bolt] spawn failed for "${command}":`, err);
+                        setPreviewStatus('error');
+                        setPreviewStatusMessage(`Failed to run command: ${command}`);
                         writeShellOutput(`\r\n\x1b[31m✗ Failed: ${command} — ${err}\x1b[0m\r\n`);
                     }
                 }
@@ -612,28 +741,42 @@ export const useChat = () => {
     const loadThreadInProgress = useRef(false);
 
     const loadThread = useCallback(async (threadId: string) => {
-        if (!isLoaded || !isSignedIn || loadThreadInProgress.current) return;
+        if (!isLoaded || !isSignedIn) return;
+        if (loadThreadInProgress.current) return;
+        if (!threadId || typeof threadId !== 'string') {
+            throw new Error('Invalid thread id');
+        }
+        const id = encodeURIComponent(threadId);
         try {
             loadThreadInProgress.current = true;
             const token = await getToken();
-            if (!token) return;
+            if (!token) {
+                throw new Error('Could not get auth token. Try signing in again.');
+            }
 
             // ── Clear stale state immediately ──
             setServerUrl(null); // Reset preview URL for the new thread
+            setPreviewStatus('starting');
+            setPreviewStatusMessage('Loading thread files and preparing preview environment...');
             setFileSystem([]);
             setActiveFile(null);
 
             // Fetch messages and thread files in parallel
             const [messagesRes, filesRes] = await Promise.all([
-                fetch(`${API_URL}/chat/${threadId}`, {
+                fetch(`${API_URL}/chat/${id}`, {
                     headers: { Authorization: `Bearer ${token}` }
                 }),
-                fetch(`${API_URL}/chat/${threadId}/files`, {
+                fetch(`${API_URL}/chat/${id}/files`, {
                     headers: { Authorization: `Bearer ${token}` }
                 }),
             ]);
 
-            if (!messagesRes.ok) return;
+            if (!messagesRes.ok) {
+                const errBody = await messagesRes.text().catch(() => '');
+                throw new Error(
+                    `Could not load thread (${messagesRes.status}): ${errBody || messagesRes.statusText}`.trim(),
+                );
+            }
 
             const rawMessages = await messagesRes.json();
             const threadFiles: { filePath: string; content: string }[] = filesRes.ok ? await filesRes.json() : [];
@@ -814,6 +957,7 @@ createRoot(document.getElementById('root')!).render(
 
                 // Run npm install then npm run dev using direct spawn
                 try {
+                    await repairRootForNpm(wc, true);
                     writeShellOutput('\r\n\x1b[36m⬢ Installing dependencies...\x1b[0m\r\n');
                     const installProc = await wc.spawn('npm', ['install', '--no-audit', '--no-fund', '--legacy-peer-deps'], {
                         env: { FORCE_COLOR: '1' },
@@ -826,6 +970,8 @@ createRoot(document.getElementById('root')!).render(
                     const installExit = await Promise.race([installProc.exit, installTimeout]);
 
                     if (installExit === 0) {
+                        setPreviewStatus('starting');
+                        setPreviewStatusMessage('Dependencies installed. Starting npm run dev...');
                         writeShellOutput('\r\n\x1b[36m⬢ Starting dev server...\x1b[0m\r\n');
                         const devProc = await wc.spawn('npm', ['run', 'dev'], {
                             env: { FORCE_COLOR: '1' },
@@ -836,10 +982,14 @@ createRoot(document.getElementById('root')!).render(
                         // dev server is long-running, don't await
                     } else {
                         const msg = installExit === -1 ? 'npm install timed out (180s)' : `npm install failed (exit ${installExit})`;
+                        setPreviewStatus('error');
+                        setPreviewStatusMessage(msg);
                         writeShellOutput(`\r\n\x1b[31m✗ ${msg}\x1b[0m\r\n`);
                     }
                 } catch (err) {
                     console.error('[loadThread] install error:', err);
+                    setPreviewStatus('error');
+                    setPreviewStatusMessage(`Install error: ${String(err)}`);
                     writeShellOutput(`\r\n\x1b[31m✗ Install error: ${err}\x1b[0m\r\n`);
                 }
             }
@@ -866,11 +1016,12 @@ createRoot(document.getElementById('root')!).render(
             localStorage.setItem('currentThreadId', threadId);
             navigate('/builder');
         } catch (error) {
-            console.error('Failed to load thread', error);
+            console.error('[useChat] loadThread failed:', threadId, error);
+            throw error;
         } finally {
             loadThreadInProgress.current = false;
         }
-    }, [getToken, isLoaded, isSignedIn, setMessages, setCurrentThreadId, navigate, setFileSystem, setActiveFile, setServerUrl, webContainerInstance]);
+    }, [getToken, isLoaded, isSignedIn, setMessages, setCurrentThreadId, navigate, setFileSystem, setActiveFile, setServerUrl, setPreviewStatus, setPreviewStatusMessage, webContainerInstance]);
 
     return {
         messages,

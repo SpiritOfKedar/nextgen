@@ -4,6 +4,31 @@ import { log, errorFields } from '../lib/logger';
 
 let pool: Pool | null = null;
 let supabase: SupabaseClient | null = null;
+const DEFAULT_DB_CONNECT_TIMEOUT_MS = 10_000;
+
+const parseTimeoutMs = (raw: string | undefined, fallbackMs: number): number => {
+    const parsed = Number(raw);
+    if (!Number.isFinite(parsed) || parsed <= 0) return fallbackMs;
+    return Math.floor(parsed);
+};
+
+const DB_CONNECT_TIMEOUT_MS = parseTimeoutMs(process.env.DB_CONNECT_TIMEOUT_MS, DEFAULT_DB_CONNECT_TIMEOUT_MS);
+
+const withTimeout = async <T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+        return await Promise.race([
+            promise,
+            new Promise<T>((_, reject) => {
+                timer = setTimeout(() => {
+                    reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+                }, timeoutMs);
+            }),
+        ]);
+    } finally {
+        if (timer) clearTimeout(timer);
+    }
+};
 
 /**
  * Remove SSL-related query params from the URI. Newer `pg` / `pg-connection-string`
@@ -30,6 +55,7 @@ const createPgPool = (connectionString: string): Pool => {
         ssl: { rejectUnauthorized: false },
         max: 10,
         idleTimeoutMillis: 30_000,
+        connectionTimeoutMillis: DB_CONNECT_TIMEOUT_MS,
     });
     nextPool.on('error', (err) => {
         log.error('db.pg_pool_idle_client_error', errorFields(err));
@@ -74,9 +100,17 @@ const isPoolerTenantError = (error: unknown): boolean => {
 };
 
 const pingPool = async (targetPool: Pool): Promise<void> => {
-    const client = await targetPool.connect();
+    const client = await withTimeout(
+        targetPool.connect(),
+        DB_CONNECT_TIMEOUT_MS,
+        'Postgres connect'
+    );
     try {
-        await client.query('SELECT 1');
+        await withTimeout(
+            client.query('SELECT 1'),
+            DB_CONNECT_TIMEOUT_MS,
+            'Postgres ping query'
+        );
     } finally {
         client.release();
     }
@@ -112,6 +146,7 @@ export const connectDB = async (): Promise<void> => {
     let activePool = getPool();
 
     try {
+        log.info('db.connect_start', { timeoutMs: DB_CONNECT_TIMEOUT_MS });
         await pingPool(activePool);
         log.info('db.postgres_connected', { mode: 'primary' });
     } catch (error) {

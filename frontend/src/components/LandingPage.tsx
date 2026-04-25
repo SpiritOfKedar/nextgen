@@ -8,7 +8,7 @@ import { BackgroundGrid } from './Layout/BackgroundGrid';
 import { useSetAtom } from 'jotai';
 import { messagesAtom, currentThreadIdAtom } from '../store/atoms';
 import { fileSystemAtom, activeFileAtom } from '../store/fileSystem';
-import { serverUrlAtom } from '../store/webContainer';
+import { previewStatusAtom, previewStatusMessageAtom, serverUrlAtom } from '../store/webContainer';
 
 export const LandingPage: React.FC = () => {
     const setMessages = useSetAtom(messagesAtom);
@@ -16,6 +16,8 @@ export const LandingPage: React.FC = () => {
     const setFileSystem = useSetAtom(fileSystemAtom);
     const setActiveFile = useSetAtom(activeFileAtom);
     const setServerUrl = useSetAtom(serverUrlAtom);
+    const setPreviewStatus = useSetAtom(previewStatusAtom);
+    const setPreviewStatusMessage = useSetAtom(previewStatusMessageAtom);
     const didClear = useRef(false);
 
     // Landing page = new conversation. Clear stale thread state ONCE so the
@@ -29,6 +31,8 @@ export const LandingPage: React.FC = () => {
         setFileSystem([]);
         setActiveFile(null);
         setServerUrl(null);
+        setPreviewStatus('idle');
+        setPreviewStatusMessage('Start a new prompt to generate and run a project.');
         localStorage.removeItem('currentThreadId');
     }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -41,7 +45,9 @@ export const LandingPage: React.FC = () => {
                 <main className="flex flex-col items-center justify-center pt-24 px-4 relative">
                     <div className="z-10 w-full flex flex-col items-center gap-8">
                         <Hero />
-                        <InputArea />
+                        <div className="relative z-10 w-full flex justify-center">
+                            <InputArea />
+                        </div>
                         <RecentThreads />
                     </div>
                 </main>

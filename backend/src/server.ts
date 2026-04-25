@@ -9,6 +9,7 @@ import { log, errorFields } from './lib/logger';
 const PORT = process.env.PORT || 3001;
 
 const main = async () => {
+    log.info('boot.starting', { port: PORT, pid: process.pid });
     await connectDB();
 
     const aborted = await abortOrphanStreaming();
@@ -22,6 +23,9 @@ const main = async () => {
 };
 
 main().catch((error) => {
-    log.error('boot.server_failed', errorFields(error));
+    log.error('boot.server_failed', {
+        hint: 'Verify SUPABASE_DB_URL/SUPABASE_URL credentials and network reachability',
+        ...errorFields(error),
+    });
     process.exit(1);
 });

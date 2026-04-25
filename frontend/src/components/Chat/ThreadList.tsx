@@ -105,8 +105,10 @@ export const ThreadList: React.FC<ThreadListProps> = ({ isOpen, onClose }) => {
                         <button
                             key={thread._id}
                             onClick={() => {
-                                loadThread(thread._id);
                                 onClose();
+                                void loadThread(thread._id).catch((err) =>
+                                    console.error('[ThreadList] loadThread failed:', thread._id, err),
+                                );
                             }}
                             className={`w-full text-left p-3 rounded-lg text-sm transition-all group ${currentThreadId === thread._id
                                 ? 'bg-zinc-800/50 text-white border border-zinc-700/50'

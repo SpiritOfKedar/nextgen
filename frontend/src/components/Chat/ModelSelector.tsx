@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { createPortal } from 'react-dom';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion } from 'framer-motion';
 import { twMerge } from 'tailwind-merge';
 import { Zap, Check, ChevronUp, Sparkles } from 'lucide-react';
 import { useAtom } from 'jotai';
@@ -151,87 +151,82 @@ export const ModelSelector: React.FC<{ side?: 'top' | 'bottom'; className?: stri
         setIsOpen(false);
     };
 
-    const dropdown = (
-        <AnimatePresence>
-            {isOpen && (
-                <motion.div
-                    ref={dropdownRef}
-                    initial={{ opacity: 0, y: side === 'top' ? 6 : -6, scale: 0.97 }}
-                    animate={{ opacity: 1, y: 0, scale: 1 }}
-                    exit={{ opacity: 0, y: side === 'top' ? 6 : -6, scale: 0.97 }}
-                    transition={{ duration: 0.15, ease: [0.16, 1, 0.3, 1] }}
-                    style={{
-                        position: 'fixed',
-                        zIndex: 99999,
-                        ...(side === 'top'
-                            ? { bottom: window.innerHeight - dropdownPos.top, left: dropdownPos.left }
-                            : { top: dropdownPos.top, left: dropdownPos.left }
-                        ),
-                        width: 260,
-                    }}
-                    className="model-selector-dropdown"
-                >
-                    <div
-                        className="
-                            bg-zinc-900 border border-zinc-700/60
-                            rounded-xl shadow-2xl shadow-black/80
-                            ring-1 ring-white/4
-                            backdrop-blur-xl overflow-hidden
-                        "
-                    >
-                        <div className="px-3 pt-3 pb-1.5">
-                            <span className="text-[10px] font-semibold uppercase tracking-widest text-zinc-500">
-                                Model
-                            </span>
-                        </div>
-                        <div className="flex flex-col max-h-95 overflow-y-auto model-selector-scroll px-1.5 pb-1.5">
-                            {MODELS.map((model) => {
-                                const isSelected = selectedModelId === model.id;
-                                return (
-                                    <button
-                                        key={model.id}
-                                        onClick={() => handleSelect(model.id)}
-                                        className={`
-                                            relative flex items-center gap-3 w-full px-2.5 py-2 text-left
-                                            rounded-lg transition-colors duration-100
-                                            ${isSelected
-                                                ? 'bg-zinc-800/80 text-white'
-                                                : 'text-zinc-400 hover:bg-zinc-800/40 hover:text-zinc-200'
-                                            }
-                                        `}
-                                    >
-                                        {/* Provider color dot */}
-                                        <span
-                                            className="w-2 h-2 rounded-full shrink-0"
-                                            style={{
-                                                backgroundColor: getProviderDot(model.provider),
-                                                boxShadow: `0 0 6px ${getProviderDot(model.provider)}44`,
-                                            }}
-                                        />
+    const dropdownPanel = (
+        <motion.div
+            ref={dropdownRef}
+            initial={{ opacity: 0, y: side === 'top' ? 6 : -6, scale: 0.97 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            transition={{ duration: 0.15, ease: [0.16, 1, 0.3, 1] }}
+            style={{
+                position: 'fixed',
+                zIndex: 99999,
+                ...(side === 'top'
+                    ? { bottom: window.innerHeight - dropdownPos.top, left: dropdownPos.left }
+                    : { top: dropdownPos.top, left: dropdownPos.left }
+                ),
+                width: 260,
+            }}
+            className="model-selector-dropdown"
+        >
+            <div
+                className="
+                    bg-zinc-900 border border-zinc-700/60
+                    rounded-xl shadow-2xl shadow-black/80
+                    ring-1 ring-white/4
+                    backdrop-blur-xl overflow-hidden
+                "
+            >
+                <div className="px-3 pt-3 pb-1.5">
+                    <span className="text-[10px] font-semibold uppercase tracking-widest text-zinc-500">
+                        Model
+                    </span>
+                </div>
+                <div className="flex flex-col max-h-95 overflow-y-auto model-selector-scroll px-1.5 pb-1.5">
+                    {MODELS.map((model) => {
+                        const isSelected = selectedModelId === model.id;
+                        return (
+                            <button
+                                key={model.id}
+                                type="button"
+                                onClick={() => handleSelect(model.id)}
+                                className={`
+                                    relative flex items-center gap-3 w-full px-2.5 py-2 text-left
+                                    rounded-lg transition-colors duration-100
+                                    ${isSelected
+                                        ? 'bg-zinc-800/80 text-white'
+                                        : 'text-zinc-400 hover:bg-zinc-800/40 hover:text-zinc-200'
+                                    }
+                                `}
+                            >
+                                <span
+                                    className="w-2 h-2 rounded-full shrink-0"
+                                    style={{
+                                        backgroundColor: getProviderDot(model.provider),
+                                        boxShadow: `0 0 6px ${getProviderDot(model.provider)}44`,
+                                    }}
+                                />
 
-                                        <div className="flex-1 min-w-0">
-                                            <div className="flex items-center gap-1.5">
-                                                <span className="text-[13px] font-medium leading-tight">
-                                                    {model.label}
-                                                </span>
-                                                {model.icon && model.icon}
-                                            </div>
-                                            <span className="text-[11px] text-zinc-500 leading-tight">
-                                                {model.description}
-                                            </span>
-                                        </div>
+                                <div className="flex-1 min-w-0">
+                                    <div className="flex items-center gap-1.5">
+                                        <span className="text-[13px] font-medium leading-tight">
+                                            {model.label}
+                                        </span>
+                                        {model.icon && model.icon}
+                                    </div>
+                                    <span className="text-[11px] text-zinc-500 leading-tight">
+                                        {model.description}
+                                    </span>
+                                </div>
 
-                                        {isSelected && (
-                                            <Check className="w-3.5 h-3.5 text-zinc-300 shrink-0" />
-                                        )}
-                                    </button>
-                                );
-                            })}
-                        </div>
-                    </div>
-                </motion.div>
-            )}
-        </AnimatePresence>
+                                {isSelected && (
+                                    <Check className="w-3.5 h-3.5 text-zinc-300 shrink-0" />
+                                )}
+                            </button>
+                        );
+                    })}
+                </div>
+            </div>
+        </motion.div>
     );
 
     return (
@@ -253,6 +248,7 @@ export const ModelSelector: React.FC<{ side?: 'top' | 'bottom'; className?: stri
             `}</style>
 
             <button
+                type="button"
                 ref={buttonRef}
                 onClick={() => setIsOpen(!isOpen)}
                 className={twMerge(
@@ -270,7 +266,9 @@ export const ModelSelector: React.FC<{ side?: 'top' | 'bottom'; className?: stri
                 <ChevronUp className={`w-2.5 h-2.5 shrink-0 text-zinc-500 transition-transform duration-200 ${isOpen ? '' : 'rotate-180'}`} />
             </button>
 
-            {createPortal(dropdown, document.body)}
+            {typeof document !== 'undefined' && isOpen
+                ? createPortal(dropdownPanel, document.body)
+                : null}
         </>
     );
 };

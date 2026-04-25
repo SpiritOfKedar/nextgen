@@ -3,6 +3,8 @@ import { WebContainer } from '@webcontainer/api';
 
 export const webContainerAtom = atom<WebContainer | null>(null);
 export const serverUrlAtom = atom<string | null>(null);
+export const previewStatusAtom = atom<'idle' | 'booting' | 'starting' | 'ready' | 'error'>('idle');
+export const previewStatusMessageAtom = atom<string | null>(null);
 
 // Shared jsh shell input writer — used by TerminalPanel and useChat shell actions
 export const shellInputWriterAtom = atom<WritableStreamDefaultWriter<string> | null>(null);

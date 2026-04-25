@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
 import { MessageSquare, Clock, ArrowRight } from 'lucide-react';
 import { useAtomValue } from 'jotai';
@@ -10,6 +10,7 @@ export const RecentThreads: React.FC = () => {
     const { fetchThreads, loadThread } = useChat();
     const threads = useAtomValue(threadsAtom);
     const { isSignedIn, isLoaded } = useAuth();
+    const [loadError, setLoadError] = useState<string | null>(null);
 
     useEffect(() => {
         if (isLoaded && isSignedIn) {
@@ -39,24 +40,40 @@ export const RecentThreads: React.FC = () => {
         return date.toLocaleDateString();
     };
 
+    const handleOpenThread = async (threadId: string) => {
+        setLoadError(null);
+        try {
+            await loadThread(threadId);
+        } catch (e) {
+            setLoadError(e instanceof Error ? e.message : 'Could not open this project');
+        }
+    };
+
     return (
         <motion.div
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.5, delay: 0.3 }}
-            className="w-full max-w-2xl mx-auto mt-10 mb-8"
+            className="relative z-30 w-full max-w-2xl mx-auto mt-10 mb-8"
         >
             <div className="flex items-center gap-2 mb-4 px-1">
                 <Clock className="w-4 h-4 text-zinc-500" />
                 <h3 className="text-sm font-medium text-zinc-400">Recent Projects</h3>
             </div>
 
+            {loadError && (
+                <p className="mb-3 rounded-lg border border-red-500/40 bg-red-950/40 px-3 py-2 text-xs text-red-200">
+                    {loadError}
+                </p>
+            )}
+
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                 {recentThreads.map((thread) => (
                     <button
+                        type="button"
                         key={thread._id}
-                        onClick={() => loadThread(thread._id)}
-                        className="group flex items-center justify-between gap-3 px-4 py-3 rounded-xl bg-zinc-900/50 border border-zinc-800/50 hover:border-zinc-700 hover:bg-zinc-800/50 transition-all text-left"
+                        onClick={() => void handleOpenThread(thread._id)}
+                        className="group relative z-10 flex items-center justify-between gap-3 px-4 py-3 rounded-xl bg-zinc-900/50 border border-zinc-800/50 hover:border-zinc-700 hover:bg-zinc-800/50 transition-all text-left"
                     >
                         <div className="flex items-center gap-3 min-w-0">
                             <MessageSquare className="w-4 h-4 text-zinc-600 group-hover:text-zinc-400 transition-colors shrink-0" />

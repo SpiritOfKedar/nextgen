@@ -9,7 +9,7 @@ import { useSetAtom, useAtom, useAtomValue } from 'jotai';
 import { messagesAtom, currentThreadIdAtom } from '../../store/atoms';
 import { useNavigate } from 'react-router-dom';
 import { fileSystemAtom, activeFileAtom } from '../../store/fileSystem';
-import { webContainerAtom, serverUrlAtom } from '../../store/webContainer';
+import { previewStatusAtom, previewStatusMessageAtom, webContainerAtom, serverUrlAtom } from '../../store/webContainer';
 import { useChat } from '../../hooks/useChat';
 
 export const ChatPanel: React.FC = () => {
@@ -20,6 +20,8 @@ export const ChatPanel: React.FC = () => {
     const setFileSystem = useSetAtom(fileSystemAtom);
     const setActiveFile = useSetAtom(activeFileAtom);
     const setServerUrl = useSetAtom(serverUrlAtom);
+    const setPreviewStatus = useSetAtom(previewStatusAtom);
+    const setPreviewStatusMessage = useSetAtom(previewStatusMessageAtom);
     const webContainer = useAtomValue(webContainerAtom);
 
     const { fetchThreads, loadThread } = useChat();
@@ -50,7 +52,9 @@ export const ChatPanel: React.FC = () => {
         ) return;
 
         hasRestoredSession.current = true;   // ← set immediately, before async work
-        loadThread(currentThreadId);
+        loadThread(currentThreadId).catch((err) =>
+            console.error('[ChatPanel] Failed to restore thread:', currentThreadId, err),
+        );
     }, [isLoaded, isSignedIn, webContainer, currentThreadId, loadThread, messages.length]);
 
     const handleNewChat = () => {
@@ -59,6 +63,8 @@ export const ChatPanel: React.FC = () => {
         setFileSystem([]);
         setActiveFile(null);
         setServerUrl(null);
+        setPreviewStatus('idle');
+        setPreviewStatusMessage('Start a new prompt to generate and run a project.');
         localStorage.removeItem('currentThreadId');
         hasRestoredSession.current = true; // prevent re-restore after manual clear
     };
