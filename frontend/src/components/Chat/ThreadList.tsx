@@ -2,7 +2,7 @@ import React, { useEffect, useState, useCallback } from 'react';
 import { MessageSquare, Clock, ArrowLeft, Loader2, RefreshCw } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { useAtomValue } from 'jotai';
-import { threadsAtom, currentThreadIdAtom } from '../../store/atoms';
+import { threadsAtom, currentThreadIdAtom, threadSwitchStateAtom } from '../../store/atoms';
 import { useChat } from '../../hooks/useChat';
 
 interface ThreadListProps {
@@ -30,6 +30,7 @@ export const ThreadList: React.FC<ThreadListProps> = ({ isOpen, onClose }) => {
     const { fetchThreads, loadThread } = useChat();
     const threads = useAtomValue(threadsAtom);
     const currentThreadId = useAtomValue(currentThreadIdAtom);
+    const threadSwitchState = useAtomValue(threadSwitchStateAtom);
     const [isLoading, setIsLoading] = useState(false);
     const [hasError, setHasError] = useState(false);
 
@@ -105,25 +106,43 @@ export const ThreadList: React.FC<ThreadListProps> = ({ isOpen, onClose }) => {
                         <button
                             key={thread._id}
                             onClick={() => {
-                                onClose();
-                                void loadThread(thread._id).catch((err) =>
-                                    console.error('[ThreadList] loadThread failed:', thread._id, err),
-                                );
+                                void loadThread(thread._id)
+                                    .then(() => onClose())
+                                    .catch((err) =>
+                                        console.error('[ThreadList] loadThread failed:', thread._id, err),
+                                    );
                             }}
+                            disabled={threadSwitchState.status === 'loading'}
                             className={`w-full text-left p-3 rounded-lg text-sm transition-all group ${currentThreadId === thread._id
                                 ? 'bg-zinc-800/50 text-white border border-zinc-700/50'
                                 : 'text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200 border border-transparent'
-                                }`}
+                                } ${threadSwitchState.status === 'loading' ? 'opacity-75 cursor-wait' : ''}`}
                         >
                             <div className="font-medium truncate">{thread.title}</div>
-                            <div className="text-xs text-zinc-500 mt-1 flex items-center gap-1">
-                                <MessageSquare className="w-3 h-3" />
-                                {formatRelativeDate(thread.updatedAt)}
+                            <div className="text-xs text-zinc-500 mt-1 flex items-center gap-1.5">
+                                {threadSwitchState.status === 'loading' && threadSwitchState.targetThreadId === thread._id ? (
+                                    <>
+                                        <Loader2 className="w-3 h-3 animate-spin" />
+                                        <span>Opening...</span>
+                                    </>
+                                ) : (
+                                    <>
+                                        <MessageSquare className="w-3 h-3" />
+                                        <span>{formatRelativeDate(thread.updatedAt)}</span>
+                                    </>
+                                )}
                             </div>
                         </button>
                     ))
                 )}
             </div>
+            {threadSwitchState.status === 'error' && threadSwitchState.errorMessage && (
+                <div className="p-3 border-t border-zinc-800">
+                    <p className="rounded-md border border-red-500/40 bg-red-950/40 px-2.5 py-2 text-xs text-red-200">
+                        {threadSwitchState.errorMessage}
+                    </p>
+                </div>
+            )}
         </motion.div>
     );
 };

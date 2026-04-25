@@ -1,6 +1,6 @@
-import { useCallback, useState, useRef } from 'react';
+import { useCallback, useState } from 'react';
 import { useAtom, useSetAtom, useAtomValue } from 'jotai';
-import { messagesAtom, currentThreadIdAtom, threadsAtom, selectedModelAtom } from '../store/atoms';
+import { messagesAtom, currentThreadIdAtom, threadSwitchStateAtom, threadsAtom, selectedModelAtom } from '../store/atoms';
 import { previewStatusAtom, previewStatusMessageAtom, webContainerAtom, serverUrlAtom, writeShellOutput } from '../store/webContainer';
 import { getWebContainerInstance } from './useWebContainer';
 import { fileSystemAtom, activeFileAtom } from '../store/fileSystem';
@@ -423,6 +423,8 @@ async function patchMissingDependencies(
     setFileSystem((prev) => upsertFile(prev, 'package.json', patchedPkg));
 }
 
+let latestThreadSwitchSeq = 0;
+
 export const useChat = () => {
     const { getToken, isLoaded, isSignedIn } = useAuth();
     const [messages, setMessages] = useAtom(messagesAtom);
@@ -436,10 +438,183 @@ export const useChat = () => {
     const setServerUrl = useSetAtom(serverUrlAtom);
     const setPreviewStatus = useSetAtom(previewStatusAtom);
     const setPreviewStatusMessage = useSetAtom(previewStatusMessageAtom);
+    const setThreadSwitchState = useSetAtom(threadSwitchStateAtom);
 
     const [isLoading, setIsLoading] = useState(false);
 
     const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001/api';
+
+    const startThreadSandboxInBackground = useCallback(async (
+        wc: any,
+        fileMap: Map<string, string>,
+    ) => {
+        if (!wc || fileMap.size === 0) return;
+
+        // If the AI didn't generate package.json, index.html, or vite.config,
+        // provide sensible defaults so npm install can work.
+        if (!fileMap.has('package.json')) {
+            const defaultPkg = JSON.stringify({
+                name: 'restored-project',
+                private: true,
+                version: '0.0.0',
+                type: 'module',
+                scripts: { dev: 'vite', build: 'vite build' },
+                dependencies: {
+                    'react': '^18.3.1',
+                    'react-dom': '^18.3.1',
+                    'lucide-react': '^0.400.0',
+                    'clsx': '^2.1.0',
+                    'tailwind-merge': '^2.2.0',
+                    'class-variance-authority': '^0.7.0',
+                    '@radix-ui/react-slot': '^1.0.0',
+                },
+                devDependencies: {
+                    '@types/react': '^18.3.0',
+                    '@types/react-dom': '^18.3.0',
+                    '@vitejs/plugin-react': '^4.3.0',
+                    'typescript': '^5.5.0',
+                    'vite': '^5.4.0',
+                    'tailwindcss': '^4.0.0',
+                    '@tailwindcss/vite': '^4.0.0',
+                },
+            }, null, 2);
+            fileMap.set('package.json', defaultPkg);
+        }
+
+        if (!fileMap.has('index.html')) {
+            const defaultHtml = `<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>App</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>`;
+            fileMap.set('index.html', defaultHtml);
+        }
+
+        if (!fileMap.has('vite.config.ts')) {
+            const defaultVite = `import { defineConfig } from 'vite';
+import react from '@vitejs/plugin-react';
+import tailwindcss from '@tailwindcss/vite';
+
+export default defineConfig({
+  plugins: [react(), tailwindcss()],
+});
+`;
+            fileMap.set('vite.config.ts', defaultVite);
+        }
+
+        if (!fileMap.has('tsconfig.json')) {
+            const defaultTsconfig = JSON.stringify({
+                compilerOptions: {
+                    target: 'ES2020',
+                    useDefineForClassFields: true,
+                    lib: ['ES2020', 'DOM', 'DOM.Iterable'],
+                    module: 'ESNext',
+                    skipLibCheck: true,
+                    moduleResolution: 'bundler',
+                    allowImportingTsExtensions: true,
+                    resolveJsonModule: true,
+                    isolatedModules: true,
+                    noEmit: true,
+                    jsx: 'react-jsx',
+                    strict: true,
+                },
+                include: ['src'],
+            }, null, 2);
+            fileMap.set('tsconfig.json', defaultTsconfig);
+        }
+
+        // Tailwind v4: ensure src/index.css uses @import "tailwindcss" (not v3 directives)
+        const existingCss = fileMap.get('src/index.css') || '';
+        if (!existingCss.includes('@import "tailwindcss"') && !existingCss.includes("@import 'tailwindcss'")) {
+            const fixedCss = '@import "tailwindcss";\n' + existingCss.replace(/@tailwind\s+(base|components|utilities);?\s*/g, '');
+            fileMap.set('src/index.css', fixedCss);
+        }
+
+        // Ensure src/main.tsx imports index.css
+        if (!fileMap.has('src/main.tsx')) {
+            const defaultMain = `import { StrictMode } from 'react';
+import { createRoot } from 'react-dom/client';
+import './index.css';
+import App from './App';
+
+createRoot(document.getElementById('root')!).render(
+  <StrictMode>
+    <App />
+  </StrictMode>
+);
+`;
+            fileMap.set('src/main.tsx', defaultMain);
+        } else {
+            const mainContent = fileMap.get('src/main.tsx')!;
+            if (!mainContent.includes('index.css')) {
+                fileMap.set('src/main.tsx', "import './index.css';\n" + mainContent);
+            }
+        }
+
+        // Patch missing dependencies before writing files
+        await patchMissingDependencies(fileMap, wc, setFileSystem);
+
+        // Clean sandbox before writing new project files.
+        for (const name of ['src', 'public', 'node_modules', 'package.json', 'package-lock.json', 'index.html', 'vite.config.ts', 'tsconfig.json']) {
+            try { await wc.fs.rm(name, { recursive: true }); } catch { /* doesn't exist */ }
+        }
+
+        for (const [filePath, content] of fileMap) {
+            try {
+                const absPath = filePath.startsWith('/') ? filePath.substring(1) : filePath;
+                const dir = absPath.substring(0, absPath.lastIndexOf('/'));
+                if (dir && dir !== '') {
+                    try { await wc.fs.mkdir(dir, { recursive: true }); } catch { /* exists */ }
+                }
+                await wc.fs.writeFile(absPath, content);
+            } catch (err) {
+                console.error(`[loadThread] Failed to write ${filePath}:`, err);
+            }
+        }
+
+        try {
+            await repairRootForNpm(wc, true);
+            writeShellOutput('\r\n\x1b[36m⬢ Installing dependencies...\x1b[0m\r\n');
+            const installProc = await wc.spawn('npm', ['install', '--no-audit', '--no-fund', '--legacy-peer-deps'], {
+                env: { FORCE_COLOR: '1' },
+            });
+            installProc.output.pipeTo(new WritableStream({
+                write(data) { writeShellOutput(data); }
+            }));
+
+            const installTimeout = new Promise<number>((r) => setTimeout(() => r(-1), 180_000));
+            const installExit = await Promise.race([installProc.exit, installTimeout]);
+
+            if (installExit === 0) {
+                setPreviewStatus('starting');
+                setPreviewStatusMessage('Dependencies installed. Starting npm run dev...');
+                writeShellOutput('\r\n\x1b[36m⬢ Starting dev server...\x1b[0m\r\n');
+                const devProc = await wc.spawn('npm', ['run', 'dev'], {
+                    env: { FORCE_COLOR: '1' },
+                });
+                devProc.output.pipeTo(new WritableStream({
+                    write(data) { writeShellOutput(data); }
+                }));
+            } else {
+                const msg = installExit === -1 ? 'npm install timed out (180s)' : `npm install failed (exit ${installExit})`;
+                setPreviewStatus('error');
+                setPreviewStatusMessage(msg);
+                writeShellOutput(`\r\n\x1b[31m✗ ${msg}\x1b[0m\r\n`);
+            }
+        } catch (err) {
+            console.error('[loadThread] install error:', err);
+            setPreviewStatus('error');
+            setPreviewStatusMessage(`Install error: ${String(err)}`);
+            writeShellOutput(`\r\n\x1b[31m✗ Install error: ${err}\x1b[0m\r\n`);
+        }
+    }, [setFileSystem, setPreviewStatus, setPreviewStatusMessage]);
 
     const sendMessage = async (content: string) => {
         if (!content.trim() || !isLoaded || !isSignedIn) {
@@ -474,10 +649,7 @@ export const useChat = () => {
                 },
                 body: JSON.stringify({
                     message: content,
-                    // Read threadId from localStorage for freshest value —
-                    // the atom value in the closure may be stale if LandingPage
-                    // just cleared it before this async function continues.
-                    threadId: localStorage.getItem('currentThreadId') || null,
+                    threadId: currentThreadId,
                     model: selectedModel,
                 }),
             });
@@ -502,7 +674,7 @@ export const useChat = () => {
             const decoder = new TextDecoder();
             if (!reader) return;
 
-            let assistantMessageId = Date.now() + 1 + '';
+            const assistantMessageId = Date.now() + 1 + '';
             let accumulatedContent = '';
 
             setMessages((prev) => [
@@ -721,45 +893,59 @@ export const useChat = () => {
     };
 
     const fetchThreads = useCallback(async () => {
-        if (!isLoaded || !isSignedIn) return;
-        try {
-            const token = await getToken();
-            if (!token) return;
-            const res = await fetch(`${API_URL}/chat/history`, {
-                headers: { Authorization: `Bearer ${token}` }
-            });
-            if (res.ok) {
-                const data = await res.json();
-                setThreads(data);
-            }
-        } catch (error) {
-            console.error('Failed to load threads', error);
+        if (!isLoaded || !isSignedIn) {
+            throw new Error('You need to be signed in to load history.');
         }
+        const token = await getToken();
+        if (!token) {
+            throw new Error('Could not get auth token. Try signing in again.');
+        }
+        const res = await fetch(`${API_URL}/chat/history`, {
+            headers: { Authorization: `Bearer ${token}` }
+        });
+        if (!res.ok) {
+            const errBody = await res.text().catch(() => '');
+            throw new Error(`Failed to load history (${res.status}): ${errBody || res.statusText}`);
+        }
+        const data = await res.json();
+        setThreads(data);
     }, [getToken, isLoaded, isSignedIn, setThreads]);
 
-    // Global flag specifically to prevent concurrent loadThread executions during hot-reloads
-    const loadThreadInProgress = useRef(false);
-
     const loadThread = useCallback(async (threadId: string) => {
-        if (!isLoaded || !isSignedIn) return;
-        if (loadThreadInProgress.current) return;
         if (!threadId || typeof threadId !== 'string') {
+            setThreadSwitchState({
+                status: 'error',
+                targetThreadId: null,
+                errorMessage: 'Invalid thread id.',
+            });
             throw new Error('Invalid thread id');
         }
+        if (!isLoaded || !isSignedIn) {
+            setThreadSwitchState({
+                status: 'error',
+                targetThreadId: threadId,
+                errorMessage: 'You need to be signed in to switch threads.',
+            });
+            throw new Error('You need to be signed in to switch threads.');
+        }
+        const switchSeq = ++latestThreadSwitchSeq;
+        const isStale = () => switchSeq !== latestThreadSwitchSeq;
+        setThreadSwitchState({
+            status: 'loading',
+            targetThreadId: threadId,
+            errorMessage: null,
+        });
+        navigate('/builder');
         const id = encodeURIComponent(threadId);
         try {
-            loadThreadInProgress.current = true;
             const token = await getToken();
             if (!token) {
                 throw new Error('Could not get auth token. Try signing in again.');
             }
-
-            // ── Clear stale state immediately ──
-            setServerUrl(null); // Reset preview URL for the new thread
+            if (isStale()) return;
+            setServerUrl(null);
             setPreviewStatus('starting');
             setPreviewStatusMessage('Loading thread files and preparing preview environment...');
-            setFileSystem([]);
-            setActiveFile(null);
 
             // Fetch messages and thread files in parallel
             const [messagesRes, filesRes] = await Promise.all([
@@ -777,9 +963,16 @@ export const useChat = () => {
                     `Could not load thread (${messagesRes.status}): ${errBody || messagesRes.statusText}`.trim(),
                 );
             }
+            if (!filesRes.ok) {
+                const filesErrBody = await filesRes.text().catch(() => '');
+                throw new Error(
+                    `Could not load thread files (${filesRes.status}): ${filesErrBody || filesRes.statusText}`.trim(),
+                );
+            }
+            if (isStale()) return;
 
             const rawMessages = await messagesRes.json();
-            const threadFiles: { filePath: string; content: string }[] = filesRes.ok ? await filesRes.json() : [];
+            const threadFiles: { filePath: string; content: string }[] = await filesRes.json();
 
             // Get the WebContainer instance — prefer atom, fallback to module singleton
             const wc = webContainerInstance ?? getWebContainerInstance();
@@ -820,191 +1013,8 @@ export const useChat = () => {
                 }
             }
 
-            // Write all files to WebContainer
-            if (wc && fileMap.size > 0) {
-                // If the AI didn't generate package.json, index.html, or vite.config,
-                // provide sensible defaults so npm install can work.
-                if (!fileMap.has('package.json')) {
-                    const defaultPkg = JSON.stringify({
-                        name: 'restored-project',
-                        private: true,
-                        version: '0.0.0',
-                        type: 'module',
-                        scripts: { dev: 'vite', build: 'vite build' },
-                        dependencies: {
-                            'react': '^18.3.1',
-                            'react-dom': '^18.3.1',
-                            'lucide-react': '^0.400.0',
-                            'clsx': '^2.1.0',
-                            'tailwind-merge': '^2.2.0',
-                            'class-variance-authority': '^0.7.0',
-                            '@radix-ui/react-slot': '^1.0.0',
-                        },
-                        devDependencies: {
-                            '@types/react': '^18.3.0',
-                            '@types/react-dom': '^18.3.0',
-                            '@vitejs/plugin-react': '^4.3.0',
-                            'typescript': '^5.5.0',
-                            'vite': '^5.4.0',
-                            'tailwindcss': '^4.0.0',
-                            '@tailwindcss/vite': '^4.0.0',
-                        },
-                    }, null, 2);
-                    fileMap.set('package.json', defaultPkg);
-                    restoredFileSystem = upsertFile(restoredFileSystem, 'package.json', defaultPkg);
-                }
+            if (isStale()) return;
 
-                if (!fileMap.has('index.html')) {
-                    const defaultHtml = `<!DOCTYPE html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>App</title>
-  </head>
-  <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
-  </body>
-</html>`;
-                    fileMap.set('index.html', defaultHtml);
-                }
-
-                if (!fileMap.has('vite.config.ts')) {
-                    const defaultVite = `import { defineConfig } from 'vite';
-import react from '@vitejs/plugin-react';
-import tailwindcss from '@tailwindcss/vite';
-
-export default defineConfig({
-  plugins: [react(), tailwindcss()],
-});
-`;
-                    fileMap.set('vite.config.ts', defaultVite);
-                }
-
-                if (!fileMap.has('tsconfig.json')) {
-                    const defaultTsconfig = JSON.stringify({
-                        compilerOptions: {
-                            target: 'ES2020',
-                            useDefineForClassFields: true,
-                            lib: ['ES2020', 'DOM', 'DOM.Iterable'],
-                            module: 'ESNext',
-                            skipLibCheck: true,
-                            moduleResolution: 'bundler',
-                            allowImportingTsExtensions: true,
-                            resolveJsonModule: true,
-                            isolatedModules: true,
-                            noEmit: true,
-                            jsx: 'react-jsx',
-                            strict: true,
-                        },
-                        include: ['src'],
-                    }, null, 2);
-                    fileMap.set('tsconfig.json', defaultTsconfig);
-                }
-
-                // Tailwind v4: ensure src/index.css uses @import "tailwindcss" (not v3 directives)
-                const existingCss = fileMap.get('src/index.css') || '';
-                if (!existingCss.includes('@import "tailwindcss"') && !existingCss.includes("@import 'tailwindcss'")) {
-                    const fixedCss = '@import "tailwindcss";\n' + existingCss.replace(/@tailwind\s+(base|components|utilities);?\s*/g, '');
-                    fileMap.set('src/index.css', fixedCss);
-                }
-
-                // Ensure src/main.tsx imports index.css
-                if (!fileMap.has('src/main.tsx')) {
-                    const defaultMain = `import { StrictMode } from 'react';
-import { createRoot } from 'react-dom/client';
-import './index.css';
-import App from './App';
-
-createRoot(document.getElementById('root')!).render(
-  <StrictMode>
-    <App />
-  </StrictMode>
-);
-`;
-                    fileMap.set('src/main.tsx', defaultMain);
-                } else {
-                    const mainContent = fileMap.get('src/main.tsx')!;
-                    if (!mainContent.includes('index.css')) {
-                        fileMap.set('src/main.tsx', "import './index.css';\n" + mainContent);
-                    }
-                }
-
-                // Patch missing dependencies before writing files
-                await patchMissingDependencies(fileMap, wc, setFileSystem);
-
-                // ── Clean WebContainer filesystem before writing new thread files ──
-                // Remove old project files so we don't get stale leftovers from a
-                // previous thread. Only remove known project directories/files.
-                for (const name of ['src', 'public', 'node_modules', 'package.json', 'package-lock.json', 'index.html', 'vite.config.ts', 'tsconfig.json']) {
-                    try { await wc.fs.rm(name, { recursive: true }); } catch { /* doesn't exist */ }
-                }
-
-                // Write each file using fs.writeFile with proper directory creation
-                for (const [filePath, content] of fileMap) {
-                    try {
-                        const absPath = filePath.startsWith('/') ? filePath.substring(1) : filePath;
-                        const dir = absPath.substring(0, absPath.lastIndexOf('/'));
-                        if (dir && dir !== '') {
-                            try { await wc.fs.mkdir(dir, { recursive: true }); } catch { /* exists */ }
-                        }
-                        await wc.fs.writeFile(absPath, content);
-                    } catch (err) {
-                        console.error(`[loadThread] Failed to write ${filePath}:`, err);
-                    }
-                }
-
-                // Run npm install then npm run dev using direct spawn
-                try {
-                    await repairRootForNpm(wc, true);
-                    writeShellOutput('\r\n\x1b[36m⬢ Installing dependencies...\x1b[0m\r\n');
-                    const installProc = await wc.spawn('npm', ['install', '--no-audit', '--no-fund', '--legacy-peer-deps'], {
-                        env: { FORCE_COLOR: '1' },
-                    });
-                    installProc.output.pipeTo(new WritableStream({
-                        write(data) { writeShellOutput(data); }
-                    }));
-
-                    const installTimeout = new Promise<number>((r) => setTimeout(() => r(-1), 180_000));
-                    const installExit = await Promise.race([installProc.exit, installTimeout]);
-
-                    if (installExit === 0) {
-                        setPreviewStatus('starting');
-                        setPreviewStatusMessage('Dependencies installed. Starting npm run dev...');
-                        writeShellOutput('\r\n\x1b[36m⬢ Starting dev server...\x1b[0m\r\n');
-                        const devProc = await wc.spawn('npm', ['run', 'dev'], {
-                            env: { FORCE_COLOR: '1' },
-                        });
-                        devProc.output.pipeTo(new WritableStream({
-                            write(data) { writeShellOutput(data); }
-                        }));
-                        // dev server is long-running, don't await
-                    } else {
-                        const msg = installExit === -1 ? 'npm install timed out (180s)' : `npm install failed (exit ${installExit})`;
-                        setPreviewStatus('error');
-                        setPreviewStatusMessage(msg);
-                        writeShellOutput(`\r\n\x1b[31m✗ ${msg}\x1b[0m\r\n`);
-                    }
-                } catch (err) {
-                    console.error('[loadThread] install error:', err);
-                    setPreviewStatus('error');
-                    setPreviewStatusMessage(`Install error: ${String(err)}`);
-                    writeShellOutput(`\r\n\x1b[31m✗ Install error: ${err}\x1b[0m\r\n`);
-                }
-            }
-
-            // Update file system atom if we found files
-            if (restoredFileSystem.length > 0) {
-                setFileSystem(restoredFileSystem);
-            }
-
-            // Set last file as active in editor
-            if (lastFile) {
-                setActiveFile(lastFile);
-            }
-
-            // Map backend messages to frontend format (strip bolt tags for display)
             const formattedMessages = rawMessages.map((m: any) => ({
                 id: m._id,
                 role: m.role,
@@ -1014,14 +1024,46 @@ createRoot(document.getElementById('root')!).render(
             setMessages(formattedMessages);
             setCurrentThreadId(threadId);
             localStorage.setItem('currentThreadId', threadId);
-            navigate('/builder');
+
+            if (wc && fileMap.size > 0) {
+                // Make thread switching responsive: restore UI immediately,
+                // then prepare/install sandbox in background.
+                void startThreadSandboxInBackground(wc, new Map(fileMap));
+            }
+            if (isStale()) return;
+
+            // Update file system atom if we found files
+            if (restoredFileSystem.length > 0) {
+                setFileSystem(restoredFileSystem);
+            } else {
+                setFileSystem([]);
+            }
+
+            // Set last file as active in editor
+            if (lastFile) {
+                setActiveFile(lastFile);
+            } else {
+                setActiveFile(null);
+            }
+            if (!isStale()) {
+                setThreadSwitchState({
+                    status: 'idle',
+                    targetThreadId: null,
+                    errorMessage: null,
+                });
+            }
         } catch (error) {
             console.error('[useChat] loadThread failed:', threadId, error);
+            if (!isStale()) {
+                setThreadSwitchState({
+                    status: 'error',
+                    targetThreadId: threadId,
+                    errorMessage: error instanceof Error ? error.message : 'Could not switch thread.',
+                });
+            }
             throw error;
-        } finally {
-            loadThreadInProgress.current = false;
         }
-    }, [getToken, isLoaded, isSignedIn, setMessages, setCurrentThreadId, navigate, setFileSystem, setActiveFile, setServerUrl, setPreviewStatus, setPreviewStatusMessage, webContainerInstance]);
+    }, [getToken, isLoaded, isSignedIn, navigate, setThreadSwitchState, setServerUrl, setPreviewStatus, setPreviewStatusMessage, webContainerInstance, setMessages, setCurrentThreadId, setFileSystem, setActiveFile, startThreadSandboxInBackground]);
 
     return {
         messages,

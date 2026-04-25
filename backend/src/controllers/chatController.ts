@@ -1,5 +1,5 @@
 import { Request, Response } from 'express';
-import { ChatService } from '../services/chatService';
+import { ChatService, ThreadAccessError } from '../services/chatService';
 import { log, errorFields } from '../lib/logger';
 
 const chatService = new ChatService();
@@ -80,6 +80,9 @@ export const chatController = {
                 threadId: req.params.threadId,
                 ...errorFields(error),
             });
+            if (error instanceof ThreadAccessError) {
+                return res.status(404).json({ error: error.message });
+            }
             res.status(500).json({ error: 'Failed to fetch thread' });
         }
     },
@@ -97,6 +100,9 @@ export const chatController = {
                 threadId: req.params.threadId,
                 ...errorFields(error),
             });
+            if (error instanceof ThreadAccessError) {
+                return res.status(404).json({ error: error.message });
+            }
             res.status(500).json({ error: 'Failed to fetch thread files' });
         }
     }

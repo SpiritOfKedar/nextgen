@@ -1,7 +1,12 @@
 
 import React from 'react';
 import { useAtom, useAtomValue } from 'jotai';
-import { File, Folder, FileJson, FileCode, ChevronRight, ChevronDown } from 'lucide-react';
+import {
+    File,
+    Folder,
+    ChevronRight,
+    ChevronDown,
+} from 'lucide-react';
 import { fileSystemAtom, activeFileAtom } from '../../store/fileSystem';
 import type { FileSystemItem, FolderNode } from '../../store/fileSystem';
 
@@ -91,9 +96,37 @@ const FileTreeNode: React.FC<{ item: FileSystemItem, depth: number, parentPath: 
 };
 
 const FileIcon = ({ name }: { name: string }) => {
-    if (name.endsWith('.tsx') || name.endsWith('.ts')) return <FileCode className="w-4 h-4 text-blue-400" />;
-    if (name.endsWith('.css')) return <File className="w-4 h-4 text-sky-300" />;
-    if (name.endsWith('.json')) return <FileJson className="w-4 h-4 text-yellow-400" />;
-    if (name.endsWith('.html')) return <File className="w-4 h-4 text-orange-400" />;
+    const extension = name.includes('.') ? name.split('.').pop()?.toLowerCase() : '';
+    const lowerName = name.toLowerCase();
+
+    if (extension === 'jsx' || extension === 'tsx') {
+        return (
+            <span className="inline-flex items-center justify-center w-4 h-4 text-cyan-400">
+                <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="1.5">
+                    <circle cx="12" cy="12" r="1.6" fill="currentColor" />
+                    <ellipse cx="12" cy="12" rx="8.5" ry="3.6" />
+                    <ellipse cx="12" cy="12" rx="8.5" ry="3.6" transform="rotate(60 12 12)" />
+                    <ellipse cx="12" cy="12" rx="8.5" ry="3.6" transform="rotate(120 12 12)" />
+                </svg>
+            </span>
+        );
+    }
+
+    if (lowerName === 'package.json') return <FileGlyph label="npm" accent="bg-emerald-400" />;
+    if (lowerName.includes('config') || lowerName === 'tsconfig.json') return <FileGlyph label="cfg" accent="bg-zinc-400" />;
+    if (extension === 'ts') return <FileGlyph label="ts" accent="bg-blue-400" />;
+    if (extension === 'js') return <FileGlyph label="js" accent="bg-yellow-300" />;
+    if (extension === 'css') return <FileGlyph label="css" accent="bg-sky-300" />;
+    if (extension === 'html') return <FileGlyph label="html" accent="bg-orange-300" />;
+    if (extension === 'json') return <FileGlyph label="{}" accent="bg-amber-300" />;
+    if (extension === 'md') return <FileGlyph label="md" accent="bg-zinc-300" />;
+
     return <File className="w-4 h-4 text-zinc-500" />;
 };
+
+const FileGlyph = ({ label, accent }: { label: string; accent: string }) => (
+    <span className="relative inline-flex w-4 h-4 items-center justify-center rounded-sm border border-zinc-700 bg-zinc-900 text-[7px] font-semibold uppercase text-zinc-200 leading-none">
+        <span className={`absolute left-0 top-0 h-full w-[2px] rounded-l-sm ${accent}`} />
+        {label}
+    </span>
+);

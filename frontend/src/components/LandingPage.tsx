@@ -6,7 +6,7 @@ import { RecentThreads } from './Chat/RecentThreads';
 import { Footer } from './Footer';
 import { BackgroundGrid } from './Layout/BackgroundGrid';
 import { useSetAtom } from 'jotai';
-import { messagesAtom, currentThreadIdAtom } from '../store/atoms';
+import { messagesAtom, currentThreadIdAtom, threadSwitchStateAtom } from '../store/atoms';
 import { fileSystemAtom, activeFileAtom } from '../store/fileSystem';
 import { previewStatusAtom, previewStatusMessageAtom, serverUrlAtom } from '../store/webContainer';
 
@@ -18,6 +18,7 @@ export const LandingPage: React.FC = () => {
     const setServerUrl = useSetAtom(serverUrlAtom);
     const setPreviewStatus = useSetAtom(previewStatusAtom);
     const setPreviewStatusMessage = useSetAtom(previewStatusMessageAtom);
+    const setThreadSwitchState = useSetAtom(threadSwitchStateAtom);
     const didClear = useRef(false);
 
     // Landing page = new conversation. Clear stale thread state ONCE so the
@@ -33,6 +34,7 @@ export const LandingPage: React.FC = () => {
         setServerUrl(null);
         setPreviewStatus('idle');
         setPreviewStatusMessage('Start a new prompt to generate and run a project.');
+        setThreadSwitchState({ status: 'idle', targetThreadId: null, errorMessage: null });
         localStorage.removeItem('currentThreadId');
     }, []); // eslint-disable-line react-hooks/exhaustive-deps
 

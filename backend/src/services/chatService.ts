@@ -16,6 +16,16 @@ import { log, errorFields } from '../lib/logger';
 
 dotenv.config();
 
+export class ThreadAccessError extends Error {
+    public readonly code: 'THREAD_NOT_FOUND_OR_UNAUTHORIZED';
+
+    constructor(message = 'Thread not found or unauthorized') {
+        super(message);
+        this.name = 'ThreadAccessError';
+        this.code = 'THREAD_NOT_FOUND_OR_UNAUTHORIZED';
+    }
+}
+
 /** Optional correlation fields for chat streaming logs */
 export type ChatLogContext = {
     requestId?: string;
@@ -547,14 +557,14 @@ export class ChatService {
 
     async getThreadMessages(threadId: string, userId: string) {
         const thread = await threadsRepo.findByIdForUser(threadId, userId);
-        if (!thread) throw new Error('Thread not found or unauthorized');
+        if (!thread) throw new ThreadAccessError();
         const rows = await messagesRepo.listForThread(threadId);
         return Promise.all(rows.map((m) => this.mapMessage(m)));
     }
 
     async getThreadFiles(threadId: string, userId: string) {
         const thread = await threadsRepo.findByIdForUser(threadId, userId);
-        if (!thread) throw new Error('Thread not found or unauthorized');
+        if (!thread) throw new ThreadAccessError();
         const snap = await fileVersionsRepo.currentSnapshot(threadId);
         if (snap.length === 0) return [];
         const blobs = await blobsRepo.getBlobs(snap.map((s) => s.current_blob_sha256));

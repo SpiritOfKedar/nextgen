@@ -6,7 +6,7 @@ import { PanelLeft, Plus } from 'lucide-react';
 import logo from '../../assets/nextgen-logo.png';
 import { UserButton, useAuth } from '@clerk/clerk-react';
 import { useSetAtom, useAtom, useAtomValue } from 'jotai';
-import { messagesAtom, currentThreadIdAtom } from '../../store/atoms';
+import { messagesAtom, currentThreadIdAtom, threadSwitchStateAtom } from '../../store/atoms';
 import { useNavigate } from 'react-router-dom';
 import { fileSystemAtom, activeFileAtom } from '../../store/fileSystem';
 import { previewStatusAtom, previewStatusMessageAtom, webContainerAtom, serverUrlAtom } from '../../store/webContainer';
@@ -22,6 +22,7 @@ export const ChatPanel: React.FC = () => {
     const setServerUrl = useSetAtom(serverUrlAtom);
     const setPreviewStatus = useSetAtom(previewStatusAtom);
     const setPreviewStatusMessage = useSetAtom(previewStatusMessageAtom);
+    const setThreadSwitchState = useSetAtom(threadSwitchStateAtom);
     const webContainer = useAtomValue(webContainerAtom);
 
     const { fetchThreads, loadThread } = useChat();
@@ -65,6 +66,7 @@ export const ChatPanel: React.FC = () => {
         setServerUrl(null);
         setPreviewStatus('idle');
         setPreviewStatusMessage('Start a new prompt to generate and run a project.');
+        setThreadSwitchState({ status: 'idle', targetThreadId: null, errorMessage: null });
         localStorage.removeItem('currentThreadId');
         hasRestoredSession.current = true; // prevent re-restore after manual clear
     };
@@ -110,12 +112,12 @@ export const ChatPanel: React.FC = () => {
                 </div>
 
                 {/* Messages */}
-                <div className="flex-1 overflow-y-auto p-4 pb-48 custom-scrollbar">
+                <div className="flex-1 overflow-y-auto px-4 pt-4 pb-24 md:pb-28 custom-scrollbar">
                     <MessageList />
                 </div>
 
                 {/* Input Area */}
-                <div className="sticky bottom-0 left-0 w-full px-4 pb-6 pt-10 bg-linear-to-t from-zinc-950 via-zinc-950/95 to-transparent z-20">
+                <div className="sticky bottom-0 left-0 w-full px-4 pb-4 pt-4 bg-linear-to-t from-zinc-950 via-zinc-950/95 to-transparent z-20">
                     <InputArea />
                 </div>
             </div>

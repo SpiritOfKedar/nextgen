@@ -1,14 +1,15 @@
 import React, { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
-import { MessageSquare, Clock, ArrowRight } from 'lucide-react';
+import { MessageSquare, Clock, ArrowRight, Loader2 } from 'lucide-react';
 import { useAtomValue } from 'jotai';
-import { threadsAtom } from '../../store/atoms';
+import { threadSwitchStateAtom, threadsAtom } from '../../store/atoms';
 import { useChat } from '../../hooks/useChat';
 import { useAuth } from '@clerk/clerk-react';
 
 export const RecentThreads: React.FC = () => {
     const { fetchThreads, loadThread } = useChat();
     const threads = useAtomValue(threadsAtom);
+    const threadSwitchState = useAtomValue(threadSwitchStateAtom);
     const { isSignedIn, isLoaded } = useAuth();
     const [loadError, setLoadError] = useState<string | null>(null);
 
@@ -73,7 +74,8 @@ export const RecentThreads: React.FC = () => {
                         type="button"
                         key={thread._id}
                         onClick={() => void handleOpenThread(thread._id)}
-                        className="group relative z-10 flex items-center justify-between gap-3 px-4 py-3 rounded-xl bg-zinc-900/50 border border-zinc-800/50 hover:border-zinc-700 hover:bg-zinc-800/50 transition-all text-left"
+                        disabled={threadSwitchState.status === 'loading'}
+                        className={`group relative z-10 flex items-center justify-between gap-3 px-4 py-3 rounded-xl bg-zinc-900/50 border border-zinc-800/50 hover:border-zinc-700 hover:bg-zinc-800/50 transition-all text-left ${threadSwitchState.status === 'loading' ? 'opacity-75 cursor-wait' : ''}`}
                     >
                         <div className="flex items-center gap-3 min-w-0">
                             <MessageSquare className="w-4 h-4 text-zinc-600 group-hover:text-zinc-400 transition-colors shrink-0" />
@@ -86,7 +88,11 @@ export const RecentThreads: React.FC = () => {
                                 </p>
                             </div>
                         </div>
-                        <ArrowRight className="w-3.5 h-3.5 text-zinc-700 group-hover:text-zinc-400 transition-colors shrink-0 opacity-0 group-hover:opacity-100" />
+                        {threadSwitchState.status === 'loading' && threadSwitchState.targetThreadId === thread._id ? (
+                            <Loader2 className="w-3.5 h-3.5 text-zinc-400 animate-spin shrink-0" />
+                        ) : (
+                            <ArrowRight className="w-3.5 h-3.5 text-zinc-700 group-hover:text-zinc-400 transition-colors shrink-0 opacity-0 group-hover:opacity-100" />
+                        )}
                     </button>
                 ))}
             </div>
