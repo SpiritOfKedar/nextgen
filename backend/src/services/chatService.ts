@@ -574,6 +574,32 @@ export class ChatService {
         }));
     }
 
+    async getThreadFilesDelta(threadId: string, userId: string, sinceSeq: number) {
+        const thread = await threadsRepo.findByIdForUser(threadId, userId);
+        if (!thread) throw new ThreadAccessError();
+
+        const changes = await fileVersionsRepo.latestChangesSinceSeq(threadId, sinceSeq);
+        const upserts = changes.filter((c) => !c.is_deletion);
+        const deletedPaths = changes.filter((c) => c.is_deletion).map((c) => c.file_path);
+        const blobs = await blobsRepo.getBlobs(upserts.map((c) => c.blob_sha256));
+
+        const files = upserts.map((c) => ({
+            filePath: c.file_path,
+            content: blobs.get(c.blob_sha256) ?? '',
+        }));
+
+        const messages = await messagesRepo.listForThread(threadId);
+        const lastSeq = messages.reduce((max, m) => Math.max(max, Number(m.seq) || 0), 0);
+
+        return {
+            isDelta: true,
+            sinceSeq,
+            lastSeq,
+            files,
+            deletedPaths,
+        };
+    }
+
     private mapThread(row: { id: string; title: string; created_at: string; updated_at: string }) {
         return {
             _id: row.id,

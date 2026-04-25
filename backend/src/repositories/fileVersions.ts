@@ -88,3 +88,30 @@ export const snapshotAtSeq = async (
     );
     return result.rows.filter((r) => !r.is_deletion);
 };
+
+export interface FileDeltaRow extends FileVersionRow {
+    seq: number;
+}
+
+/**
+ * Return the latest change per file path after a given message seq.
+ * Includes both upserts and deletions so callers can apply deltas.
+ */
+export const latestChangesSinceSeq = async (
+    threadId: string,
+    sinceSeq: number,
+    tx?: Tx,
+): Promise<FileDeltaRow[]> => {
+    const result = await q(tx).query<FileDeltaRow>(
+        `SELECT DISTINCT ON (fv.file_path)
+            fv.*,
+            m.seq::int AS seq
+         FROM public.file_versions fv
+         JOIN public.messages m ON m.id = fv.message_id
+         WHERE fv.thread_id = $1
+           AND m.seq > $2
+         ORDER BY fv.file_path ASC, fv.version DESC`,
+        [threadId, sinceSeq],
+    );
+    return result.rows;
+};

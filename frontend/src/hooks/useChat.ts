@@ -1,7 +1,7 @@
 import { useCallback, useState } from 'react';
 import { useAtom, useSetAtom, useAtomValue } from 'jotai';
 import { messagesAtom, currentThreadIdAtom, threadSwitchStateAtom, threadsAtom, selectedModelAtom } from '../store/atoms';
-import { previewStatusAtom, previewStatusMessageAtom, webContainerAtom, serverUrlAtom, writeShellOutput } from '../store/webContainer';
+import { previewStatusAtom, previewStatusMessageAtom, sandboxRuntimeMetadataAtom, webContainerAtom, serverUrlAtom, writeShellOutput } from '../store/webContainer';
 import { getWebContainerInstance } from './useWebContainer';
 import { fileSystemAtom, activeFileAtom } from '../store/fileSystem';
 import type { FileSystemItem, FileNode, FolderNode, ActiveFile } from '../store/fileSystem';
@@ -9,6 +9,7 @@ import { useAuth } from '@clerk/clerk-react';
 import { useNavigate } from 'react-router-dom';
 import { BoltParser } from '../lib/boltProtocol';
 import type { BoltAction } from '../lib/boltProtocol';
+import { loadDependencySnapshot, saveDependencySnapshot } from '../lib/sandboxSnapshotCache';
 
 // Strip bolt protocol XML tags from content for display in chat
 // Preserves narrative text and generates clean file summaries
@@ -425,6 +426,135 @@ async function patchMissingDependencies(
 
 let latestThreadSwitchSeq = 0;
 
+type ThreadRuntimeMetadata = {
+    depFingerprint: string;
+    criticalFingerprint: string;
+    lastAppliedSeq: number;
+    installSucceeded: boolean;
+    lastBootAt: number;
+    knownFiles: Set<string>;
+    installFailureReason?: string;
+};
+
+const threadRuntimeMeta = new Map<string, ThreadRuntimeMetadata>();
+let mountedProjectFiles = new Set<string>();
+const mountedFilesByThread = new Map<string, Set<string>>();
+let activeMountedThreadId: string | null = null;
+let activeDevProcess: any = null;
+let activeDevServerFingerprint: string | null = null;
+let activeCriticalFingerprint: string | null = null;
+
+const hashString = (value: string): string => {
+    let hash = 5381;
+    for (let i = 0; i < value.length; i += 1) {
+        hash = ((hash << 5) + hash) ^ value.charCodeAt(i);
+    }
+    return (hash >>> 0).toString(16);
+};
+
+const getDependencyFingerprint = (fileMap: Map<string, string>): string => {
+    const pkg = fileMap.get('package.json') || '';
+    const lock = fileMap.get('package-lock.json') || '';
+    return hashString(`${pkg}\n---\n${lock}`);
+};
+
+const getCriticalConfigFingerprint = (fileMap: Map<string, string>): string => {
+    const packageJson = fileMap.get('package.json') || '';
+    const lockfile = fileMap.get('package-lock.json') || '';
+    const viteConfig = fileMap.get('vite.config.ts') || fileMap.get('vite.config.js') || '';
+    const tsConfig = fileMap.get('tsconfig.json') || '';
+    return hashString(`${packageJson}\n${lockfile}\n${viteConfig}\n${tsConfig}`);
+};
+
+const DEP_FINGERPRINT_MARKER_PATH = '/.boltly/dep-fingerprint';
+const SNAPSHOT_ARCHIVE_PATH = '/.boltly/dependency-snapshot.tgz';
+const SNAPSHOT_TOOLCHAIN_VERSION = 'webcontainer-npm-v1';
+const INSTALL_TIMEOUT_MS = 420_000;
+
+const readInstalledDependencyFingerprint = async (wc: any): Promise<string | null> => {
+    try {
+        const marker = await wc.fs.readFile(DEP_FINGERPRINT_MARKER_PATH, 'utf-8');
+        const normalized = typeof marker === 'string' ? marker.trim() : '';
+        return normalized || null;
+    } catch {
+        return null;
+    }
+};
+
+const persistInstalledDependencyFingerprint = async (wc: any, fingerprint: string): Promise<void> => {
+    try {
+        await wc.fs.mkdir('/.boltly', { recursive: true });
+        await wc.fs.writeFile(DEP_FINGERPRINT_MARKER_PATH, fingerprint);
+    } catch {
+        // Best effort only; failed marker write should never block sandbox startup.
+    }
+};
+
+const hasInstalledNodeModules = async (wc: any, projectDir: string): Promise<boolean> => {
+    const normalizedProjectDir = projectDir === '/' ? '' : projectDir;
+    const nodeModulesPath = `${normalizedProjectDir}/node_modules`;
+    try {
+        const entries = await wc.fs.readdir(nodeModulesPath || '/node_modules');
+        return Array.isArray(entries) && entries.length > 0;
+    } catch {
+        return false;
+    }
+};
+
+const bytesToBase64 = (input: Uint8Array): string => {
+    let binary = '';
+    const chunkSize = 0x8000;
+    for (let i = 0; i < input.length; i += chunkSize) {
+        const chunk = input.subarray(i, i + chunkSize);
+        binary += String.fromCharCode(...chunk);
+    }
+    return btoa(binary);
+};
+
+const base64ToBytes = (value: string): Uint8Array => {
+    const binary = atob(value);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) {
+        bytes[i] = binary.charCodeAt(i);
+    }
+    return bytes;
+};
+
+const runProcessAndCollectExit = async (proc: any, timeoutMs: number): Promise<number> => {
+    const timeout = new Promise<number>((resolve) => setTimeout(() => resolve(-1), timeoutMs));
+    return Promise.race([proc.exit, timeout]);
+};
+
+const createNodeModulesSnapshot = async (wc: any, projectDir: string): Promise<Uint8Array | null> => {
+    const cwd = projectDir || '/';
+    const proc = await wc.spawn('sh', ['-lc', `tar -czf "${SNAPSHOT_ARCHIVE_PATH}" -C "${cwd}" node_modules`], {
+        env: { FORCE_COLOR: '1' },
+    });
+    const exitCode = await runProcessAndCollectExit(proc, 120_000);
+    if (exitCode !== 0) return null;
+    try {
+        const archive = await wc.fs.readFile(SNAPSHOT_ARCHIVE_PATH);
+        return archive instanceof Uint8Array ? archive : new Uint8Array(archive);
+    } catch {
+        return null;
+    }
+};
+
+const restoreNodeModulesSnapshot = async (wc: any, projectDir: string, archiveBytes: Uint8Array): Promise<boolean> => {
+    const cwd = projectDir || '/';
+    try {
+        await wc.fs.mkdir('/.boltly', { recursive: true });
+        await wc.fs.writeFile(SNAPSHOT_ARCHIVE_PATH, archiveBytes);
+        const proc = await wc.spawn('sh', ['-lc', `mkdir -p "${cwd}" && tar -xzf "${SNAPSHOT_ARCHIVE_PATH}" -C "${cwd}"`], {
+            env: { FORCE_COLOR: '1' },
+        });
+        const exitCode = await runProcessAndCollectExit(proc, 120_000);
+        return exitCode === 0;
+    } catch {
+        return false;
+    }
+};
+
 export const useChat = () => {
     const { getToken, isLoaded, isSignedIn } = useAuth();
     const [messages, setMessages] = useAtom(messagesAtom);
@@ -438,6 +568,7 @@ export const useChat = () => {
     const setServerUrl = useSetAtom(serverUrlAtom);
     const setPreviewStatus = useSetAtom(previewStatusAtom);
     const setPreviewStatusMessage = useSetAtom(previewStatusMessageAtom);
+    const setSandboxRuntimeMetadata = useSetAtom(sandboxRuntimeMetadataAtom);
     const setThreadSwitchState = useSetAtom(threadSwitchStateAtom);
 
     const [isLoading, setIsLoading] = useState(false);
@@ -446,9 +577,21 @@ export const useChat = () => {
 
     const startThreadSandboxInBackground = useCallback(async (
         wc: any,
+        threadId: string,
         fileMap: Map<string, string>,
+        latestSeq: number,
+        authToken: string,
+        switchSeq: number,
     ) => {
         if (!wc || fileMap.size === 0) return;
+        const startedAt = performance.now();
+        const isStaleSwitch = () => switchSeq !== latestThreadSwitchSeq;
+        const abortIfStale = (stage: string): boolean => {
+            if (!isStaleSwitch()) return false;
+            console.info('[SandboxDecision] stale_thread_switch_abort', { threadId, stage, switchSeq });
+            return true;
+        };
+        if (abortIfStale('start')) return;
 
         // If the AI didn't generate package.json, index.html, or vite.config,
         // provide sensible defaults so npm install can work.
@@ -561,9 +704,89 @@ createRoot(document.getElementById('root')!).render(
         // Patch missing dependencies before writing files
         await patchMissingDependencies(fileMap, wc, setFileSystem);
 
-        // Clean sandbox before writing new project files.
-        for (const name of ['src', 'public', 'node_modules', 'package.json', 'package-lock.json', 'index.html', 'vite.config.ts', 'tsconfig.json']) {
-            try { await wc.fs.rm(name, { recursive: true }); } catch { /* doesn't exist */ }
+        if (abortIfStale('after_dependency_patch')) return;
+        const depFingerprint = getDependencyFingerprint(fileMap);
+        const criticalFingerprint = getCriticalConfigFingerprint(fileMap);
+        const projectDir = inferProjectDirectory(fileMap);
+        const localInstalledFingerprint = await readInstalledDependencyFingerprint(wc);
+        const nodeModulesPresent = await hasInstalledNodeModules(wc, projectDir);
+        let hasLocalDependencyCache =
+            nodeModulesPresent &&
+            localInstalledFingerprint === depFingerprint;
+        const prevMeta = threadRuntimeMeta.get(threadId);
+        const incomingFiles = new Set([...fileMap.keys()].map((p) => p.replace(/^\//, '')));
+        let hasCachedDependencyPlan = false;
+        try {
+            const cachedRes = await fetch(`${API_URL}/sandbox/dependencies/${encodeURIComponent(depFingerprint)}`, {
+                headers: {
+                    Authorization: `Bearer ${authToken}`,
+                },
+            });
+            hasCachedDependencyPlan = cachedRes.ok;
+        } catch {
+            hasCachedDependencyPlan = false;
+        }
+        const hasThreadRuntimeHit = !!(
+            prevMeta?.installSucceeded &&
+            prevMeta.depFingerprint === depFingerprint &&
+            prevMeta.criticalFingerprint === criticalFingerprint
+        );
+
+        if (!hasLocalDependencyCache) {
+            const indexedSnapshot = await loadDependencySnapshot(depFingerprint);
+            if (indexedSnapshot && indexedSnapshot.toolchainVersion === SNAPSHOT_TOOLCHAIN_VERSION) {
+                const restoredFromIndexedDb = await restoreNodeModulesSnapshot(
+                    wc,
+                    projectDir,
+                    base64ToBytes(indexedSnapshot.tarBase64),
+                );
+                if (restoredFromIndexedDb) {
+                    await persistInstalledDependencyFingerprint(wc, depFingerprint);
+                    hasLocalDependencyCache = true;
+                    console.info('[SandboxDecision] indexeddb_snapshot_restored', { threadId, depFingerprint });
+                }
+            }
+        }
+
+        if (!hasLocalDependencyCache && hasCachedDependencyPlan) {
+            try {
+                const snapshotRes = await fetch(`${API_URL}/sandbox/snapshots/${encodeURIComponent(depFingerprint)}`, {
+                    headers: {
+                        Authorization: `Bearer ${authToken}`,
+                    },
+                });
+                if (snapshotRes.ok) {
+                    const snapshotBytes = new Uint8Array(await snapshotRes.arrayBuffer());
+                    const restoredFromRemote = await restoreNodeModulesSnapshot(wc, projectDir, snapshotBytes);
+                    if (restoredFromRemote) {
+                        await persistInstalledDependencyFingerprint(wc, depFingerprint);
+                        await saveDependencySnapshot({
+                            depFingerprint,
+                            toolchainVersion: SNAPSHOT_TOOLCHAIN_VERSION,
+                            createdAt: Date.now(),
+                            tarBase64: bytesToBase64(snapshotBytes),
+                        });
+                        hasLocalDependencyCache = true;
+                        console.info('[SandboxDecision] supabase_snapshot_restored', { threadId, depFingerprint });
+                    }
+                }
+            } catch (error) {
+                console.warn('[SandboxDecision] supabase_snapshot_restore_failed', {
+                    threadId,
+                    depFingerprint,
+                    error: String(error),
+                });
+            }
+        }
+        if (abortIfStale('after_snapshot_restore_checks')) return;
+
+        // Incremental sync: delete only files known in mounted project but absent now.
+        const currentlyMountedFiles = activeMountedThreadId
+            ? (mountedFilesByThread.get(activeMountedThreadId) ?? mountedProjectFiles)
+            : mountedProjectFiles;
+        const filesToDelete = [...currentlyMountedFiles].filter((p) => !incomingFiles.has(p));
+        for (const filePath of filesToDelete) {
+            try { await wc.fs.rm(filePath); } catch { /* ignore missing */ }
         }
 
         for (const [filePath, content] of fileMap) {
@@ -573,28 +796,143 @@ createRoot(document.getElementById('root')!).render(
                 if (dir && dir !== '') {
                     try { await wc.fs.mkdir(dir, { recursive: true }); } catch { /* exists */ }
                 }
-                await wc.fs.writeFile(absPath, content);
+                let shouldWrite = true;
+                try {
+                    const existing = await wc.fs.readFile(absPath, 'utf-8');
+                    shouldWrite = existing !== content;
+                } catch {
+                    shouldWrite = true;
+                }
+                if (shouldWrite) {
+                    await wc.fs.writeFile(absPath, content);
+                }
             } catch (err) {
                 console.error(`[loadThread] Failed to write ${filePath}:`, err);
             }
         }
 
+        mountedProjectFiles = incomingFiles;
+        mountedFilesByThread.set(threadId, incomingFiles);
+        activeMountedThreadId = threadId;
+
+        const shouldInstall = !(hasLocalDependencyCache || hasThreadRuntimeHit);
+        const decisionSource = hasLocalDependencyCache
+            ? 'local_cache_hit'
+            : hasThreadRuntimeHit
+                ? 'thread_meta_hit'
+                : prevMeta?.depFingerprint && prevMeta.depFingerprint !== depFingerprint
+                    ? 'fingerprint_changed'
+                    : 'install_missing_evidence';
+        console.info('[SandboxDecision] install_gate', {
+            threadId,
+            depFingerprint,
+            criticalFingerprint,
+            localInstalledFingerprint,
+            nodeModulesPresent,
+            hasCachedDependencyPlan,
+            hasThreadRuntimeHit,
+            shouldInstall,
+            decisionSource,
+        });
+
+        const shouldRestartServer =
+            !activeDevProcess ||
+            activeDevServerFingerprint !== depFingerprint ||
+            activeCriticalFingerprint !== criticalFingerprint;
+
         try {
-            await repairRootForNpm(wc, true);
-            writeShellOutput('\r\n\x1b[36m⬢ Installing dependencies...\x1b[0m\r\n');
-            const installProc = await wc.spawn('npm', ['install', '--no-audit', '--no-fund', '--legacy-peer-deps'], {
-                env: { FORCE_COLOR: '1' },
-            });
-            installProc.output.pipeTo(new WritableStream({
-                write(data) { writeShellOutput(data); }
-            }));
-
-            const installTimeout = new Promise<number>((r) => setTimeout(() => r(-1), 180_000));
-            const installExit = await Promise.race([installProc.exit, installTimeout]);
-
-            if (installExit === 0) {
+            if (abortIfStale('before_install_gate')) return;
+            if (shouldInstall) {
+                await repairRootForNpm(wc, true);
                 setPreviewStatus('starting');
-                setPreviewStatusMessage('Dependencies installed. Starting npm run dev...');
+                setPreviewStatusMessage('Installing dependencies (fingerprint changed)...');
+                writeShellOutput('\r\n\x1b[36m⬢ Installing dependencies...\x1b[0m\r\n');
+                let installExit = 0;
+                let attempts = 0;
+                while (attempts < 2) {
+                    attempts += 1;
+                    const installProc = await wc.spawn(
+                        'npm',
+                        ['install', '--no-audit', '--no-fund', '--legacy-peer-deps', '--prefer-offline'],
+                        { env: { FORCE_COLOR: '1' } },
+                    );
+                    installProc.output.pipeTo(new WritableStream({
+                        write(data) { writeShellOutput(data); }
+                    }));
+                    installExit = await runProcessAndCollectExit(installProc, INSTALL_TIMEOUT_MS);
+                    if (installExit === 0) break;
+                    if (attempts < 2) {
+                        writeShellOutput('\r\n\x1b[33m⚠ Install failed once, retrying...\x1b[0m\r\n');
+                        console.warn('[SandboxDecision] install_retry', { threadId, depFingerprint, installExit, attempts });
+                    }
+                }
+
+                if (installExit !== 0) {
+                    const msg = installExit === -1 ? `npm install timed out (${INSTALL_TIMEOUT_MS / 1000}s)` : `npm install failed (exit ${installExit})`;
+                    setPreviewStatus('error');
+                    setPreviewStatusMessage(msg);
+                    writeShellOutput(`\r\n\x1b[31m✗ ${msg}\x1b[0m\r\n`);
+                    threadRuntimeMeta.set(threadId, {
+                        depFingerprint,
+                        criticalFingerprint,
+                        lastAppliedSeq: latestSeq,
+                        installSucceeded: false,
+                        lastBootAt: Date.now(),
+                        knownFiles: incomingFiles,
+                        installFailureReason: msg,
+                    });
+                    return;
+                }
+                if (abortIfStale('after_install_success')) return;
+                await persistInstalledDependencyFingerprint(wc, depFingerprint);
+                const snapshotBytes = await createNodeModulesSnapshot(wc, projectDir);
+                if (snapshotBytes) {
+                    const snapshotBody = Uint8Array.from(snapshotBytes).buffer;
+                    await saveDependencySnapshot({
+                        depFingerprint,
+                        toolchainVersion: SNAPSHOT_TOOLCHAIN_VERSION,
+                        createdAt: Date.now(),
+                        tarBase64: bytesToBase64(snapshotBytes),
+                    });
+                    void fetch(
+                        `${API_URL}/sandbox/snapshots/${encodeURIComponent(depFingerprint)}?toolchainVersion=${encodeURIComponent(SNAPSHOT_TOOLCHAIN_VERSION)}`,
+                        {
+                            method: 'PUT',
+                            headers: {
+                                Authorization: `Bearer ${authToken}`,
+                                'Content-Type': 'application/gzip',
+                            },
+                            body: snapshotBody,
+                        },
+                    ).catch(() => {
+                        /* best-effort remote snapshot publish */
+                    });
+                }
+                void fetch(`${API_URL}/sandbox/dependencies/${encodeURIComponent(depFingerprint)}`, {
+                    method: 'PUT',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        Authorization: `Bearer ${authToken}`,
+                    },
+                    body: JSON.stringify({
+                        notes: `installed for thread ${threadId}`,
+                        toolchainVersion: SNAPSHOT_TOOLCHAIN_VERSION,
+                    }),
+                }).catch(() => {
+                    /* best-effort cache publish */
+                });
+            } else {
+                setPreviewStatus('starting');
+                setPreviewStatusMessage('Reusing installed dependencies from cache...');
+            }
+
+            if (shouldRestartServer) {
+                if (abortIfStale('before_dev_server_restart')) return;
+                if (activeDevProcess?.kill) {
+                    try { await activeDevProcess.kill(); } catch { /* ignore */ }
+                }
+                setPreviewStatus('starting');
+                setPreviewStatusMessage('Starting development server...');
                 writeShellOutput('\r\n\x1b[36m⬢ Starting dev server...\x1b[0m\r\n');
                 const devProc = await wc.spawn('npm', ['run', 'dev'], {
                     env: { FORCE_COLOR: '1' },
@@ -602,19 +940,76 @@ createRoot(document.getElementById('root')!).render(
                 devProc.output.pipeTo(new WritableStream({
                     write(data) { writeShellOutput(data); }
                 }));
+                activeDevProcess = devProc;
+                activeDevServerFingerprint = depFingerprint;
+                activeCriticalFingerprint = criticalFingerprint;
             } else {
-                const msg = installExit === -1 ? 'npm install timed out (180s)' : `npm install failed (exit ${installExit})`;
-                setPreviewStatus('error');
-                setPreviewStatusMessage(msg);
-                writeShellOutput(`\r\n\x1b[31m✗ ${msg}\x1b[0m\r\n`);
+                setPreviewStatus('ready');
+                setPreviewStatusMessage('Reusing running dev server.');
             }
+
+            threadRuntimeMeta.set(threadId, {
+                depFingerprint,
+                criticalFingerprint,
+                lastAppliedSeq: latestSeq,
+                installSucceeded: true,
+                lastBootAt: Date.now(),
+                knownFiles: incomingFiles,
+                installFailureReason: undefined,
+            });
+            setSandboxRuntimeMetadata((prev) => ({
+                ...prev,
+                [threadId]: {
+                    threadId,
+                    depFingerprint,
+                    criticalFingerprint,
+                    lastAppliedSeq: latestSeq,
+                    installSucceeded: true,
+                    lastBootAt: Date.now(),
+                    devServerRunning: !!activeDevProcess,
+                },
+            }));
+            const elapsed = Math.round(performance.now() - startedAt);
+            console.info('[SandboxPerf] thread_boot_complete', {
+                threadId,
+                elapsedMs: elapsed,
+                installed: shouldInstall,
+                restartedServer: shouldRestartServer,
+            });
         } catch (err) {
             console.error('[loadThread] install error:', err);
             setPreviewStatus('error');
             setPreviewStatusMessage(`Install error: ${String(err)}`);
             writeShellOutput(`\r\n\x1b[31m✗ Install error: ${err}\x1b[0m\r\n`);
+            threadRuntimeMeta.set(threadId, {
+                depFingerprint,
+                criticalFingerprint,
+                lastAppliedSeq: latestSeq,
+                installSucceeded: false,
+                lastBootAt: Date.now(),
+                knownFiles: incomingFiles,
+                installFailureReason: String(err),
+            });
+            setSandboxRuntimeMetadata((prev) => ({
+                ...prev,
+                [threadId]: {
+                    threadId,
+                    depFingerprint,
+                    criticalFingerprint,
+                    lastAppliedSeq: latestSeq,
+                    installSucceeded: false,
+                    lastBootAt: Date.now(),
+                    devServerRunning: false,
+                },
+            }));
+            const elapsed = Math.round(performance.now() - startedAt);
+            console.warn('[SandboxPerf] thread_boot_failed', {
+                threadId,
+                elapsedMs: elapsed,
+                error: String(err),
+            });
         }
-    }, [setFileSystem, setPreviewStatus, setPreviewStatusMessage]);
+    }, [API_URL, setFileSystem, setPreviewStatus, setPreviewStatusMessage, setSandboxRuntimeMetadata]);
 
     const sendMessage = async (content: string) => {
         if (!content.trim() || !isLoaded || !isSignedIn) {
@@ -930,6 +1325,7 @@ createRoot(document.getElementById('root')!).render(
         }
         const switchSeq = ++latestThreadSwitchSeq;
         const isStale = () => switchSeq !== latestThreadSwitchSeq;
+        const switchStartedAt = performance.now();
         setThreadSwitchState({
             status: 'loading',
             targetThreadId: threadId,
@@ -947,12 +1343,18 @@ createRoot(document.getElementById('root')!).render(
             setPreviewStatus('starting');
             setPreviewStatusMessage('Loading thread files and preparing preview environment...');
 
-            // Fetch messages and thread files in parallel
+            const previousMeta = threadRuntimeMeta.get(threadId);
+            const previousSeq = previousMeta?.lastAppliedSeq;
+
+            // Fetch messages and thread files in parallel (delta when possible)
+            const deltaUrl = previousSeq && previousSeq > 0
+                ? `${API_URL}/chat/${id}/files/delta?sinceSeq=${previousSeq}`
+                : null;
             const [messagesRes, filesRes] = await Promise.all([
                 fetch(`${API_URL}/chat/${id}`, {
                     headers: { Authorization: `Bearer ${token}` }
                 }),
-                fetch(`${API_URL}/chat/${id}/files`, {
+                fetch(deltaUrl || `${API_URL}/chat/${id}/files`, {
                     headers: { Authorization: `Bearer ${token}` }
                 }),
             ]);
@@ -972,7 +1374,26 @@ createRoot(document.getElementById('root')!).render(
             if (isStale()) return;
 
             const rawMessages = await messagesRes.json();
-            const threadFiles: { filePath: string; content: string }[] = await filesRes.json();
+            const latestSeq = rawMessages.reduce((max: number, m: any) => {
+                const seq = Number(m.seq ?? 0);
+                return Number.isFinite(seq) ? Math.max(max, seq) : max;
+            }, 0);
+            const filesPayload = await filesRes.json();
+            let threadFiles: { filePath: string; content: string }[] = Array.isArray(filesPayload)
+                ? filesPayload
+                : (filesPayload.files || []);
+            if (!Array.isArray(filesPayload) && filesPayload?.isDelta) {
+                const fullFilesRes = await fetch(`${API_URL}/chat/${id}/files`, {
+                    headers: { Authorization: `Bearer ${token}` }
+                });
+                if (!fullFilesRes.ok) {
+                    const errBody = await fullFilesRes.text().catch(() => '');
+                    throw new Error(
+                        `Could not load full thread files (${fullFilesRes.status}): ${errBody || fullFilesRes.statusText}`.trim(),
+                    );
+                }
+                threadFiles = await fullFilesRes.json();
+            }
 
             // Get the WebContainer instance — prefer atom, fallback to module singleton
             const wc = webContainerInstance ?? getWebContainerInstance();
@@ -1028,7 +1449,7 @@ createRoot(document.getElementById('root')!).render(
             if (wc && fileMap.size > 0) {
                 // Make thread switching responsive: restore UI immediately,
                 // then prepare/install sandbox in background.
-                void startThreadSandboxInBackground(wc, new Map(fileMap));
+                void startThreadSandboxInBackground(wc, threadId, new Map(fileMap), latestSeq, token, switchSeq);
             }
             if (isStale()) return;
 
@@ -1051,6 +1472,12 @@ createRoot(document.getElementById('root')!).render(
                     targetThreadId: null,
                     errorMessage: null,
                 });
+                const elapsed = Math.round(performance.now() - switchStartedAt);
+                console.info('[SandboxPerf] thread_visible', {
+                    threadId,
+                    elapsedMs: elapsed,
+                    latestSeq,
+                });
             }
         } catch (error) {
             console.error('[useChat] loadThread failed:', threadId, error);
@@ -1059,6 +1486,12 @@ createRoot(document.getElementById('root')!).render(
                     status: 'error',
                     targetThreadId: threadId,
                     errorMessage: error instanceof Error ? error.message : 'Could not switch thread.',
+                });
+                const elapsed = Math.round(performance.now() - switchStartedAt);
+                console.warn('[SandboxPerf] thread_switch_failed', {
+                    threadId,
+                    elapsedMs: elapsed,
+                    error: error instanceof Error ? error.message : String(error),
                 });
             }
             throw error;

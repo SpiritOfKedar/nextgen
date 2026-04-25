@@ -5,6 +5,16 @@ export const webContainerAtom = atom<WebContainer | null>(null);
 export const serverUrlAtom = atom<string | null>(null);
 export const previewStatusAtom = atom<'idle' | 'booting' | 'starting' | 'ready' | 'error'>('idle');
 export const previewStatusMessageAtom = atom<string | null>(null);
+export interface SandboxRuntimeMetadata {
+    threadId: string;
+    depFingerprint: string;
+    criticalFingerprint: string;
+    lastAppliedSeq: number;
+    installSucceeded: boolean;
+    lastBootAt: number;
+    devServerRunning: boolean;
+}
+export const sandboxRuntimeMetadataAtom = atom<Record<string, SandboxRuntimeMetadata>>({});
 
 // Shared jsh shell input writer — used by TerminalPanel and useChat shell actions
 export const shellInputWriterAtom = atom<WritableStreamDefaultWriter<string> | null>(null);

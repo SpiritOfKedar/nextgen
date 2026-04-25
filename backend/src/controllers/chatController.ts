@@ -105,5 +105,31 @@ export const chatController = {
             }
             res.status(500).json({ error: 'Failed to fetch thread files' });
         }
+    },
+
+    async getThreadFilesDelta(req: Request, res: Response) {
+        try {
+            if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+            const { threadId } = req.params;
+            const sinceSeqRaw = req.query.sinceSeq;
+            const sinceSeq = Number(sinceSeqRaw);
+            if (!Number.isFinite(sinceSeq) || sinceSeq < 0) {
+                return res.status(400).json({ error: 'sinceSeq must be a non-negative number' });
+            }
+            const delta = await chatService.getThreadFilesDelta(threadId as string, req.user.id, sinceSeq);
+            res.json(delta);
+        } catch (error) {
+            log.error('chat.thread_files_delta_failed', {
+                requestId: req.requestId,
+                internalUserId: req.user?.id,
+                threadId: req.params.threadId,
+                sinceSeq: req.query.sinceSeq,
+                ...errorFields(error),
+            });
+            if (error instanceof ThreadAccessError) {
+                return res.status(404).json({ error: error.message });
+            }
+            res.status(500).json({ error: 'Failed to fetch thread file delta' });
+        }
     }
 };
