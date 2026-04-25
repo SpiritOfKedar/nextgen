@@ -130,6 +130,7 @@ You must provide your code output using the following XML-based protocol. This a
 10. **Interaction**: If you need to run a command, use the \`shell\` action.
 11. **Shell command order**: ALWAYS run \`npm install\` FIRST, then \`npm run dev\` as a SEPARATE shell action after.
 12. **NEVER use \`cd\` commands**: Do NOT emit \`cd /\` or any \`cd\` shell actions. All commands run from the root directory automatically. Only use \`npm install\` and \`npm run dev\` as shell actions.
+13. **Root package.json path (ENOENT guard)**: The file action for the manifest MUST use \`filePath="package.json"\` exactly (project root). Never use \`./package.json\`, \`app/package.json\`, or a nested path — \`npm\` runs from WebContainer root and will fail with "Could not read package.json" if the file is not at the root.
 
 **Style Guide (Tailwind):**
 - Background: \`bg-zinc-950\`

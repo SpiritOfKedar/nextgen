@@ -12,8 +12,16 @@ import * as fileVersionsRepo from '../repositories/fileVersions';
 import * as shellCommandsRepo from '../repositories/shellCommands';
 import * as blobsRepo from '../repositories/blobs';
 import { MessageRow } from '../repositories/types';
+import { log, errorFields } from '../lib/logger';
 
 dotenv.config();
+
+/** Optional correlation fields for chat streaming logs */
+export type ChatLogContext = {
+    requestId?: string;
+    internalUserId?: string;
+    model?: string;
+};
 
 // ── Bolt protocol parsing helpers (unchanged from previous service) ──
 
@@ -144,7 +152,12 @@ class ChunkFlusher {
         // Chain inserts so they always commit in order.
         this.inFlight = this.inFlight.then(() =>
             chunksRepo.insertBatch(this.messageId, startIdx, deltas).catch((err) => {
-                console.error('[ChunkFlusher] insert failed:', err);
+                log.error('chat.chunk_flush_failed', {
+                    messageId: this.messageId,
+                    startIdx,
+                    deltaCount: deltas.length,
+                    ...errorFields(err),
+                });
             }),
         );
     }
@@ -190,6 +203,7 @@ export class ChatService {
         threadIdParam: string | null,
         userId: string,
         model: string = 'gpt-4o',
+        logContext: ChatLogContext = {},
     ): Promise<{ stream: AsyncGenerator<string>; threadId: string }> {
         // 1. Resolve / create thread (outside the per-thread lock since a brand
         //    new thread can't have concurrent traffic yet).
@@ -257,7 +271,15 @@ export class ChatService {
             content: m.content || '(no content)',
         }));
 
-        console.log(`[ChatService] Context: ${fileSnapshot.length} files, ${messages.length} recent messages`);
+        log.info('chat.context_built', {
+            requestId: logContext.requestId,
+            internalUserId: logContext.internalUserId ?? userId,
+            threadId,
+            model,
+            snapshotFileCount: fileSnapshot.length,
+            recentMessageCount: messages.length,
+            assistantMessageId,
+        });
 
         // 4. Provider stream selection.
         let providerStream: AsyncGenerator<string>;
@@ -281,12 +303,21 @@ export class ChatService {
                 }
             }
         } catch (error) {
-            console.error(`Error selecting model ${model}:`, error);
+            log.error('chat.provider_selection_failed', {
+                requestId: logContext.requestId,
+                threadId,
+                model,
+                ...errorFields(error),
+            });
             providerStream = this.mockStream(`Error with ${model}: ${error instanceof Error ? error.message : 'Unknown error'}. Falling back to mock.`);
         }
 
         return {
-            stream: this.persistAndYield(providerStream, threadId, assistantMessageId),
+            stream: this.persistAndYield(providerStream, threadId, assistantMessageId, {
+                requestId: logContext.requestId,
+                internalUserId: userId,
+                model,
+            }),
             threadId,
         };
     }
@@ -302,6 +333,7 @@ export class ChatService {
         stream: AsyncGenerator<string>,
         threadId: string,
         assistantMessageId: string,
+        ctx: ChatLogContext = {},
     ): AsyncGenerator<string> {
         const flusher = new ChunkFlusher(assistantMessageId);
         let fullResponse = '';
@@ -313,7 +345,15 @@ export class ChatService {
                 yield chunk;
             }
         } catch (err) {
-            console.error('[ChatService] Stream error:', err);
+            log.error('chat.provider_stream_aborted', {
+                requestId: ctx.requestId,
+                internalUserId: ctx.internalUserId,
+                threadId,
+                assistantMessageId,
+                model: ctx.model,
+                responseChars: fullResponse.length,
+                ...errorFields(err),
+            });
             await flusher.flushAndWait();
             await messagesRepo.markAborted(
                 assistantMessageId,
@@ -366,8 +406,26 @@ export class ChatService {
                 }
                 await threadsRepo.touch(threadId, tx);
             });
+            log.info('chat.message_finalized', {
+                requestId: ctx.requestId,
+                internalUserId: ctx.internalUserId,
+                threadId,
+                assistantMessageId,
+                model: ctx.model,
+                fileCount: extractedFiles.length,
+                shellCommandCount: shellCommands.length,
+                responseChars: fullResponse.length,
+            });
         } catch (err) {
-            console.error('[ChatService] Finalize failed:', err);
+            log.error('chat.finalize_failed', {
+                requestId: ctx.requestId,
+                internalUserId: ctx.internalUserId,
+                threadId,
+                assistantMessageId,
+                model: ctx.model,
+                responseChars: fullResponse.length,
+                ...errorFields(err),
+            });
             try {
                 await withTransaction(async (tx) => {
                     await messagesRepo.finalize(
@@ -382,7 +440,11 @@ export class ChatService {
                     );
                 });
             } catch (innerErr) {
-                console.error('[ChatService] Failed to mark message errored:', innerErr);
+                log.error('chat.finalize_error_mark_failed', {
+                    requestId: ctx.requestId,
+                    assistantMessageId,
+                    ...errorFields(innerErr),
+                });
             }
             // Tell the client so they know to retry.
             yield `\n\n[error: response not fully persisted]`;
@@ -459,7 +521,9 @@ export class ChatService {
             try {
                 yield chunk.text();
             } catch (chunkError: any) {
-                console.warn('[Gemini] Chunk blocked:', chunkError?.message || chunkError);
+                log.warn('chat.gemini_chunk_blocked', {
+                    detail: chunkError?.message || String(chunkError),
+                });
                 yield '\n\n⚠️ _The AI response was partially blocked by the content filter (RECITATION). The generated code above has been saved._';
                 break;
             }

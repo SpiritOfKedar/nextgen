@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import { ChatService } from '../services/chatService';
+import { log, errorFields } from '../lib/logger';
 
 const chatService = new ChatService();
 
@@ -16,7 +17,13 @@ export const chatController = {
                 return res.status(401).json({ error: 'Unauthorized' });
             }
             const userId = req.user.id;
-            const { stream, threadId: newThreadId } = await chatService.generateResponse(message, threadId, userId, model);
+            const { stream, threadId: newThreadId } = await chatService.generateResponse(
+                message,
+                threadId,
+                userId,
+                model,
+                { requestId: req.requestId, internalUserId: userId },
+            );
 
             // Set headers for SSE/Streaming only after we have a valid stream
             res.setHeader('Content-Type', 'text/plain');
@@ -30,7 +37,12 @@ export const chatController = {
 
             res.end();
         } catch (error) {
-            console.error('Chat Error:', error);
+            log.error('chat.send_message_controller_failed', {
+                requestId: req.requestId,
+                internalUserId: req.user?.id,
+                headersSent: res.headersSent,
+                ...errorFields(error),
+            });
             // Only send error JSON if headers haven't been sent yet
             if (!res.headersSent) {
                 res.status(500).json({ error: error instanceof Error ? error.message : 'Internal Server Error' });
@@ -46,7 +58,11 @@ export const chatController = {
             const threads = await chatService.getUserThreads(req.user.id);
             res.json(threads);
         } catch (error) {
-            console.error('History Error:', error);
+            log.error('chat.history_failed', {
+                requestId: req.requestId,
+                internalUserId: req.user?.id,
+                ...errorFields(error),
+            });
             res.status(500).json({ error: 'Failed to fetch history' });
         }
     },
@@ -58,7 +74,12 @@ export const chatController = {
             const messages = await chatService.getThreadMessages(threadId as string, req.user.id);
             res.json(messages);
         } catch (error) {
-            console.error('Thread Error:', error);
+            log.error('chat.thread_fetch_failed', {
+                requestId: req.requestId,
+                internalUserId: req.user?.id,
+                threadId: req.params.threadId,
+                ...errorFields(error),
+            });
             res.status(500).json({ error: 'Failed to fetch thread' });
         }
     },
@@ -70,7 +91,12 @@ export const chatController = {
             const files = await chatService.getThreadFiles(threadId as string, req.user.id);
             res.json(files);
         } catch (error) {
-            console.error('Thread Files Error:', error);
+            log.error('chat.thread_files_failed', {
+                requestId: req.requestId,
+                internalUserId: req.user?.id,
+                threadId: req.params.threadId,
+                ...errorFields(error),
+            });
             res.status(500).json({ error: 'Failed to fetch thread files' });
         }
     }

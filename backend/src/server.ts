@@ -4,6 +4,7 @@ dotenv.config();
 import app from './app';
 import { connectDB } from './config/db';
 import { abortOrphanStreaming } from './repositories/messages';
+import { log, errorFields } from './lib/logger';
 
 const PORT = process.env.PORT || 3001;
 
@@ -12,15 +13,15 @@ const main = async () => {
 
     const aborted = await abortOrphanStreaming();
     if (aborted > 0) {
-        console.log(`[boot] Marked ${aborted} orphan streaming message(s) as aborted`);
+        log.info('boot.orphan_streaming_aborted', { count: aborted });
     }
 
     app.listen(PORT, () => {
-        console.log(`Server is running on port ${PORT}`);
+        log.info('boot.server_listening', { port: PORT });
     });
 };
 
 main().catch((error) => {
-    console.error('Failed to start server:', error instanceof Error ? error.message : error);
+    log.error('boot.server_failed', errorFields(error));
     process.exit(1);
 });

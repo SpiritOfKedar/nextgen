@@ -1,10 +1,13 @@
 import { Request, Response, NextFunction } from 'express';
 import { ClerkExpressRequireAuth, StrictAuthProp, clerkClient } from '@clerk/clerk-sdk-node';
 import * as users from '../repositories/users';
+import { log, errorFields } from '../lib/logger';
 
 declare global {
     namespace Express {
         interface Request extends StrictAuthProp {
+            /** Set by `requestContextMiddleware` when the request reaches the app stack */
+            requestId?: string;
             user?: {
                 id: string;       // Postgres uuid
                 clerkId: string;
@@ -30,10 +33,14 @@ export const authMiddleware = [
                     const clerkUser = await clerkClient.users.getUser(clerkId);
                     email = clerkUser.emailAddresses?.[0]?.emailAddress || email;
                 } catch (clerkErr) {
-                    console.error('[AuthMiddleware] Failed to fetch Clerk user, using fallback email:', clerkErr);
+                    log.warn('auth.clerk_profile_fetch_failed', {
+                        requestId: req.requestId,
+                        clerkId,
+                        ...errorFields(clerkErr),
+                    });
                 }
                 row = await users.upsertByClerkId(clerkId, email);
-                console.log(`[AuthMiddleware] User upserted: ${row.email}`);
+                log.info('auth.user_upserted', { requestId: req.requestId, clerkId, email: row.email });
             }
 
             req.user = {
@@ -44,7 +51,11 @@ export const authMiddleware = [
 
             next();
         } catch (error) {
-            console.error('[AuthMiddleware] Error:', error);
+            log.error('auth.middleware_failed', {
+                requestId: req.requestId,
+                clerkId: req.auth?.userId,
+                ...errorFields(error),
+            });
             res.status(500).json({ error: 'Internal Server Error during Auth' });
         }
     },

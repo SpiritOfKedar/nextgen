@@ -1,18 +1,38 @@
 import { Pool, PoolClient } from 'pg';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
+import { log, errorFields } from '../lib/logger';
 
 let pool: Pool | null = null;
 let supabase: SupabaseClient | null = null;
 
+/**
+ * Remove SSL-related query params from the URI. Newer `pg` / `pg-connection-string`
+ * can treat `sslmode=require` like strict verification, which fails on Supabase with
+ * "self-signed certificate in certificate chain". TLS is still enabled via the Pool
+ * `ssl` option below.
+ */
+const sanitizePgConnectionString = (connectionString: string): string => {
+    try {
+        const u = new URL(connectionString);
+        for (const key of ['sslmode', 'sslrootcert', 'sslcert', 'sslkey', 'sslcrl', 'uselibpqcompat']) {
+            u.searchParams.delete(key);
+        }
+        const out = u.toString();
+        return out.endsWith('?') ? out.slice(0, -1) : out;
+    } catch {
+        return connectionString;
+    }
+};
+
 const createPgPool = (connectionString: string): Pool => {
     const nextPool = new Pool({
-        connectionString,
+        connectionString: sanitizePgConnectionString(connectionString),
         ssl: { rejectUnauthorized: false },
         max: 10,
         idleTimeoutMillis: 30_000,
     });
     nextPool.on('error', (err) => {
-        console.error('[pg] Idle client error:', err.message);
+        log.error('db.pg_pool_idle_client_error', errorFields(err));
     });
     return nextPool;
 };
@@ -42,8 +62,6 @@ const deriveDirectSupabaseDbUrl = (poolerConnectionString: string): string | nul
         if (!direct.pathname || direct.pathname === '/') {
             direct.pathname = '/postgres';
         }
-        direct.searchParams.set('uselibpqcompat', 'true');
-        direct.searchParams.set('sslmode', 'require');
 
         return direct.toString();
     } catch {
@@ -95,7 +113,7 @@ export const connectDB = async (): Promise<void> => {
 
     try {
         await pingPool(activePool);
-        console.log('[db] Postgres connected');
+        log.info('db.postgres_connected', { mode: 'primary' });
     } catch (error) {
         const fallbackUrl = connectionString && isSupabasePoolerUrl(connectionString)
             ? deriveDirectSupabaseDbUrl(connectionString)
@@ -105,7 +123,10 @@ export const connectDB = async (): Promise<void> => {
             throw error;
         }
 
-        console.warn('[db] Supabase pooler auth failed ("Tenant or user not found"). Retrying with direct DB host.');
+        log.warn('db.supabase_pooler_auth_failed_fallback', {
+            detail: 'Tenant or user not found — retrying with direct DB host',
+            ...errorFields(error),
+        });
 
         try {
             await activePool.end();
@@ -118,7 +139,7 @@ export const connectDB = async (): Promise<void> => {
 
         try {
             await pingPool(activePool);
-            console.log('[db] Postgres connected (direct host fallback)');
+            log.info('db.postgres_connected', { mode: 'direct_host_fallback' });
         } catch (fallbackError) {
             pool = null;
             throw fallbackError;
@@ -126,7 +147,7 @@ export const connectDB = async (): Promise<void> => {
     }
 
     getSupabase();
-    console.log(`[db] Supabase Storage client ready (bucket: ${STORAGE_BUCKET})`);
+    log.info('db.supabase_storage_ready', { bucket: STORAGE_BUCKET });
 };
 
 export type Tx = PoolClient;

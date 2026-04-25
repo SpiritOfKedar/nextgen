@@ -145,6 +145,118 @@ const BUILTIN_MODULES = new Set([
     'zlib', 'net', 'tls', 'vite', 'typescript',
 ]);
 
+/** Vite + React + Tailwind v4 baseline when the model forgets root package.json (prevents ENOENT on npm). */
+const MINIMAL_ROOT_PACKAGE_JSON = JSON.stringify(
+    {
+        name: 'generated-app',
+        private: true,
+        version: '0.0.0',
+        type: 'module',
+        scripts: { dev: 'vite', build: 'vite build' },
+        dependencies: {
+            react: '^18.3.1',
+            'react-dom': '^18.3.1',
+            'lucide-react': '^0.400.0',
+            clsx: '^2.1.0',
+            'tailwind-merge': '^2.2.0',
+            'class-variance-authority': '^0.7.0',
+            '@radix-ui/react-slot': '^1.0.0',
+        },
+        devDependencies: {
+            '@types/react': '^18.3.0',
+            '@types/react-dom': '^18.3.0',
+            '@vitejs/plugin-react': '^4.3.0',
+            typescript: '^5.5.0',
+            vite: '^5.4.0',
+            tailwindcss: '^4.0.0',
+            '@tailwindcss/vite': '^4.0.0',
+        },
+    },
+    null,
+    2,
+);
+
+const normalizeWrittenPath = (p: string) => p.replace(/^\//, '').replace(/\\/g, '/');
+
+const getRootPackageJsonFromMap = (writtenFiles: Map<string, string>): string | undefined => {
+    for (const [k, v] of writtenFiles) {
+        if (normalizeWrittenPath(k) === 'package.json') return v;
+    }
+    return undefined;
+};
+
+/**
+ * Models sometimes skip package.json or emit npm shell actions anyway. WebContainer runs npm in `/`,
+ * so missing root package.json yields ENOENT. Write a minimal scaffold before npm runs.
+ */
+async function ensureRootPackageJsonExists(
+    writtenFiles: Map<string, string>,
+    wc: any,
+    setFileSystem: (updater: (prev: FileSystemItem[]) => FileSystemItem[]) => void,
+): Promise<void> {
+    const fromMap = getRootPackageJsonFromMap(writtenFiles);
+    if (fromMap) {
+        try {
+            JSON.parse(fromMap);
+            writtenFiles.set('package.json', fromMap);
+            return;
+        } catch {
+            for (const k of [...writtenFiles.keys()]) {
+                if (normalizeWrittenPath(k) === 'package.json') writtenFiles.delete(k);
+            }
+        }
+    }
+
+    if (wc) {
+        try {
+            const existing = await wc.fs.readFile('/package.json', 'utf-8');
+            if (existing?.trim()) {
+                try {
+                    JSON.parse(existing);
+                    writtenFiles.set('package.json', existing);
+                    setFileSystem((prev) => upsertFile(prev, 'package.json', existing));
+                    return;
+                } catch {
+                    // replace invalid file on disk
+                }
+            }
+        } catch {
+            // missing
+        }
+        try {
+            await wc.fs.writeFile('/package.json', MINIMAL_ROOT_PACKAGE_JSON);
+        } catch (err) {
+            console.error('[useChat] Failed to write fallback package.json:', err);
+            return;
+        }
+    }
+
+    writtenFiles.set('package.json', MINIMAL_ROOT_PACKAGE_JSON);
+    setFileSystem((prev) => upsertFile(prev, 'package.json', MINIMAL_ROOT_PACKAGE_JSON));
+    writeShellOutput(
+        '\r\n\x1b[33m⚠ No valid root package.json from the model — wrote a minimal Vite/React scaffold so npm can run.\x1b[0m\r\n',
+    );
+}
+
+/** Dedupe commands and run `npm install` before `npm run dev` even if the model emitted them out of order. */
+const normalizeShellCommandQueue = (commands: string[]): string[] => {
+    const trimmed = commands.map((c) => c.trim()).filter(Boolean);
+    const seen = new Set<string>();
+    const unique: string[] = [];
+    for (const c of trimmed) {
+        const key = c.replace(/\s+/g, ' ');
+        if (seen.has(key)) continue;
+        seen.add(key);
+        unique.push(c);
+    }
+    const isNpmInstall = (c: string) => /^npm\s+install\b/i.test(c);
+    const isNpmDev = (c: string) => /^npm\s+run\s+dev\b/i.test(c);
+    const installs = unique.filter(isNpmInstall);
+    const devs = unique.filter(isNpmDev);
+    const rest = unique.filter((c) => !isNpmInstall(c) && !isNpmDev(c));
+    return [...installs, ...devs, ...rest];
+};
+
 /**
  * Scan all written source files for import statements that reference packages
  * NOT listed in package.json. If found, patch package.json with the missing
@@ -155,7 +267,7 @@ async function patchMissingDependencies(
     wc: any,
     setFileSystem: (updater: (prev: FileSystemItem[]) => FileSystemItem[]) => void,
 ) {
-    const pkgContent = writtenFiles.get('package.json');
+    const pkgContent = getRootPackageJsonFromMap(writtenFiles);
     if (!pkgContent) return;
 
     let pkg: any;
@@ -403,15 +515,18 @@ export const useChat = () => {
                 }
             }
 
-            // ── Phase 1.5: Patch missing dependencies before npm install ──
-            await patchMissingDependencies(writtenFiles, webContainerInstance ?? getWebContainerInstance(), setFileSystem);
+            // ── Phase 1.5: Ensure root package.json, patch deps, then run shell ──
+            const wcForNpm = webContainerInstance ?? getWebContainerInstance();
+            await ensureRootPackageJsonExists(writtenFiles, wcForNpm, setFileSystem);
+            await patchMissingDependencies(writtenFiles, wcForNpm, setFileSystem);
 
             // ── Phase 2: Execute queued shell commands sequentially ──
             // Use the shared jsh shell so the terminal shows the output and
             // PATH resolution works (fixes ENOENT for npm/npx).
-            const wc = webContainerInstance ?? getWebContainerInstance();
-            if (wc && pendingShellCommands.length > 0) {
-                for (const command of pendingShellCommands) {
+            const wc = wcForNpm;
+            const shellQueue = normalizeShellCommandQueue(pendingShellCommands);
+            if (wc && shellQueue.length > 0) {
+                for (const command of shellQueue) {
                     try {
                         // Skip useless/dangerous commands
                         if (!command || /^\s*$/.test(command)) continue;            // empty
