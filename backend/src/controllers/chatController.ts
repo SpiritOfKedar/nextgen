@@ -135,5 +135,56 @@ export const chatController = {
             }
             res.status(500).json({ error: 'Failed to fetch thread file delta' });
         }
+    },
+
+    async getThreadVersions(req: Request, res: Response) {
+        try {
+            if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+            const { threadId } = req.params;
+            const result = await chatService.getThreadVersions(threadId as string, req.user.id);
+            res.json(result);
+        } catch (error) {
+            log.error('chat.thread_versions_failed', {
+                requestId: req.requestId,
+                internalUserId: req.user?.id,
+                threadId: req.params.threadId,
+                ...errorFields(error),
+            });
+            if (error instanceof ThreadAccessError) {
+                return res.status(404).json({ error: error.message });
+            }
+            res.status(500).json({ error: 'Failed to fetch thread versions' });
+        }
+    },
+
+    async restoreThread(req: Request, res: Response) {
+        try {
+            if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+            const { threadId } = req.params;
+            const seq = Number(req.body?.seq);
+            if (!Number.isFinite(seq) || seq < 1) {
+                return res.status(400).json({ error: 'seq must be a positive number' });
+            }
+            const result = await chatService.restoreThreadToSeq(threadId as string, req.user.id, seq);
+            res.json(result);
+        } catch (error) {
+            log.error('chat.thread_restore_failed', {
+                requestId: req.requestId,
+                internalUserId: req.user?.id,
+                threadId: req.params.threadId,
+                seq: req.body?.seq,
+                ...errorFields(error),
+            });
+            if (error instanceof ThreadAccessError) {
+                return res.status(404).json({ error: error.message });
+            }
+            if (error instanceof Error && error.message === 'Invalid seq') {
+                return res.status(400).json({ error: error.message });
+            }
+            if (error instanceof Error && error.message === 'Seq is not a restorable model generation version') {
+                return res.status(400).json({ error: error.message });
+            }
+            res.status(500).json({ error: 'Failed to restore thread version' });
+        }
     }
 };

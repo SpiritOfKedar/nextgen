@@ -22,6 +22,10 @@ router.get('/chat/:threadId', authMiddleware, chatController.getThread);
 router.get('/chat/:threadId/files', authMiddleware, chatController.getThreadFiles);
 // @ts-ignore
 router.get('/chat/:threadId/files/delta', authMiddleware, chatController.getThreadFilesDelta);
+// @ts-ignore
+router.get('/chat/:threadId/versions', authMiddleware, chatController.getThreadVersions);
+// @ts-ignore
+router.post('/chat/:threadId/restore', authMiddleware, chatController.restoreThread);
 
 // @ts-ignore
 router.get('/terminal/:threadId/session', authMiddleware, terminalController.getSession);

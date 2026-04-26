@@ -517,6 +517,7 @@ type ThreadRuntimeMetadata = {
 };
 
 const threadRuntimeMeta = new Map<string, ThreadRuntimeMetadata>();
+const lastRestoredTargetSeqByThread = new Map<string, number>();
 let mountedProjectFiles = new Set<string>();
 const mountedFilesByThread = new Map<string, Set<string>>();
 let activeMountedThreadId: string | null = null;
@@ -752,6 +753,13 @@ export const useChat = () => {
     const setTerminalIssueByThread = useSetAtom(terminalIssueByThreadAtom);
 
     const [isLoading, setIsLoading] = useState(false);
+    type ThreadVersionItem = {
+        seq: number;
+        messageId: string;
+        createdAt: string;
+        model: string | null;
+        changedFileCount: number;
+    };
     type ChatAttachmentPayload = {
         kind: 'image' | 'text';
         name: string;
@@ -1736,6 +1744,136 @@ createRoot(document.getElementById('root')!).render(
         setThreads(data);
     }, [getToken, isLoaded, isSignedIn, setThreads]);
 
+    const fetchThreadVersions = useCallback(async (threadId: string): Promise<ThreadVersionItem[]> => {
+        if (!threadId) throw new Error('threadId is required');
+        if (!isLoaded || !isSignedIn) {
+            throw new Error('You need to be signed in to view versions.');
+        }
+        const token = await getToken();
+        if (!token) {
+            throw new Error('Could not get auth token. Try signing in again.');
+        }
+        const res = await fetch(`${API_URL}/chat/${encodeURIComponent(threadId)}/versions`, {
+            headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!res.ok) {
+            const errBody = await res.text().catch(() => '');
+            throw new Error(`Failed to load versions (${res.status}): ${errBody || res.statusText}`);
+        }
+        const data = await res.json();
+        return Array.isArray(data?.items) ? data.items : [];
+    }, [API_URL, getToken, isLoaded, isSignedIn]);
+
+    const restoreThreadToSeq = useCallback(async (threadId: string, seq: number) => {
+        if (!threadId) throw new Error('threadId is required');
+        if (!Number.isFinite(seq) || seq < 1) throw new Error('Invalid seq');
+        if (!isLoaded || !isSignedIn) {
+            throw new Error('You need to be signed in to restore versions.');
+        }
+        const token = await getToken();
+        if (!token) {
+            throw new Error('Could not get auth token. Try signing in again.');
+        }
+        const res = await fetch(`${API_URL}/chat/${encodeURIComponent(threadId)}/restore`, {
+            method: 'POST',
+            headers: {
+                Authorization: `Bearer ${token}`,
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ seq }),
+        });
+        if (!res.ok) {
+            const errBody = await res.text().catch(() => '');
+            throw new Error(`Failed to restore version (${res.status}): ${errBody || res.statusText}`);
+        }
+        const data = await res.json();
+        const restoredFiles = Array.isArray(data?.files) ? data.files : [];
+        const deletedPaths = Array.isArray(data?.deletedPaths) ? data.deletedPaths : [];
+        const restoredToSeq = Number(data?.restoredToSeq || seq);
+        const isNoOp = data?.noOp === true;
+
+        if (lastRestoredTargetSeqByThread.get(threadId) === restoredToSeq && isNoOp) {
+            return {
+                restoredToSeq,
+                fileCount: restoredFiles.length,
+                deletedCount: deletedPaths.length,
+                noOp: true,
+            };
+        }
+
+        let restoredFileSystem: FileSystemItem[] = [];
+        let activeFileCandidate: ActiveFile | null = null;
+        const fileMap = new Map<string, string>();
+
+        for (const file of restoredFiles) {
+            const filePath = String(file.filePath || '').replace(/^\//, '');
+            const content = String(file.content || '');
+            if (!filePath) continue;
+            restoredFileSystem = upsertFile(restoredFileSystem, filePath, content);
+            fileMap.set(filePath, content);
+            if (!activeFileCandidate) {
+                const fileName = filePath.split('/').pop() || filePath;
+                activeFileCandidate = { path: filePath, name: fileName, content };
+            }
+        }
+
+        setFileSystem(restoredFileSystem);
+        setActiveFile(activeFileCandidate);
+
+        const wc = webContainerInstance ?? getWebContainerInstance();
+        if (wc) {
+            for (const deletedPathRaw of deletedPaths) {
+                const deletedPath = String(deletedPathRaw || '').replace(/^\//, '');
+                if (!deletedPath) continue;
+                try {
+                    await wc.fs.rm(`/${deletedPath}`);
+                } catch {
+                    // ignore non-existing files
+                }
+            }
+            for (const [filePath, content] of fileMap) {
+                const absPath = `/${filePath}`;
+                const dir = absPath.substring(0, absPath.lastIndexOf('/'));
+                if (dir && dir !== '/') {
+                    try {
+                        await wc.fs.mkdir(dir, { recursive: true });
+                    } catch {
+                        // ignore existing folder
+                    }
+                }
+                let shouldWrite = true;
+                try {
+                    const existing = await wc.fs.readFile(absPath, 'utf-8');
+                    shouldWrite = existing !== content;
+                } catch {
+                    shouldWrite = true;
+                }
+                if (shouldWrite) {
+                    await wc.fs.writeFile(absPath, content);
+                }
+            }
+        }
+
+        const incomingFiles = new Set([...fileMap.keys()]);
+        mountedProjectFiles = incomingFiles;
+        mountedFilesByThread.set(threadId, incomingFiles);
+        activeMountedThreadId = threadId;
+
+        if (!isNoOp && wc && fileMap.size > 0) {
+            const switchSeq = ++latestThreadSwitchSeq;
+            const syntheticSeq = Math.max(Date.now(), 1);
+            void startThreadSandboxInBackground(wc, threadId, new Map(fileMap), syntheticSeq, token, switchSeq);
+        }
+        lastRestoredTargetSeqByThread.set(threadId, restoredToSeq);
+
+        return {
+            restoredToSeq,
+            fileCount: fileMap.size,
+            deletedCount: deletedPaths.length,
+            noOp: isNoOp,
+        };
+    }, [API_URL, getToken, isLoaded, isSignedIn, setActiveFile, setFileSystem, startThreadSandboxInBackground, webContainerInstance]);
+
     const loadThread = useCallback(async (threadId: string) => {
         if (!threadId || typeof threadId !== 'string') {
             setThreadSwitchState({
@@ -1939,6 +2077,8 @@ createRoot(document.getElementById('root')!).render(
         messages,
         sendMessage,
         fetchThreads,
+        fetchThreadVersions,
+        restoreThreadToSeq,
         loadThread,
         runTerminalRecovery,
         refreshTerminalSession,

@@ -830,6 +830,121 @@ export class ChatService {
         };
     }
 
+    async getThreadVersions(threadId: string, userId: string) {
+        const thread = await threadsRepo.findByIdForUser(threadId, userId);
+        if (!thread) throw new ThreadAccessError();
+        const rows = await fileVersionsRepo.listMessageLevelVersionsForThread(threadId);
+        return {
+            threadId,
+            items: rows.map((row) => ({
+                seq: row.seq,
+                messageId: row.message_id,
+                createdAt: row.created_at,
+                model: row.model,
+                changedFileCount: row.changed_file_count,
+            })),
+        };
+    }
+
+    async restoreThreadToSeq(threadId: string, userId: string, seqInclusive: number) {
+        const thread = await threadsRepo.findByIdForUser(threadId, userId);
+        if (!thread) throw new ThreadAccessError();
+        if (!Number.isFinite(seqInclusive) || seqInclusive < 1) {
+            throw new Error('Invalid seq');
+        }
+        const allowedVersions = await fileVersionsRepo.listMessageLevelVersionsForThread(threadId);
+        const eligible = allowedVersions.some((item) => item.seq === seqInclusive);
+        if (!eligible) {
+            throw new Error('Seq is not a restorable model generation version');
+        }
+
+        const targetSnapshotRows = await fileVersionsRepo.snapshotAtSeq(threadId, seqInclusive);
+        const currentSnapshotRows = await fileVersionsRepo.currentSnapshot(threadId);
+
+        const targetBlobMap = await blobsRepo.getBlobs(targetSnapshotRows.map((r) => r.blob_sha256));
+        const targetFiles = targetSnapshotRows.map((row) => ({
+            filePath: row.file_path,
+            content: targetBlobMap.get(row.blob_sha256) ?? '',
+            blobSha256: row.blob_sha256,
+        }));
+
+        const targetPathSet = new Set(targetFiles.map((f) => f.filePath));
+        const deletedPaths = currentSnapshotRows
+            .filter((row) => !targetPathSet.has(row.file_path))
+            .map((row) => row.file_path);
+        const currentByPath = new Map(currentSnapshotRows.map((row) => [row.file_path, row.current_blob_sha256]));
+        const sameSize = currentSnapshotRows.length === targetFiles.length;
+        const allMatched = targetFiles.every((file) => currentByPath.get(file.filePath) === file.blobSha256);
+        const isNoOpRestore = sameSize && allMatched && deletedPaths.length === 0;
+        if (isNoOpRestore) {
+            return {
+                ok: true,
+                restoredToSeq: seqInclusive,
+                files: targetFiles.map((f) => ({ filePath: f.filePath, content: f.content })),
+                deletedPaths,
+                noOp: true,
+            };
+        }
+
+        await withThreadLock(threadId, async (tx) => {
+            const restoreSeq = await messagesRepo.nextSeq(threadId, tx);
+            const restoreSummary = `Restored project to version at seq ${seqInclusive}.`;
+            const restoreMsg = await messagesRepo.insert(
+                {
+                    threadId,
+                    userId,
+                    role: 'assistant',
+                    seq: restoreSeq,
+                    content: restoreSummary,
+                    rawContent: restoreSummary,
+                    conversationMode: 'build',
+                    status: 'complete',
+                    model: 'system-restore',
+                },
+                tx,
+            );
+
+            for (const file of targetFiles) {
+                await fileVersionsRepo.insert(
+                    {
+                        threadId,
+                        messageId: restoreMsg.id,
+                        filePath: file.filePath,
+                        blobSha256: file.blobSha256,
+                        isDeletion: false,
+                    },
+                    tx,
+                );
+            }
+
+            const currentStateByPath = new Map(currentSnapshotRows.map((r) => [r.file_path, r]));
+            for (const filePath of deletedPaths) {
+                const currentState = currentStateByPath.get(filePath);
+                if (!currentState) continue;
+                await fileVersionsRepo.insert(
+                    {
+                        threadId,
+                        messageId: restoreMsg.id,
+                        filePath,
+                        blobSha256: currentState.current_blob_sha256,
+                        isDeletion: true,
+                    },
+                    tx,
+                );
+            }
+
+            await threadsRepo.touch(threadId, tx, { lastMode: 'build' });
+        });
+
+        return {
+            ok: true,
+            restoredToSeq: seqInclusive,
+            files: targetFiles.map((f) => ({ filePath: f.filePath, content: f.content })),
+            deletedPaths,
+            noOp: false,
+        };
+    }
+
     private mapThread(row: {
         id: string;
         title: string;

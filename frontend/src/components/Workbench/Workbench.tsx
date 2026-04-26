@@ -1,6 +1,6 @@
 
 import React, { useState } from 'react';
-import { Terminal, Code, Play } from 'lucide-react';
+import { Terminal, Code, Play, History } from 'lucide-react';
 import { EditorPanel } from './EditorPanel';
 import { TerminalPanel } from './TerminalPanel';
 import { FileTree } from './FileTree';
@@ -8,10 +8,22 @@ import { useWebContainer } from '../../hooks/useWebContainer';
 // import { motion } from 'framer-motion';
 
 import { PreviewPanel } from './PreviewPanel';
+import { useAtomValue } from 'jotai';
+import { currentThreadIdAtom } from '../../store/atoms';
+import { VersionHistoryModal } from './VersionHistoryModal';
+
+interface TabButtonProps {
+    active: boolean;
+    onClick: () => void;
+    icon: React.ReactNode;
+    label: string;
+}
 
 export const Workbench: React.FC = () => {
     const [activeTab, setActiveTab] = useState<'code' | 'preview' | 'terminal'>('code');
+    const [isVersionModalOpen, setIsVersionModalOpen] = useState(false);
     const { isLoading, error } = useWebContainer(); // Init WebContainer on mount
+    const currentThreadId = useAtomValue(currentThreadIdAtom);
 
     if (error) {
         return (
@@ -62,6 +74,19 @@ export const Workbench: React.FC = () => {
                         label="Terminal"
                     />
                 </div>
+
+                <div className="absolute right-3 top-1/2 -translate-y-1/2">
+                    <button
+                        type="button"
+                        onClick={() => setIsVersionModalOpen(true)}
+                        disabled={!currentThreadId}
+                        className="inline-flex h-7 items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-900 px-2 text-[11px] text-zinc-300 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50"
+                        title={currentThreadId ? 'Open thread version history' : 'Start a thread to view versions'}
+                    >
+                        <History className="h-3.5 w-3.5" />
+                        Versions
+                    </button>
+                </div>
             </div>
 
             {/* Workbench Content */}
@@ -70,11 +95,19 @@ export const Workbench: React.FC = () => {
                 {activeTab === 'preview' && <PreviewPanel />}
                 {activeTab === 'terminal' && <TerminalPanel />}
             </div>
+
+            {currentThreadId && (
+                <VersionHistoryModal
+                    threadId={currentThreadId}
+                    isOpen={isVersionModalOpen}
+                    onClose={() => setIsVersionModalOpen(false)}
+                />
+            )}
         </div>
     );
 };
 
-const TabButton = ({ active, onClick, icon, label }: any) => (
+const TabButton: React.FC<TabButtonProps> = ({ active, onClick, icon, label }) => (
     <button
         onClick={onClick}
         className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-medium transition-all ${active

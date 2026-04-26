@@ -93,6 +93,21 @@ export interface FileDeltaRow extends FileVersionRow {
     seq: number;
 }
 
+export interface ThreadFileVersionTimelineRow extends FileVersionRow {
+    seq: number;
+    message_created_at: string;
+    message_role: string;
+    message_model: string | null;
+}
+
+export interface MessageLevelVersionRow {
+    seq: number;
+    message_id: string;
+    created_at: string;
+    model: string | null;
+    changed_file_count: number;
+}
+
 /**
  * Return the latest change per file path after a given message seq.
  * Includes both upserts and deletions so callers can apply deltas.
@@ -112,6 +127,50 @@ export const latestChangesSinceSeq = async (
            AND m.seq > $2
          ORDER BY fv.file_path ASC, fv.version DESC`,
         [threadId, sinceSeq],
+    );
+    return result.rows;
+};
+
+export const listTimelineForThread = async (
+    threadId: string,
+    tx?: Tx,
+): Promise<ThreadFileVersionTimelineRow[]> => {
+    const result = await q(tx).query<ThreadFileVersionTimelineRow>(
+        `SELECT
+            fv.*,
+            m.seq::int AS seq,
+            m.created_at AS message_created_at,
+            m.role AS message_role,
+            m.model AS message_model
+         FROM public.file_versions fv
+         JOIN public.messages m ON m.id = fv.message_id
+         WHERE fv.thread_id = $1
+         ORDER BY m.seq DESC, fv.version DESC`,
+        [threadId],
+    );
+    return result.rows;
+};
+
+export const listMessageLevelVersionsForThread = async (
+    threadId: string,
+    tx?: Tx,
+): Promise<MessageLevelVersionRow[]> => {
+    const result = await q(tx).query<MessageLevelVersionRow>(
+        `SELECT
+            m.seq::int AS seq,
+            m.id AS message_id,
+            m.created_at,
+            m.model,
+            COUNT(fv.id)::int AS changed_file_count
+         FROM public.file_versions fv
+         JOIN public.messages m ON m.id = fv.message_id
+         WHERE fv.thread_id = $1
+           AND m.role = 'assistant'
+           AND m.conversation_mode = 'build'
+         GROUP BY m.seq, m.id, m.created_at, m.model
+         HAVING COUNT(fv.id) > 0
+         ORDER BY m.seq DESC`,
+        [threadId],
     );
     return result.rows;
 };
