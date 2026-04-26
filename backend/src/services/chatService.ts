@@ -33,6 +33,61 @@ export type ChatLogContext = {
     model?: string;
 };
 
+type ChatAttachment = {
+    kind: 'image' | 'text';
+    name: string;
+    mimeType: string;
+    sizeBytes: number;
+    dataBase64?: string;
+    textContent?: string;
+};
+
+const MAX_ATTACHMENTS = 6;
+const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
+const MAX_TEXT_ATTACHMENT_CHARS = 80_000;
+
+const sanitizeAttachments = (raw: unknown): ChatAttachment[] => {
+    if (!Array.isArray(raw)) return [];
+    const out: ChatAttachment[] = [];
+    for (const item of raw) {
+        if (!item || typeof item !== 'object') continue;
+        const rec = item as Record<string, unknown>;
+        const kind = rec.kind === 'image' ? 'image' : rec.kind === 'text' ? 'text' : null;
+        if (!kind) continue;
+        const name = String(rec.name || 'attachment');
+        const mimeType = String(rec.mimeType || (kind === 'image' ? 'image/png' : 'text/plain'));
+        const sizeBytes = Number(rec.sizeBytes || 0);
+        if (!Number.isFinite(sizeBytes) || sizeBytes < 0) continue;
+        if (kind === 'image') {
+            const dataBase64 = typeof rec.dataBase64 === 'string' ? rec.dataBase64 : '';
+            if (!dataBase64) continue;
+            if (sizeBytes > MAX_IMAGE_BYTES) continue;
+            out.push({ kind, name, mimeType, sizeBytes, dataBase64 });
+        } else {
+            const textContent = typeof rec.textContent === 'string' ? rec.textContent : '';
+            if (!textContent) continue;
+            out.push({
+                kind,
+                name,
+                mimeType,
+                sizeBytes,
+                textContent: textContent.slice(0, MAX_TEXT_ATTACHMENT_CHARS),
+            });
+        }
+        if (out.length >= MAX_ATTACHMENTS) break;
+    }
+    return out;
+};
+
+const buildTextAttachmentContext = (attachments: ChatAttachment[]): string => {
+    const textAttachments = attachments.filter((a) => a.kind === 'text' && a.textContent);
+    if (textAttachments.length === 0) return '';
+    const blocks = textAttachments.map((a) =>
+        `[attached_text_file]\nname: ${a.name}\ntype: ${a.mimeType}\nsize: ${a.sizeBytes}\ncontent:\n${a.textContent}\n[/attached_text_file]`,
+    );
+    return `\n\nAttached text files for context:\n${blocks.join('\n\n')}`;
+};
+
 // ── Bolt protocol parsing helpers (unchanged from previous service) ──
 
 interface ExtractedFile {
@@ -213,8 +268,10 @@ export class ChatService {
         threadIdParam: string | null,
         userId: string,
         model: string = 'gpt-4o',
+        rawAttachments: unknown[] = [],
         logContext: ChatLogContext = {},
     ): Promise<{ stream: AsyncGenerator<string>; threadId: string }> {
+        const attachments = sanitizeAttachments(rawAttachments);
         // 1. Resolve / create thread (outside the per-thread lock since a brand
         //    new thread can't have concurrent traffic yet).
         let threadId = threadIdParam;
@@ -288,6 +345,8 @@ export class ChatService {
             model,
             snapshotFileCount: fileSnapshot.length,
             recentMessageCount: messages.length,
+            attachmentCount: attachments.length,
+            imageAttachmentCount: attachments.filter((a) => a.kind === 'image').length,
             assistantMessageId,
         });
 
@@ -300,13 +359,13 @@ export class ChatService {
             } else {
                 switch (modelConfig.provider) {
                     case 'openai':
-                        providerStream = this.streamOpenAI(messages, modelConfig.apiModelId, enhancedSystemPrompt);
+                        providerStream = this.streamOpenAI(messages, attachments, modelConfig.apiModelId, enhancedSystemPrompt);
                         break;
                     case 'anthropic':
-                        providerStream = this.streamAnthropic(messages, modelConfig.apiModelId, enhancedSystemPrompt);
+                        providerStream = this.streamAnthropic(messages, attachments, modelConfig.apiModelId, enhancedSystemPrompt);
                         break;
                     case 'google':
-                        providerStream = this.streamGemini(messages, modelConfig.apiModelId, enhancedSystemPrompt);
+                        providerStream = this.streamGemini(messages, attachments, modelConfig.apiModelId, enhancedSystemPrompt);
                         break;
                     default:
                         providerStream = this.mockStream(`Unknown provider: ${modelConfig.provider}. Using mock.`);
@@ -463,13 +522,37 @@ export class ChatService {
 
     // ── Provider streams (unchanged behavior, just no DB I/O here) ──
 
-    private async *streamOpenAI(messages: { role: string; content: string }[], apiModelId: string, systemPrompt: string) {
+    private async *streamOpenAI(
+        messages: { role: string; content: string }[],
+        attachments: ChatAttachment[],
+        apiModelId: string,
+        systemPrompt: string,
+    ) {
         if (!this.openai) throw new Error('OpenAI API Key not configured');
+        const textAttachmentContext = buildTextAttachmentContext(attachments);
+        const imageAttachments = attachments.filter((a) => a.kind === 'image' && a.dataBase64);
+        const preparedMessages = messages.map((m, idx) => {
+            const isLast = idx === messages.length - 1;
+            const isLastUser = isLast && m.role === 'user';
+            if (!isLastUser || (imageAttachments.length === 0 && !textAttachmentContext)) {
+                return { role: m.role, content: m.content };
+            }
+            const contentParts: any[] = [{ type: 'text', text: `${m.content}${textAttachmentContext}` }];
+            for (const image of imageAttachments) {
+                contentParts.push({
+                    type: 'image_url',
+                    image_url: {
+                        url: `data:${image.mimeType};base64,${image.dataBase64}`,
+                    },
+                });
+            }
+            return { role: m.role, content: contentParts };
+        });
         const stream = await this.openai.chat.completions.create({
             model: apiModelId,
             messages: [
                 { role: 'system', content: systemPrompt },
-                ...(messages as any),
+                ...(preparedMessages as any),
             ],
             stream: true,
         });
@@ -479,7 +562,12 @@ export class ChatService {
         }
     }
 
-    private async *streamAnthropic(messages: { role: string; content: string }[], apiModelId: string, systemPrompt: string) {
+    private async *streamAnthropic(
+        messages: { role: string; content: string }[],
+        attachments: ChatAttachment[],
+        apiModelId: string,
+        systemPrompt: string,
+    ) {
         if (!this.anthropic) throw new Error('Anthropic API Key not configured');
         const merged: { role: 'user' | 'assistant'; content: string }[] = [];
         for (const m of messages) {
@@ -492,11 +580,32 @@ export class ChatService {
         if (merged.length > 0 && merged[0].role !== 'user') {
             merged.unshift({ role: 'user', content: '(conversation continued)' });
         }
+        const textAttachmentContext = buildTextAttachmentContext(attachments);
+        const imageAttachments = attachments.filter((a) => a.kind === 'image' && a.dataBase64);
+        const anthropicMessages = merged.map((m, idx) => {
+            const isLast = idx === merged.length - 1;
+            const isLastUser = isLast && m.role === 'user';
+            if (!isLastUser || (imageAttachments.length === 0 && !textAttachmentContext)) {
+                return { role: m.role, content: m.content };
+            }
+            const content: any[] = [{ type: 'text', text: `${m.content}${textAttachmentContext}` }];
+            for (const image of imageAttachments) {
+                content.push({
+                    type: 'image',
+                    source: {
+                        type: 'base64',
+                        media_type: image.mimeType,
+                        data: image.dataBase64,
+                    },
+                });
+            }
+            return { role: m.role, content };
+        });
         const stream = await this.anthropic.messages.create({
             model: apiModelId,
             max_tokens: 8192,
             system: systemPrompt,
-            messages: merged,
+            messages: anthropicMessages as any,
             stream: true,
         });
         for await (const chunk of stream) {
@@ -506,7 +615,12 @@ export class ChatService {
         }
     }
 
-    private async *streamGemini(messages: { role: string; content: string }[], apiModelId: string, systemPrompt: string) {
+    private async *streamGemini(
+        messages: { role: string; content: string }[],
+        attachments: ChatAttachment[],
+        apiModelId: string,
+        systemPrompt: string,
+    ) {
         if (!this.gemini) throw new Error('Gemini API Key not configured');
         const { HarmCategory, HarmBlockThreshold } = await import('@google/generative-ai');
         const model = this.gemini.getGenerativeModel({
@@ -526,7 +640,18 @@ export class ChatService {
         }));
         const chat = model.startChat({ history });
         const lastMessage = messages[messages.length - 1];
-        const result = await chat.sendMessageStream(lastMessage.content);
+        const textAttachmentContext = buildTextAttachmentContext(attachments);
+        const imageAttachments = attachments.filter((a) => a.kind === 'image' && a.dataBase64);
+        const geminiParts: any[] = [{ text: `${lastMessage.content}${textAttachmentContext}` }];
+        for (const image of imageAttachments) {
+            geminiParts.push({
+                inlineData: {
+                    mimeType: image.mimeType,
+                    data: image.dataBase64,
+                },
+            });
+        }
+        const result = await chat.sendMessageStream(geminiParts as any);
         for await (const chunk of result.stream) {
             try {
                 yield chunk.text();

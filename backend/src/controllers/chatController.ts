@@ -6,7 +6,7 @@ const chatService = new ChatService();
 
 export const chatController = {
     async sendMessage(req: Request, res: Response) {
-        const { message, threadId, model } = req.body;
+        const { message, threadId, model, attachments } = req.body;
 
         if (!message) {
             return res.status(400).json({ error: 'Message is required' });
@@ -22,6 +22,7 @@ export const chatController = {
                 threadId,
                 userId,
                 model,
+                Array.isArray(attachments) ? attachments : [],
                 { requestId: req.requestId, internalUserId: userId },
             );
 

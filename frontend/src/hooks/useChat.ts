@@ -750,6 +750,15 @@ export const useChat = () => {
     const setTerminalIssueByThread = useSetAtom(terminalIssueByThreadAtom);
 
     const [isLoading, setIsLoading] = useState(false);
+    type ChatAttachmentPayload = {
+        kind: 'image' | 'text';
+        name: string;
+        mimeType: string;
+        sizeBytes: number;
+        dataBase64?: string;
+        textContent?: string;
+    };
+
 
     const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001/api';
 
@@ -1426,7 +1435,7 @@ createRoot(document.getElementById('root')!).render(
         }
     }, [API_URL, appendTerminalEvents, setFileSystem, setPreviewStatus, setPreviewStatusMessage, setSandboxRuntimeMetadata, shellWriter]);
 
-    const sendMessage = async (content: string) => {
+    const sendMessage = async (content: string, attachments: ChatAttachmentPayload[] = []) => {
         if (!content.trim() || !isLoaded || !isSignedIn) {
             console.warn('[useChat] sendMessage blocked:', { hasContent: !!content.trim(), isLoaded, isSignedIn });
             return;
@@ -1438,7 +1447,9 @@ createRoot(document.getElementById('root')!).render(
         const userMessage = {
             id: Date.now().toString(),
             role: 'user' as const,
-            content,
+            content: attachments.length > 0
+                ? `${content}\n\n[Attached ${attachments.length} file${attachments.length > 1 ? 's' : ''}]`
+                : content,
             timestamp: Date.now(),
         };
         setMessages((prev) => [...prev, userMessage]);
@@ -1461,6 +1472,7 @@ createRoot(document.getElementById('root')!).render(
                     message: content,
                     threadId: currentThreadId,
                     model: selectedModel,
+                    attachments,
                 }),
             });
 

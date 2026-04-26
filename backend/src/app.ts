@@ -22,7 +22,7 @@ app.use(
         exposedHeaders: ['X-Thread-Id', 'X-Request-Id'],
     }),
 );
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
 app.use(requestContextMiddleware);
 app.use(httpRequestLoggerMiddleware);
 
