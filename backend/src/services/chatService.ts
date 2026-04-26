@@ -11,6 +11,7 @@ import * as chunksRepo from '../repositories/messageChunks';
 import * as fileVersionsRepo from '../repositories/fileVersions';
 import * as shellCommandsRepo from '../repositories/shellCommands';
 import * as blobsRepo from '../repositories/blobs';
+import * as planContextsRepo from '../repositories/planContexts';
 import { MessageRow } from '../repositories/types';
 import { log, errorFields } from '../lib/logger';
 
@@ -31,7 +32,11 @@ export type ChatLogContext = {
     requestId?: string;
     internalUserId?: string;
     model?: string;
+    mode?: ConversationMode;
+    planContextUsed?: boolean;
 };
+
+export type ConversationMode = 'plan' | 'build';
 
 type ChatAttachment = {
     kind: 'image' | 'text';
@@ -86,6 +91,64 @@ const buildTextAttachmentContext = (attachments: ChatAttachment[]): string => {
         `[attached_text_file]\nname: ${a.name}\ntype: ${a.mimeType}\nsize: ${a.sizeBytes}\ncontent:\n${a.textContent}\n[/attached_text_file]`,
     );
     return `\n\nAttached text files for context:\n${blocks.join('\n\n')}`;
+};
+
+export const normalizeMode = (raw: string | null | undefined): ConversationMode => (
+    raw === 'plan' ? 'plan' : 'build'
+);
+
+const PLAN_MODE_PROMPT = `
+You are in PLAN MODE.
+- Provide an implementation plan, architecture decisions, trade-offs, and validation strategy.
+- Do not emit <boltArtifact> or <boltAction> tags.
+- Do not output file diffs or shell commands.
+- Keep the plan actionable and ordered.
+`.trim();
+
+const BUILD_MODE_PROMPT = `
+You are in BUILD MODE.
+- Implement requested changes directly.
+- Emit valid <boltArtifact> and <boltAction> blocks for file and shell operations when needed.
+- Keep changes minimal and consistent with existing project files.
+`.trim();
+
+const MAX_PLAN_CONTEXT_CHARS = 12_000;
+const PLAN_CONTEXT_MIN_CHARS = 80;
+
+export const resolveModelForMode = (requestedModel: string, mode: ConversationMode): string => {
+    if (mode === 'plan' && !requestedModel?.trim()) return 'gemini-2.5-flash';
+    return requestedModel;
+};
+
+export const buildEnhancedSystemPrompt = (
+    basePrompt: string,
+    fileSnapshot: { filePath: string; content: string }[],
+    mode: ConversationMode,
+    savedPlanContext?: string | null,
+): string => {
+    let enhanced = basePrompt;
+    enhanced += `\n\n--- CONVERSATION MODE ---\n${mode === 'plan' ? PLAN_MODE_PROMPT : BUILD_MODE_PROMPT}\n--- END MODE ---\n`;
+    if (mode === 'build' && savedPlanContext) {
+        enhanced += '\n--- APPROVED PLAN CONTEXT ---\n';
+        enhanced += `${savedPlanContext}\n`;
+        enhanced += '--- END APPROVED PLAN CONTEXT ---\n';
+    }
+    if (fileSnapshot.length > 0) {
+        enhanced += '\n--- CURRENT PROJECT FILES ---\n';
+        enhanced += 'Below is the current state of ALL files in the user\'s project. ';
+        enhanced += 'When the user asks for modifications, update ONLY the changed files (do not re-emit unchanged files).\n';
+        for (const f of fileSnapshot) {
+            enhanced += `\n--- ${f.filePath} ---\n${f.content}\n`;
+        }
+        enhanced += '\n--- END OF PROJECT FILES ---\n';
+    }
+    return enhanced;
+};
+
+export const normalizePlanContext = (responseText: string): string | null => {
+    const stripped = stripBoltTags(responseText).trim();
+    if (stripped.length < PLAN_CONTEXT_MIN_CHARS) return null;
+    return stripped.slice(0, MAX_PLAN_CONTEXT_CHARS);
 };
 
 // ── Bolt protocol parsing helpers (unchanged from previous service) ──
@@ -268,9 +331,12 @@ export class ChatService {
         threadIdParam: string | null,
         userId: string,
         model: string = 'gpt-4o',
+        modeParam: string = 'build',
         rawAttachments: unknown[] = [],
         logContext: ChatLogContext = {},
     ): Promise<{ stream: AsyncGenerator<string>; threadId: string }> {
+        const conversationMode = normalizeMode(modeParam);
+        const effectiveModel = resolveModelForMode(model, conversationMode);
         const attachments = sanitizeAttachments(rawAttachments);
         // 1. Resolve / create thread (outside the per-thread lock since a brand
         //    new thread can't have concurrent traffic yet).
@@ -293,6 +359,7 @@ export class ChatService {
                     role: 'user',
                     seq: userSeq,
                     content: messageContent,
+                    conversationMode,
                     status: 'complete',
                 },
                 tx,
@@ -304,12 +371,13 @@ export class ChatService {
                     userId,
                     role: 'assistant',
                     seq: assistantSeq,
-                    model,
+                    model: effectiveModel,
+                    conversationMode,
                     status: 'streaming',
                 },
                 tx,
             );
-            await threadsRepo.touch(threadId!, tx);
+            await threadsRepo.touch(threadId!, tx, { lastMode: conversationMode });
             return { assistantMessageId: assistant.id };
         });
 
@@ -321,51 +389,61 @@ export class ChatService {
             content: blobMap.get(r.current_blob_sha256) ?? '',
         }));
 
-        let enhancedSystemPrompt = SYSTEM_PROMPT;
-        if (fileSnapshot.length > 0) {
-            enhancedSystemPrompt += '\n\n--- CURRENT PROJECT FILES ---\n';
-            enhancedSystemPrompt += 'Below is the current state of ALL files in the user\'s project. ';
-            enhancedSystemPrompt += 'When the user asks for modifications, update ONLY the changed files (do not re-emit unchanged files).\n';
-            for (const f of fileSnapshot) {
-                enhancedSystemPrompt += `\n--- ${f.filePath} ---\n${f.content}\n`;
-            }
-            enhancedSystemPrompt += '\n--- END OF PROJECT FILES ---\n';
-        }
+        const savedPlanContext = conversationMode === 'build'
+            ? await planContextsRepo.getPlanContext(threadId, userId)
+            : null;
+        const enhancedSystemPrompt = buildEnhancedSystemPrompt(
+            SYSTEM_PROMPT,
+            fileSnapshot,
+            conversationMode,
+            savedPlanContext?.planContext ?? null,
+        );
 
         const recentRows = await messagesRepo.recentForThread(threadId, 10);
         const messages = recentRows.map((m) => ({
             role: m.role,
             content: m.content || '(no content)',
         }));
+        if (conversationMode === 'build' && !savedPlanContext?.planContext && messages.length > 0) {
+            const lastIdx = messages.length - 1;
+            if (messages[lastIdx].role === 'user') {
+                messages[lastIdx] = {
+                    ...messages[lastIdx],
+                    content: `${messages[lastIdx].content}\n\n[System note: No saved plan context exists for this thread. Mention this briefly and proceed with best-effort build.]`,
+                };
+            }
+        }
 
         log.info('chat.context_built', {
             requestId: logContext.requestId,
             internalUserId: logContext.internalUserId ?? userId,
             threadId,
-            model,
+            model: effectiveModel,
             snapshotFileCount: fileSnapshot.length,
             recentMessageCount: messages.length,
             attachmentCount: attachments.length,
             imageAttachmentCount: attachments.filter((a) => a.kind === 'image').length,
+            mode: conversationMode,
+            planContextUsed: !!savedPlanContext?.planContext,
             assistantMessageId,
         });
 
         // 4. Provider stream selection.
         let providerStream: AsyncGenerator<string>;
         try {
-            const modelConfig = getModelConfig(model);
+            const modelConfig = getModelConfig(effectiveModel);
             if (!modelConfig) {
-                providerStream = this.mockStream(`Unknown model: ${model}. Using mock.`);
+                providerStream = this.mockStream(`Unknown model: ${effectiveModel}. Using mock.`);
             } else {
                 switch (modelConfig.provider) {
                     case 'openai':
-                        providerStream = this.streamOpenAI(messages, attachments, modelConfig.apiModelId, enhancedSystemPrompt);
+                        providerStream = this.streamOpenAI(messages, attachments, conversationMode, modelConfig.apiModelId, enhancedSystemPrompt);
                         break;
                     case 'anthropic':
-                        providerStream = this.streamAnthropic(messages, attachments, modelConfig.apiModelId, enhancedSystemPrompt);
+                        providerStream = this.streamAnthropic(messages, attachments, conversationMode, modelConfig.apiModelId, enhancedSystemPrompt);
                         break;
                     case 'google':
-                        providerStream = this.streamGemini(messages, attachments, modelConfig.apiModelId, enhancedSystemPrompt);
+                        providerStream = this.streamGemini(messages, attachments, conversationMode, modelConfig.apiModelId, enhancedSystemPrompt);
                         break;
                     default:
                         providerStream = this.mockStream(`Unknown provider: ${modelConfig.provider}. Using mock.`);
@@ -375,17 +453,19 @@ export class ChatService {
             log.error('chat.provider_selection_failed', {
                 requestId: logContext.requestId,
                 threadId,
-                model,
+                model: effectiveModel,
                 ...errorFields(error),
             });
-            providerStream = this.mockStream(`Error with ${model}: ${error instanceof Error ? error.message : 'Unknown error'}. Falling back to mock.`);
+            providerStream = this.mockStream(`Error with ${effectiveModel}: ${error instanceof Error ? error.message : 'Unknown error'}. Falling back to mock.`);
         }
 
         return {
             stream: this.persistAndYield(providerStream, threadId, assistantMessageId, {
                 requestId: logContext.requestId,
                 internalUserId: userId,
-                model,
+                model: effectiveModel,
+                mode: conversationMode,
+                planContextUsed: !!savedPlanContext?.planContext,
             }),
             threadId,
         };
@@ -437,8 +517,9 @@ export class ChatService {
         // Finalize: parse, hash + upload blobs, version files, save shell cmds,
         // mark message complete — all in one transaction.
         try {
-            const extractedFiles = patchMissingDeps(extractFilesFromRaw(fullResponse));
-            const shellCommands = extractShellCommands(fullResponse);
+            const mode = ctx.mode ?? 'build';
+            const extractedFiles = mode === 'build' ? patchMissingDeps(extractFilesFromRaw(fullResponse)) : [];
+            const shellCommands = mode === 'build' ? extractShellCommands(fullResponse) : [];
             const displayContent = stripBoltTags(fullResponse);
 
             // Hash + upload blobs OUTSIDE the transaction (Storage upload may
@@ -459,6 +540,23 @@ export class ChatService {
                     },
                     tx,
                 );
+                if (mode === 'plan') {
+                    const planContext = normalizePlanContext(displayContent);
+                    if (planContext && ctx.internalUserId) {
+                        await planContextsRepo.upsertPlanContext(
+                            {
+                                threadId,
+                                userId: ctx.internalUserId,
+                                planContext,
+                                sourceMessageId: assistantMessageId,
+                            },
+                            tx,
+                        );
+                        await threadsRepo.touch(threadId, tx, { lastMode: 'plan', planContextUpdated: true });
+                    } else {
+                        await threadsRepo.touch(threadId, tx, { lastMode: 'plan' });
+                    }
+                }
                 for (const { filePath, sha } of fileShas) {
                     await fileVersionsRepo.insert(
                         {
@@ -473,7 +571,9 @@ export class ChatService {
                 if (shellCommands.length > 0) {
                     await shellCommandsRepo.insertBatch(threadId, assistantMessageId, shellCommands, tx);
                 }
-                await threadsRepo.touch(threadId, tx);
+                if (mode !== 'plan') {
+                    await threadsRepo.touch(threadId, tx, { lastMode: 'build' });
+                }
             });
             log.info('chat.message_finalized', {
                 requestId: ctx.requestId,
@@ -481,6 +581,8 @@ export class ChatService {
                 threadId,
                 assistantMessageId,
                 model: ctx.model,
+                mode: ctx.mode,
+                planContextUsed: !!ctx.planContextUsed,
                 fileCount: extractedFiles.length,
                 shellCommandCount: shellCommands.length,
                 responseChars: fullResponse.length,
@@ -525,6 +627,7 @@ export class ChatService {
     private async *streamOpenAI(
         messages: { role: string; content: string }[],
         attachments: ChatAttachment[],
+        _mode: ConversationMode,
         apiModelId: string,
         systemPrompt: string,
     ) {
@@ -565,6 +668,7 @@ export class ChatService {
     private async *streamAnthropic(
         messages: { role: string; content: string }[],
         attachments: ChatAttachment[],
+        _mode: ConversationMode,
         apiModelId: string,
         systemPrompt: string,
     ) {
@@ -618,6 +722,7 @@ export class ChatService {
     private async *streamGemini(
         messages: { role: string; content: string }[],
         attachments: ChatAttachment[],
+        _mode: ConversationMode,
         apiModelId: string,
         systemPrompt: string,
     ) {
@@ -725,13 +830,22 @@ export class ChatService {
         };
     }
 
-    private mapThread(row: { id: string; title: string; created_at: string; updated_at: string }) {
+    private mapThread(row: {
+        id: string;
+        title: string;
+        created_at: string;
+        updated_at: string;
+        last_mode?: ConversationMode | null;
+        plan_context_updated_at?: string | null;
+    }) {
         return {
             _id: row.id,
             id: row.id,
             title: row.title,
             createdAt: row.created_at,
             updatedAt: row.updated_at,
+            lastMode: row.last_mode ?? null,
+            planContextUpdatedAt: row.plan_context_updated_at ?? null,
         };
     }
 
@@ -752,6 +866,7 @@ export class ChatService {
             rawContent: row.raw_content ?? '',
             status: row.status,
             model: row.model,
+            conversationMode: row.conversation_mode ?? null,
             createdAt: row.created_at,
         };
     }

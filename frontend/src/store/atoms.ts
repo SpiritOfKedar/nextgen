@@ -33,6 +33,8 @@ export const currentThreadIdAtom = atom<string | null>(savedThreadId);
 export const threadsAtom = atom<Thread[]>([]);
 export const messagesAtom = atom<Message[]>([]);
 export const selectedModelAtom = atom<string>('gemini-2.5-flash');
+export type ChatMode = 'plan' | 'build';
+export const chatModeAtom = atom<ChatMode>('build');
 export const threadSwitchStateAtom = atom<ThreadSwitchState>({
     status: 'idle',
     targetThreadId: null,

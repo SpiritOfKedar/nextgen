@@ -1,6 +1,6 @@
 import { useCallback, useState } from 'react';
 import { useAtom, useSetAtom, useAtomValue } from 'jotai';
-import { messagesAtom, currentThreadIdAtom, threadSwitchStateAtom, threadsAtom, selectedModelAtom } from '../store/atoms';
+import { messagesAtom, currentThreadIdAtom, threadSwitchStateAtom, threadsAtom, selectedModelAtom, chatModeAtom } from '../store/atoms';
 import {
     previewStatusAtom,
     previewStatusMessageAtom,
@@ -735,6 +735,8 @@ export const useChat = () => {
     const setThreads = useSetAtom(threadsAtom);
     const navigate = useNavigate();
     const [selectedModel] = useAtom(selectedModelAtom);
+    const [chatMode] = useAtom(chatModeAtom);
+    const setChatMode = useSetAtom(chatModeAtom);
     const webContainerInstance = useAtomValue(webContainerAtom);
     const shellWriter = useAtomValue(shellInputWriterAtom);
     const setFileSystem = useSetAtom(fileSystemAtom);
@@ -1448,8 +1450,8 @@ createRoot(document.getElementById('root')!).render(
             id: Date.now().toString(),
             role: 'user' as const,
             content: attachments.length > 0
-                ? `${content}\n\n[Attached ${attachments.length} file${attachments.length > 1 ? 's' : ''}]`
-                : content,
+                ? `[Mode: ${chatMode === 'plan' ? 'Plan' : 'Build'}]\n${content}\n\n[Attached ${attachments.length} file${attachments.length > 1 ? 's' : ''}]`
+                : `[Mode: ${chatMode === 'plan' ? 'Plan' : 'Build'}]\n${content}`,
             timestamp: Date.now(),
         };
         setMessages((prev) => [...prev, userMessage]);
@@ -1472,6 +1474,7 @@ createRoot(document.getElementById('root')!).render(
                     message: content,
                     threadId: currentThreadId,
                     model: selectedModel,
+                    mode: chatMode,
                     attachments,
                 }),
             });
@@ -1869,6 +1872,12 @@ createRoot(document.getElementById('root')!).render(
                 content: m.role === 'assistant' ? stripBoltTags(m.content) : m.content,
                 timestamp: new Date(m.createdAt).getTime(),
             }));
+            const latestModeMessage = [...rawMessages]
+                .reverse()
+                .find((m: any) => m?.conversationMode === 'plan' || m?.conversationMode === 'build');
+            if (latestModeMessage?.conversationMode === 'plan' || latestModeMessage?.conversationMode === 'build') {
+                setChatMode(latestModeMessage.conversationMode);
+            }
             setMessages(formattedMessages);
             setCurrentThreadId(threadId);
             localStorage.setItem('currentThreadId', threadId);
@@ -1924,7 +1933,7 @@ createRoot(document.getElementById('root')!).render(
             }
             throw error;
         }
-    }, [getToken, isLoaded, isSignedIn, navigate, refreshTerminalSession, setThreadSwitchState, setServerUrl, setPreviewStatus, setPreviewStatusMessage, webContainerInstance, setMessages, setCurrentThreadId, setFileSystem, setActiveFile, startThreadSandboxInBackground]);
+    }, [getToken, isLoaded, isSignedIn, navigate, refreshTerminalSession, setThreadSwitchState, setServerUrl, setPreviewStatus, setPreviewStatusMessage, webContainerInstance, setMessages, setCurrentThreadId, setFileSystem, setActiveFile, setChatMode, startThreadSandboxInBackground]);
 
     return {
         messages,

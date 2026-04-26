@@ -25,16 +25,32 @@ export interface InsertMessageInput {
     content?: string;
     rawContent?: string | null;
     model?: string | null;
+    conversationMode?: 'plan' | 'build' | null;
     status?: MessageStatus;
 }
 
+let schemaEnsured = false;
+const ensureSchema = async (): Promise<void> => {
+    if (schemaEnsured) return;
+    await getPool().query(`
+        ALTER TABLE public.messages
+        ADD COLUMN IF NOT EXISTS conversation_mode TEXT NULL
+    `);
+    await getPool().query(`
+        CREATE INDEX IF NOT EXISTS idx_messages_thread_mode_seq
+        ON public.messages(thread_id, conversation_mode, seq)
+    `);
+    schemaEnsured = true;
+};
+
 export const insert = async (input: InsertMessageInput, tx: Tx): Promise<MessageRow> => {
+    await ensureSchema();
     const result = await tx.query<MessageRow>(
         `INSERT INTO public.messages
-            (thread_id, user_id, role, seq, content, raw_content, model, status,
+            (thread_id, user_id, role, seq, content, raw_content, model, conversation_mode, status,
              completed_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
-             CASE WHEN $8 = 'complete' THEN now() ELSE NULL END)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
+             CASE WHEN $9 = 'complete' THEN now() ELSE NULL END)
          RETURNING *`,
         [
             input.threadId,
@@ -44,6 +60,7 @@ export const insert = async (input: InsertMessageInput, tx: Tx): Promise<Message
             input.content ?? '',
             input.rawContent ?? null,
             input.model ?? null,
+            input.conversationMode ?? null,
             input.status ?? 'complete',
         ],
     );
@@ -81,6 +98,7 @@ export const markAborted = async (id: string, error: string | null, tx?: Tx): Pr
 };
 
 export const listForThread = async (threadId: string, tx?: Tx): Promise<MessageRow[]> => {
+    await ensureSchema();
     const result = await q(tx).query<MessageRow>(
         `SELECT * FROM public.messages
          WHERE thread_id = $1
@@ -99,6 +117,7 @@ export const recentForThread = async (
     limit: number,
     tx?: Tx,
 ): Promise<MessageRow[]> => {
+    await ensureSchema();
     const result = await q(tx).query<MessageRow>(
         `SELECT *
          FROM (

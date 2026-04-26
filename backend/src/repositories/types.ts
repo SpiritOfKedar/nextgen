@@ -11,6 +11,8 @@ export interface ThreadRow {
     title: string;
     created_at: string;
     updated_at: string;
+    last_mode: 'plan' | 'build' | null;
+    plan_context_updated_at: string | null;
 }
 
 export type MessageRole = 'user' | 'assistant' | 'system';
@@ -25,6 +27,7 @@ export interface MessageRow {
     content: string;
     raw_content: string | null;
     model: string | null;
+    conversation_mode: 'plan' | 'build' | null;
     status: MessageStatus;
     error: string | null;
     created_at: string;

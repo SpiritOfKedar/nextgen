@@ -3,11 +3,14 @@ import { motion } from 'framer-motion';
 import { Paperclip, ArrowRight, X } from 'lucide-react';
 import { useChat } from '../../hooks/useChat';
 import { ModelSelector } from './ModelSelector';
+import { useAtom } from 'jotai';
+import { chatModeAtom } from '../../store/atoms';
 
 export const InputArea: React.FC = () => {
     const [inputValue, setInputValue] = useState('');
     const [attachedFiles, setAttachedFiles] = useState<File[]>([]);
     const { sendMessage, isLoading } = useChat();
+    const [chatMode, setChatMode] = useAtom(chatModeAtom);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
     const MAX_FILE_CHARS = 25_000;
@@ -149,6 +152,24 @@ export const InputArea: React.FC = () => {
         }
     }, [inputValue]);
 
+    const imagePreviewUrls = React.useMemo(() => {
+        return attachedFiles.map((file) => ({
+            file,
+            isImage: file.type.startsWith('image/'),
+            previewUrl: file.type.startsWith('image/') ? URL.createObjectURL(file) : '',
+        }));
+    }, [attachedFiles]);
+
+    useEffect(() => {
+        return () => {
+            imagePreviewUrls.forEach((item) => {
+                if (item.previewUrl) {
+                    URL.revokeObjectURL(item.previewUrl);
+                }
+            });
+        };
+    }, [imagePreviewUrls]);
+
     const handleSendMessage = async () => {
         if ((!inputValue.trim() && attachedFiles.length === 0) || isLoading) return;
         const content = inputValue.trim() || 'Use attached file(s) as context.';
@@ -168,7 +189,7 @@ export const InputArea: React.FC = () => {
     };
 
     return (
-        <div className="w-full max-w-4xl mx-auto px-4">
+        <div className="w-full max-w-4xl mx-auto px-3 sm:px-4">
             <motion.div
                 className={`
                     relative flex flex-col w-full 
@@ -185,7 +206,7 @@ export const InputArea: React.FC = () => {
             >
                 <textarea
                     ref={textareaRef}
-                    className="w-full py-3.5 px-5 bg-transparent text-zinc-100 placeholder-zinc-500/80 resize-none focus:outline-none text-base leading-relaxed min-h-[76px] max-h-[360px] scrollbar-hide"
+                    className="w-full py-3 px-4 bg-transparent text-zinc-100 placeholder-zinc-500/80 resize-none focus:outline-none text-base leading-relaxed min-h-[68px] max-h-[320px] scrollbar-hide"
                     placeholder="Describe your app idea..."
                     value={inputValue}
                     onChange={(e) => setInputValue(e.target.value)}
@@ -195,30 +216,56 @@ export const InputArea: React.FC = () => {
                 />
 
                 {attachedFiles.length > 0 && (
-                    <div className="px-3 pb-2 flex flex-wrap gap-1.5">
-                        {attachedFiles.map((file, index) => (
-                            <span
-                                key={`${file.name}-${file.size}-${index}`}
-                                className="inline-flex items-center gap-1 rounded-md border border-zinc-700 bg-zinc-800/60 px-2 py-1 text-[11px] text-zinc-300"
-                            >
-                                <span className="max-w-[180px] truncate">{file.name}</span>
-                                <button
-                                    type="button"
-                                    className="text-zinc-500 hover:text-zinc-200"
-                                    onClick={() => {
-                                        setAttachedFiles((prev) => prev.filter((_, i) => i !== index));
-                                    }}
-                                    aria-label={`Remove ${file.name}`}
+                    <div className="px-3 pb-2.5">
+                        <div className="flex flex-wrap gap-2">
+                            {imagePreviewUrls.map(({ file, previewUrl, isImage }, index) => (
+                                <div
+                                    key={`${file.name}-${file.size}-${index}`}
+                                    className={`relative overflow-hidden rounded-lg border border-zinc-700/80 bg-zinc-900/70 ${
+                                        isImage ? 'h-16 w-16' : 'inline-flex h-8 max-w-[220px] items-center gap-1 px-2'
+                                    }`}
                                 >
-                                    <X className="w-3 h-3" />
-                                </button>
-                            </span>
-                        ))}
+                                    {isImage ? (
+                                        <>
+                                            <img
+                                                src={previewUrl}
+                                                alt={file.name}
+                                                className="h-full w-full object-cover"
+                                            />
+                                            <button
+                                                type="button"
+                                                className="absolute right-1 top-1 inline-flex h-4 w-4 items-center justify-center rounded-full bg-black/65 text-zinc-200 hover:bg-black/85"
+                                                onClick={() => {
+                                                    setAttachedFiles((prev) => prev.filter((_, i) => i !== index));
+                                                }}
+                                                aria-label={`Remove ${file.name}`}
+                                            >
+                                                <X className="h-3 w-3" />
+                                            </button>
+                                        </>
+                                    ) : (
+                                        <>
+                                            <span className="truncate text-[11px] text-zinc-300">{file.name}</span>
+                                            <button
+                                                type="button"
+                                                className="text-zinc-500 hover:text-zinc-200"
+                                                onClick={() => {
+                                                    setAttachedFiles((prev) => prev.filter((_, i) => i !== index));
+                                                }}
+                                                aria-label={`Remove ${file.name}`}
+                                            >
+                                                <X className="w-3 h-3" />
+                                            </button>
+                                        </>
+                                    )}
+                                </div>
+                            ))}
+                        </div>
                     </div>
                 )}
 
                 {/* Grid: middle column minmax(0,1fr) shrinks so Build never clips (card uses overflow-hidden) */}
-                <div className="grid w-full min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 px-2.5 py-2 bg-zinc-900/60 border-t border-zinc-800/70">
+                <div className="grid w-full min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 px-2.5 py-1.5 bg-zinc-900/65 border-t border-zinc-800/70">
                     <input
                         type="file"
                         id="file-upload"
@@ -243,7 +290,35 @@ export const InputArea: React.FC = () => {
                     </button>
 
                     <div className="min-w-0 w-full flex justify-start overflow-hidden">
-                        <ModelSelector side="top" />
+                        <div className="flex min-w-0 items-center gap-2 overflow-hidden">
+                            <div className="inline-flex rounded-md border border-zinc-700/80 bg-zinc-900 p-0.5 text-[10px] font-semibold uppercase tracking-wide">
+                                <button
+                                    type="button"
+                                    onClick={() => setChatMode('plan')}
+                                    className={`rounded px-2 py-1 transition-colors ${
+                                        chatMode === 'plan'
+                                            ? 'bg-blue-600/90 text-white'
+                                            : 'text-zinc-400 hover:text-zinc-200'
+                                    }`}
+                                    aria-label="Switch to plan mode"
+                                >
+                                    Plan
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => setChatMode('build')}
+                                    className={`rounded px-2 py-1 transition-colors ${
+                                        chatMode === 'build'
+                                            ? 'bg-blue-600/90 text-white'
+                                            : 'text-zinc-400 hover:text-zinc-200'
+                                    }`}
+                                    aria-label="Switch to build mode"
+                                >
+                                    Build
+                                </button>
+                            </div>
+                            <ModelSelector side="top" />
+                        </div>
                     </div>
 
                     <button
@@ -259,7 +334,9 @@ export const InputArea: React.FC = () => {
                         `}
                         disabled={(!inputValue.trim() && attachedFiles.length === 0) || isLoading}
                     >
-                        <span className="whitespace-nowrap">{isLoading ? 'Building' : 'Build'}</span>
+                        <span className="whitespace-nowrap">
+                            {isLoading ? (chatMode === 'plan' ? 'Planning' : 'Building') : (chatMode === 'plan' ? 'Plan' : 'Build')}
+                        </span>
                         <ArrowRight className="w-3 h-3 shrink-0" />
                     </button>
                 </div>

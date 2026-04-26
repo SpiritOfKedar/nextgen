@@ -112,12 +112,12 @@ export const ChatPanel: React.FC = () => {
                 </div>
 
                 {/* Messages */}
-                <div className="flex-1 overflow-y-auto px-4 pt-4 pb-24 md:pb-28 custom-scrollbar">
+                <div className="flex-1 overflow-y-auto px-4 pt-4 pb-8 md:pb-10 custom-scrollbar">
                     <MessageList />
                 </div>
 
                 {/* Input Area */}
-                <div className="sticky bottom-0 left-0 w-full px-4 pb-4 pt-4 bg-linear-to-t from-zinc-950 via-zinc-950/95 to-transparent z-20">
+                <div className="sticky bottom-0 left-0 w-full px-4 pb-3 pt-2 bg-linear-to-t from-zinc-950 via-zinc-950/96 to-transparent z-20">
                     <InputArea />
                 </div>
             </div>

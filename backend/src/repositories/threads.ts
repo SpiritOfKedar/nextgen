@@ -2,12 +2,28 @@ import { getPool, Tx } from '../config/db';
 import { ThreadRow } from './types';
 
 const q = (tx: Tx | undefined) => tx ?? getPool();
+let schemaEnsured = false;
+
+const ensureSchema = async (): Promise<void> => {
+    if (schemaEnsured) return;
+    const pool = getPool();
+    await pool.query(`
+        ALTER TABLE public.threads
+        ADD COLUMN IF NOT EXISTS last_mode TEXT NULL
+    `);
+    await pool.query(`
+        ALTER TABLE public.threads
+        ADD COLUMN IF NOT EXISTS plan_context_updated_at TIMESTAMPTZ NULL
+    `);
+    schemaEnsured = true;
+};
 
 export const create = async (
     userId: string,
     title: string,
     tx?: Tx,
 ): Promise<ThreadRow> => {
+    await ensureSchema();
     const result = await q(tx).query<ThreadRow>(
         `INSERT INTO public.threads (user_id, title) VALUES ($1, $2) RETURNING *`,
         [userId, title],
@@ -20,6 +36,7 @@ export const findByIdForUser = async (
     userId: string,
     tx?: Tx,
 ): Promise<ThreadRow | null> => {
+    await ensureSchema();
     const result = await q(tx).query<ThreadRow>(
         `SELECT * FROM public.threads WHERE id = $1 AND user_id = $2`,
         [threadId, userId],
@@ -28,6 +45,7 @@ export const findByIdForUser = async (
 };
 
 export const listForUser = async (userId: string, tx?: Tx): Promise<ThreadRow[]> => {
+    await ensureSchema();
     const result = await q(tx).query<ThreadRow>(
         `SELECT * FROM public.threads
          WHERE user_id = $1
@@ -38,9 +56,27 @@ export const listForUser = async (userId: string, tx?: Tx): Promise<ThreadRow[]>
     return result.rows;
 };
 
-export const touch = async (threadId: string, tx?: Tx): Promise<void> => {
+export const touch = async (
+    threadId: string,
+    tx?: Tx,
+    meta?: { lastMode?: 'plan' | 'build' | null; planContextUpdated?: boolean },
+): Promise<void> => {
+    await ensureSchema();
+    const hasMode = typeof meta?.lastMode !== 'undefined';
+    const shouldMarkPlanUpdate = !!meta?.planContextUpdated;
+    if (!hasMode && !shouldMarkPlanUpdate) {
+        await q(tx).query(
+            `UPDATE public.threads SET updated_at = now() WHERE id = $1`,
+            [threadId],
+        );
+        return;
+    }
     await q(tx).query(
-        `UPDATE public.threads SET updated_at = now() WHERE id = $1`,
-        [threadId],
+        `UPDATE public.threads
+         SET updated_at = now(),
+             last_mode = COALESCE($2, last_mode),
+             plan_context_updated_at = CASE WHEN $3 THEN now() ELSE plan_context_updated_at END
+         WHERE id = $1`,
+        [threadId, meta?.lastMode ?? null, shouldMarkPlanUpdate],
     );
 };

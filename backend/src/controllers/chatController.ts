@@ -3,10 +3,12 @@ import { ChatService, ThreadAccessError } from '../services/chatService';
 import { log, errorFields } from '../lib/logger';
 
 const chatService = new ChatService();
+const VALID_MODES = new Set(['plan', 'build']);
 
 export const chatController = {
     async sendMessage(req: Request, res: Response) {
-        const { message, threadId, model, attachments } = req.body;
+        const { message, threadId, model, attachments, mode } = req.body;
+        const conversationMode = VALID_MODES.has(mode) ? mode : 'build';
 
         if (!message) {
             return res.status(400).json({ error: 'Message is required' });
@@ -22,6 +24,7 @@ export const chatController = {
                 threadId,
                 userId,
                 model,
+                conversationMode,
                 Array.isArray(attachments) ? attachments : [],
                 { requestId: req.requestId, internalUserId: userId },
             );
