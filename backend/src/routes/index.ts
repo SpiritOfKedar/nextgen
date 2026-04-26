@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { chatController } from '../controllers/chatController';
 import { sandboxController } from '../controllers/sandboxController';
+import { terminalController } from '../controllers/terminalController';
 import { authMiddleware } from '../middlewares/authMiddleware';
 
 const router = Router();
@@ -21,6 +22,13 @@ router.get('/chat/:threadId', authMiddleware, chatController.getThread);
 router.get('/chat/:threadId/files', authMiddleware, chatController.getThreadFiles);
 // @ts-ignore
 router.get('/chat/:threadId/files/delta', authMiddleware, chatController.getThreadFilesDelta);
+
+// @ts-ignore
+router.get('/terminal/:threadId/session', authMiddleware, terminalController.getSession);
+// @ts-ignore
+router.post('/terminal/:threadId/events', authMiddleware, terminalController.appendEvents);
+// @ts-ignore
+router.post('/terminal/:threadId/recovery-audits', authMiddleware, terminalController.appendRecoveryAudit);
 
 // Sandbox cache/snapshot architecture endpoints
 // @ts-ignore

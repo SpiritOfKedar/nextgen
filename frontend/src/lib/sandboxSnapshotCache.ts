@@ -2,7 +2,8 @@ export type DependencySnapshotRecord = {
   depFingerprint: string;
   toolchainVersion: string;
   createdAt: number;
-  tarBase64: string;
+  archiveBase64: string;
+  archiveFormat: 'tar.gz' | 'zip';
 };
 
 const DB_NAME = 'boltly-sandbox-cache';
@@ -62,27 +63,34 @@ const trimOldSnapshots = async (): Promise<void> => {
 
 export const loadDependencySnapshot = async (
   depFingerprint: string,
-): Promise<DependencySnapshotRecord | null> => {
+): Promise<{ status: 'hit'; record: DependencySnapshotRecord } | { status: 'miss' } | { status: 'corrupt' }> => {
   try {
-    return await withStore('readonly', async (store) => {
+    const result = await withStore('readonly', async (store) => {
       const record = (await reqToPromise(store.get(depFingerprint))) as
         | DependencySnapshotRecord
         | undefined;
-      return record ?? null;
+      return record;
     });
+    if (!result) return { status: 'miss' };
+    if (!result.archiveBase64 || !result.archiveFormat) return { status: 'corrupt' };
+    return { status: 'hit', record: result };
   } catch {
-    return null;
+    return { status: 'corrupt' };
   }
 };
 
-export const saveDependencySnapshot = async (record: DependencySnapshotRecord): Promise<void> => {
+export const saveDependencySnapshot = async (record: DependencySnapshotRecord): Promise<'ok' | 'quota_exceeded' | 'failed'> => {
   try {
     await withStore('readwrite', async (store) => {
       await reqToPromise(store.put(record));
     });
     await trimOldSnapshots();
-  } catch {
-    // best-effort cache
+    return 'ok';
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'QuotaExceededError') {
+      return 'quota_exceeded';
+    }
+    return 'failed';
   }
 };
 

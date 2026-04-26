@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import { sandboxCacheService } from '../services/sandboxCacheService';
 import { sandboxSnapshotService } from '../services/sandboxSnapshotService';
+import { log, errorFields } from '../lib/logger';
 
 export const sandboxController = {
     async getDependencyPlan(req: Request, res: Response) {
@@ -33,7 +34,14 @@ export const sandboxController = {
         const plan = await sandboxCacheService.getDependencyPlan(fingerprint);
         if (!plan) return res.status(404).json({ error: 'No snapshot metadata found' });
         const snapshot = await sandboxSnapshotService.getSnapshot(fingerprint);
-        if (!snapshot) return res.status(404).json({ error: 'Snapshot not found' });
+        if (!snapshot) {
+            log.warn('sandbox.snapshot_download_miss', {
+                fingerprint,
+                snapshotState: plan.snapshotState,
+                uploadAttemptCount: plan.uploadAttemptCount,
+            });
+            return res.status(404).json({ error: 'Snapshot not found' });
+        }
         res.setHeader('Content-Type', 'application/gzip');
         return res.send(snapshot);
     },
@@ -51,17 +59,39 @@ export const sandboxController = {
         });
         const payload = Buffer.concat(chunks);
         if (!payload.length) return res.status(400).json({ error: 'Snapshot payload is required' });
-        await sandboxSnapshotService.putSnapshot(fingerprint, payload);
         const lockfileSha = typeof req.query.lockfileSha === 'string' ? req.query.lockfileSha : undefined;
         const toolchainVersion = typeof req.query.toolchainVersion === 'string' ? req.query.toolchainVersion : undefined;
-        const record = await sandboxCacheService.putDependencyPlan({
-            fingerprint,
-            packageManager: 'npm',
-            lockfileSha,
-            notes: 'snapshot_uploaded',
-            toolchainVersion,
-        });
-        return res.json({ ok: true, metadata: record });
+        try {
+            await sandboxSnapshotService.putSnapshot(fingerprint, payload);
+            const record = await sandboxCacheService.putDependencyPlan({
+                fingerprint,
+                packageManager: 'npm',
+                lockfileSha,
+                notes: 'snapshot_uploaded',
+                toolchainVersion,
+                snapshotState: 'available',
+                uploadAttemptCount: 0,
+            });
+            return res.json({ ok: true, metadata: record });
+        } catch (error) {
+            const failureRecord = await sandboxCacheService.markSnapshotUploadFailure({
+                fingerprint,
+                packageManager: 'npm',
+                lockfileSha,
+                toolchainVersion,
+                notes: 'snapshot_upload_failed',
+            });
+            log.warn('sandbox.snapshot_upload_failed', {
+                fingerprint,
+                attemptCount: failureRecord.uploadAttemptCount,
+                snapshotState: failureRecord.snapshotState,
+                ...errorFields(error),
+            });
+            return res.status(502).json({
+                error: 'Snapshot upload failed',
+                metadata: failureRecord,
+            });
+        }
     },
 
     getTemplateSnapshot(req: Request, res: Response) {

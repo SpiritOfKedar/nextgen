@@ -6,17 +6,49 @@ import {
     Folder,
     ChevronRight,
     ChevronDown,
+    Download,
 } from 'lucide-react';
 import { fileSystemAtom, activeFileAtom } from '../../store/fileSystem';
+import { webContainerAtom } from '../../store/webContainer';
 import type { FileSystemItem, FolderNode } from '../../store/fileSystem';
+import { downloadProjectFromWebContainer } from '../../lib/projectDownload';
 
 export const FileTree: React.FC = () => {
     const fileSystem = useAtomValue(fileSystemAtom);
+    const webContainer = useAtomValue(webContainerAtom);
+    const [isDownloading, setIsDownloading] = React.useState(false);
+
+    const handleDownload = async () => {
+        if (!webContainer) {
+            window.alert('WebContainer is not ready yet.');
+            return;
+        }
+        setIsDownloading(true);
+        try {
+            const count = await downloadProjectFromWebContainer(webContainer, { fileNamePrefix: 'project' });
+            window.alert(`Downloaded ${count} file${count === 1 ? '' : 's'} as zip.`);
+        } catch (error) {
+            const message = error instanceof Error ? error.message : 'Failed to download project zip.';
+            window.alert(message);
+        } finally {
+            setIsDownloading(false);
+        }
+    };
 
     return (
         <div className="h-full flex flex-col">
-            <div className="h-10 border-b border-zinc-800 flex items-center px-4 shrink-0">
+            <div className="h-10 border-b border-zinc-800 flex items-center justify-between px-3 shrink-0 gap-2">
                 <span className="text-xs font-bold text-zinc-400 tracking-wider">FILES</span>
+                <button
+                    type="button"
+                    onClick={handleDownload}
+                    disabled={isDownloading}
+                    className="inline-flex items-center gap-1.5 rounded-md border border-zinc-700 px-2 py-1 text-[11px] font-medium text-zinc-300 hover:text-white hover:border-zinc-600 disabled:opacity-50 disabled:cursor-not-allowed"
+                    title="Download project as zip"
+                >
+                    <Download className="w-3.5 h-3.5" />
+                    {isDownloading ? 'Preparing...' : 'Download'}
+                </button>
             </div>
             <div className="flex-1 overflow-y-auto p-2 space-y-0.5 custom-scrollbar">
                 {fileSystem.map((item, index) => (

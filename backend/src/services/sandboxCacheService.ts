@@ -1,9 +1,13 @@
-type DependencyCacheRecord = {
+export type SnapshotState = 'available' | 'upload_pending' | 'upload_failed';
+
+export type DependencyCacheRecord = {
     fingerprint: string;
     packageManager: 'npm';
     installedAt: string;
     ttlSeconds: number;
     toolchainVersion: string;
+    snapshotState: SnapshotState;
+    uploadAttemptCount: number;
     lockfileSha?: string;
     notes?: string;
 };
@@ -21,6 +25,12 @@ class SandboxCacheService {
     private readonly redisToken = process.env.UPSTASH_REDIS_REST_TOKEN || '';
     private readonly depTtlSeconds = 7 * 24 * 60 * 60;
     private readonly defaultToolchainVersion = process.env.SANDBOX_TOOLCHAIN_VERSION || 'webcontainer-npm-v1';
+
+    constructor() {
+        if (!this.redisEnabled) {
+            console.warn('[SandboxCache] Upstash Redis credentials missing; dependency metadata cache disabled.');
+        }
+    }
 
     private get redisEnabled(): boolean {
         return !!this.redisUrl && !!this.redisToken;
@@ -72,6 +82,8 @@ class SandboxCacheService {
         lockfileSha?: string;
         notes?: string;
         toolchainVersion?: string;
+        snapshotState?: SnapshotState;
+        uploadAttemptCount?: number;
     }): Promise<DependencyCacheRecord> {
         const record: DependencyCacheRecord = {
             fingerprint: input.fingerprint,
@@ -79,11 +91,31 @@ class SandboxCacheService {
             installedAt: new Date().toISOString(),
             ttlSeconds: this.depTtlSeconds,
             toolchainVersion: input.toolchainVersion || this.defaultToolchainVersion,
+            snapshotState: input.snapshotState || 'available',
+            uploadAttemptCount: input.uploadAttemptCount ?? 0,
             lockfileSha: input.lockfileSha,
             notes: input.notes,
         };
         await this.redisSetWithTtl(this.getDepKey(input.fingerprint), JSON.stringify(record), this.depTtlSeconds);
         return record;
+    }
+
+    async markSnapshotUploadFailure(input: {
+        fingerprint: string;
+        packageManager: 'npm';
+        lockfileSha?: string;
+        toolchainVersion?: string;
+        notes?: string;
+    }): Promise<DependencyCacheRecord> {
+        const current = await this.getDependencyPlan(input.fingerprint);
+        const attemptCount = (current?.uploadAttemptCount || 0) + 1;
+        const nextState: SnapshotState = attemptCount >= 3 ? 'upload_failed' : 'upload_pending';
+        return this.putDependencyPlan({
+            ...input,
+            snapshotState: nextState,
+            uploadAttemptCount: attemptCount,
+            notes: input.notes || `snapshot_upload_retry_attempt_${attemptCount}`,
+        });
     }
 
     getTemplateSnapshot(templateId: string): TemplateSnapshotRecord | null {

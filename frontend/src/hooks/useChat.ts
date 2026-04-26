@@ -1,7 +1,19 @@
 import { useCallback, useState } from 'react';
 import { useAtom, useSetAtom, useAtomValue } from 'jotai';
 import { messagesAtom, currentThreadIdAtom, threadSwitchStateAtom, threadsAtom, selectedModelAtom } from '../store/atoms';
-import { previewStatusAtom, previewStatusMessageAtom, sandboxRuntimeMetadataAtom, webContainerAtom, serverUrlAtom, writeShellOutput } from '../store/webContainer';
+import {
+    previewStatusAtom,
+    previewStatusMessageAtom,
+    sandboxRuntimeMetadataAtom,
+    webContainerAtom,
+    serverUrlAtom,
+    shellInputWriterAtom,
+    terminalSessionByThreadAtom,
+    recoveryAuditsByThreadAtom,
+    terminalStatusByThreadAtom,
+    terminalIssueByThreadAtom,
+    writeShellOutput,
+} from '../store/webContainer';
 import { getWebContainerInstance } from './useWebContainer';
 import { fileSystemAtom, activeFileAtom } from '../store/fileSystem';
 import type { FileSystemItem, FileNode, FolderNode, ActiveFile } from '../store/fileSystem';
@@ -10,6 +22,8 @@ import { useNavigate } from 'react-router-dom';
 import { BoltParser } from '../lib/boltProtocol';
 import type { BoltAction } from '../lib/boltProtocol';
 import { loadDependencySnapshot, saveDependencySnapshot } from '../lib/sandboxSnapshotCache';
+import JSZip from 'jszip';
+import { detectTerminalIssue } from '../lib/terminalIssues';
 
 // Strip bolt protocol XML tags from content for display in chat
 // Preserves narrative text and generates clean file summaries
@@ -357,6 +371,71 @@ const inferProjectDirectory = (writtenFiles: Map<string, string>): string => {
     return '/';
 };
 
+const hasValidPackageJsonInDir = async (wc: any, dir: string): Promise<boolean> => {
+    const normalizedDir = normalizeWebContainerPath(dir);
+    const packagePath = normalizedDir === '/' ? '/package.json' : `${normalizedDir}/package.json`;
+    try {
+        const raw = await wc.fs.readFile(packagePath, 'utf-8');
+        if (!raw?.trim()) return false;
+        JSON.parse(raw);
+        return true;
+    } catch {
+        return false;
+    }
+};
+
+const resolveProjectDirectoryForNpm = async (
+    wc: any,
+    fileMap: Map<string, string>,
+    inferredDir: string,
+): Promise<{ projectDir: string; packageJsonPath: string | null; reasonCode: string }> => {
+    const candidates: string[] = [];
+    const pushCandidate = (dir: string) => {
+        const normalized = normalizeWebContainerPath(dir);
+        if (!candidates.includes(normalized)) candidates.push(normalized);
+    };
+    pushCandidate(inferredDir);
+    pushCandidate('/');
+    for (const key of fileMap.keys()) {
+        const normalized = normalizeWrittenPath(key);
+        if (!normalized.endsWith('/package.json')) continue;
+        const dir = normalized.slice(0, -'/package.json'.length);
+        if (!dir || dir === 'node_modules') continue;
+        pushCandidate(dir);
+    }
+
+    for (const candidate of candidates) {
+        const exists = await hasValidPackageJsonInDir(wc, candidate);
+        if (!exists) continue;
+        return {
+            projectDir: candidate,
+            packageJsonPath: candidate === '/' ? '/package.json' : `${candidate}/package.json`,
+            reasonCode: candidate === normalizeWebContainerPath(inferredDir) ? 'inferred_project_dir' : 'fallback_probe_dir',
+        };
+    }
+
+    return {
+        projectDir: normalizeWebContainerPath(inferredDir),
+        packageJsonPath: null,
+        reasonCode: 'package_json_missing_all_candidates',
+    };
+};
+
+const syncShellWorkingDirectory = async (
+    shellWriter: WritableStreamDefaultWriter<string> | null,
+    projectDir: string,
+): Promise<void> => {
+    if (!shellWriter) return;
+    const normalizedDir = normalizeWebContainerPath(projectDir);
+    if (lastSyncedShellCwd === normalizedDir) return;
+    try {
+        await shellWriter.write(`cd "${normalizedDir}"\n`);
+        lastSyncedShellCwd = normalizedDir;
+    } catch {
+        // best effort only
+    }
+};
+
 /**
  * Scan all written source files for import statements that reference packages
  * NOT listed in package.json. If found, patch package.json with the missing
@@ -429,6 +508,7 @@ let latestThreadSwitchSeq = 0;
 type ThreadRuntimeMetadata = {
     depFingerprint: string;
     criticalFingerprint: string;
+    projectDir: string;
     lastAppliedSeq: number;
     installSucceeded: boolean;
     lastBootAt: number;
@@ -443,6 +523,7 @@ let activeMountedThreadId: string | null = null;
 let activeDevProcess: any = null;
 let activeDevServerFingerprint: string | null = null;
 let activeCriticalFingerprint: string | null = null;
+let lastSyncedShellCwd: string | null = null;
 
 const hashString = (value: string): string => {
     let hash = 5381;
@@ -470,6 +551,7 @@ const DEP_FINGERPRINT_MARKER_PATH = '/.boltly/dep-fingerprint';
 const SNAPSHOT_ARCHIVE_PATH = '/.boltly/dependency-snapshot.tgz';
 const SNAPSHOT_TOOLCHAIN_VERSION = 'webcontainer-npm-v1';
 const INSTALL_TIMEOUT_MS = 420_000;
+const MAX_INDEXEDDB_SNAPSHOT_BYTES = 120 * 1024 * 1024;
 
 const readInstalledDependencyFingerprint = async (wc: any): Promise<string | null> => {
     try {
@@ -525,8 +607,58 @@ const runProcessAndCollectExit = async (proc: any, timeoutMs: number): Promise<n
     return Promise.race([proc.exit, timeout]);
 };
 
-const createNodeModulesSnapshot = async (wc: any, projectDir: string): Promise<Uint8Array | null> => {
+const isTarAvailable = async (wc: any): Promise<boolean> => {
+    try {
+        const proc = await wc.spawn('tar', ['--version'], { env: { FORCE_COLOR: '1' } });
+        const exitCode = await runProcessAndCollectExit(proc, 10_000);
+        return exitCode === 0;
+    } catch {
+        return false;
+    }
+};
+
+const createZipArchiveFromDirectory = async (wc: any, rootDir: string): Promise<Uint8Array | null> => {
+    const zip = new JSZip();
+    const walk = async (absPath: string, relPath: string): Promise<void> => {
+        const entries = await wc.fs.readdir(absPath);
+        for (const entry of entries as string[]) {
+            const childAbs = absPath === '/' ? `/${entry}` : `${absPath}/${entry}`;
+            const childRel = relPath ? `${relPath}/${entry}` : entry;
+            try {
+                const stat = await wc.fs.stat(childAbs);
+                if (stat?.isDirectory?.()) {
+                    zip.folder(childRel);
+                    await walk(childAbs, childRel);
+                } else {
+                    const content = await wc.fs.readFile(childAbs);
+                    zip.file(childRel, content);
+                }
+            } catch {
+                // ignore unreadable entries
+            }
+        }
+    };
+    try {
+        await walk(rootDir === '/' ? '/node_modules' : `${rootDir}/node_modules`, 'node_modules');
+        const bytes = await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
+        return bytes;
+    } catch {
+        return null;
+    }
+};
+
+const createNodeModulesSnapshot = async (
+    wc: any,
+    projectDir: string,
+): Promise<{ bytes: Uint8Array; format: 'tar.gz' | 'zip' } | null> => {
     const cwd = projectDir || '/';
+    const tarAvailable = await isTarAvailable(wc);
+    if (!tarAvailable) {
+        console.info('[SandboxDecision] tar_unavailable_using_js_fallback', { cwd });
+        const zipBytes = await createZipArchiveFromDirectory(wc, cwd);
+        if (!zipBytes) return null;
+        return { bytes: zipBytes, format: 'zip' };
+    }
     const proc = await wc.spawn('sh', ['-lc', `tar -czf "${SNAPSHOT_ARCHIVE_PATH}" -C "${cwd}" node_modules`], {
         env: { FORCE_COLOR: '1' },
     });
@@ -534,14 +666,55 @@ const createNodeModulesSnapshot = async (wc: any, projectDir: string): Promise<U
     if (exitCode !== 0) return null;
     try {
         const archive = await wc.fs.readFile(SNAPSHOT_ARCHIVE_PATH);
-        return archive instanceof Uint8Array ? archive : new Uint8Array(archive);
+        return {
+            bytes: archive instanceof Uint8Array ? archive : new Uint8Array(archive),
+            format: 'tar.gz',
+        };
     } catch {
         return null;
     }
 };
 
-const restoreNodeModulesSnapshot = async (wc: any, projectDir: string, archiveBytes: Uint8Array): Promise<boolean> => {
+const extractZipArchiveToDirectory = async (wc: any, projectDir: string, archiveBytes: Uint8Array): Promise<boolean> => {
+    try {
+        const zip = await JSZip.loadAsync(archiveBytes);
+        const writes = Object.values(zip.files).map(async (entry) => {
+            const normalized = entry.name.replace(/\\/g, '/').replace(/^\/+/, '');
+            if (!normalized) return;
+            const absPath = projectDir === '/' ? `/${normalized}` : `${projectDir}/${normalized}`;
+            if (entry.dir) {
+                await wc.fs.mkdir(absPath, { recursive: true });
+                return;
+            }
+            const folderPath = absPath.slice(0, absPath.lastIndexOf('/'));
+            if (folderPath) {
+                await wc.fs.mkdir(folderPath, { recursive: true });
+            }
+            const fileBytes = await entry.async('uint8array');
+            await wc.fs.writeFile(absPath, fileBytes);
+        });
+        await Promise.all(writes);
+        return true;
+    } catch {
+        return false;
+    }
+};
+
+const restoreNodeModulesSnapshot = async (
+    wc: any,
+    projectDir: string,
+    archiveBytes: Uint8Array,
+    archiveFormat: 'tar.gz' | 'zip' = 'tar.gz',
+): Promise<boolean> => {
     const cwd = projectDir || '/';
+    if (archiveFormat === 'zip') {
+        return extractZipArchiveToDirectory(wc, cwd, archiveBytes);
+    }
+    const tarAvailable = await isTarAvailable(wc);
+    if (!tarAvailable) {
+        console.info('[SandboxDecision] tar_unavailable_using_js_fallback', { cwd, mode: 'restore' });
+        return extractZipArchiveToDirectory(wc, cwd, archiveBytes);
+    }
     try {
         await wc.fs.mkdir('/.boltly', { recursive: true });
         await wc.fs.writeFile(SNAPSHOT_ARCHIVE_PATH, archiveBytes);
@@ -563,6 +736,7 @@ export const useChat = () => {
     const navigate = useNavigate();
     const [selectedModel] = useAtom(selectedModelAtom);
     const webContainerInstance = useAtomValue(webContainerAtom);
+    const shellWriter = useAtomValue(shellInputWriterAtom);
     const setFileSystem = useSetAtom(fileSystemAtom);
     const setActiveFile = useSetAtom(activeFileAtom);
     const setServerUrl = useSetAtom(serverUrlAtom);
@@ -570,10 +744,132 @@ export const useChat = () => {
     const setPreviewStatusMessage = useSetAtom(previewStatusMessageAtom);
     const setSandboxRuntimeMetadata = useSetAtom(sandboxRuntimeMetadataAtom);
     const setThreadSwitchState = useSetAtom(threadSwitchStateAtom);
+    const setTerminalSessionByThread = useSetAtom(terminalSessionByThreadAtom);
+    const setRecoveryAuditsByThread = useSetAtom(recoveryAuditsByThreadAtom);
+    const setTerminalStatusByThread = useSetAtom(terminalStatusByThreadAtom);
+    const setTerminalIssueByThread = useSetAtom(terminalIssueByThreadAtom);
 
     const [isLoading, setIsLoading] = useState(false);
 
     const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001/api';
+
+    const appendTerminalEvents = useCallback(async (
+        threadId: string,
+        token: string,
+        events: Array<{ eventType: string; payload: string; cwd?: string; exitCode?: number | null }>,
+    ) => {
+        if (!threadId || events.length === 0) return;
+        await fetch(`${API_URL}/terminal/${encodeURIComponent(threadId)}/events`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${token}`,
+            },
+            body: JSON.stringify({ events }),
+        }).catch(() => {
+            // best effort telemetry
+        });
+    }, [API_URL]);
+
+    const refreshTerminalSession = useCallback(async (threadId: string, token: string) => {
+        if (!threadId) return;
+        const res = await fetch(`${API_URL}/terminal/${encodeURIComponent(threadId)}/session`, {
+            headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        const events = Array.isArray(data?.events) ? data.events : [];
+        const audits = Array.isArray(data?.recoveryAudits) ? data.recoveryAudits : [];
+        setTerminalSessionByThread((prev) => ({ ...prev, [threadId]: events }));
+        setRecoveryAuditsByThread((prev) => ({ ...prev, [threadId]: audits }));
+        const combinedOutput = events
+            .filter((e: any) => e?.event_type === 'output')
+            .map((e: any) => String(e.payload || ''))
+            .join('\n');
+        const issue = detectTerminalIssue(combinedOutput);
+        setTerminalIssueByThread((prev) => ({ ...prev, [threadId]: issue }));
+    }, [API_URL, setRecoveryAuditsByThread, setTerminalIssueByThread, setTerminalSessionByThread]);
+
+    const runTerminalRecovery = useCallback(async (
+        input: { threadId: string; triggerSource: 'manual' | 'auto' },
+    ) => {
+        const { threadId, triggerSource } = input;
+        if (!threadId || !isLoaded || !isSignedIn) return;
+        const token = await getToken();
+        if (!token) return;
+        const meta = threadRuntimeMeta.get(threadId);
+        const cwd = meta?.projectDir || '/';
+        const issueCode = 'auto_recovery';
+        const plannedCommands = [
+            `cd "${cwd}"`,
+            'npm install --legacy-peer-deps --prefer-offline',
+            'npm run dev',
+        ];
+        const executedCommands: string[] = [];
+        const wc = webContainerInstance ?? getWebContainerInstance();
+        if (!wc) return;
+
+        setTerminalStatusByThread((prev) => ({ ...prev, [threadId]: 'running' }));
+        let status: 'resolved' | 'failed' = 'failed';
+        let detail = '';
+        for (const command of plannedCommands) {
+            executedCommands.push(command);
+            try {
+                const [program, ...args] = command.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) || [command];
+                const normalizedArgs = args.map((a) => a.replace(/^["']|["']$/g, ''));
+                const proc = await wc.spawn(program, normalizedArgs, { cwd, env: { FORCE_COLOR: '1' } });
+                proc.output.pipeTo(new WritableStream({ write(data) { writeShellOutput(data); } }));
+                const exitCode = await proc.exit;
+                await appendTerminalEvents(threadId, token, [
+                    { eventType: 'command', payload: command, cwd },
+                    { eventType: 'status', payload: `exit:${exitCode}`, cwd, exitCode },
+                ]);
+                if (exitCode !== 0) {
+                    detail = `${command} failed with exit ${exitCode}`;
+                    status = 'failed';
+                    break;
+                }
+                if (command.includes('npm run dev')) status = 'resolved';
+            } catch (error) {
+                detail = error instanceof Error ? error.message : String(error);
+                status = 'failed';
+                break;
+            }
+        }
+
+        setTerminalStatusByThread((prev) => ({ ...prev, [threadId]: status === 'resolved' ? 'idle' : 'error' }));
+        setTerminalIssueByThread((prev) => ({ ...prev, [threadId]: status === 'resolved' ? null : prev[threadId] ?? null }));
+
+        await fetch(`${API_URL}/terminal/${encodeURIComponent(threadId)}/recovery-audits`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${token}`,
+            },
+            body: JSON.stringify({
+                triggerSource,
+                issueCode,
+                plannedCommands,
+                executedCommands,
+                status,
+                detail,
+            }),
+        }).catch(() => {
+            // ignore best effort
+        });
+
+        await refreshTerminalSession(threadId, token);
+    }, [
+        API_URL,
+        appendTerminalEvents,
+        getToken,
+        isLoaded,
+        isSignedIn,
+        refreshTerminalSession,
+        setTerminalIssueByThread,
+        setTerminalStatusByThread,
+        webContainerInstance,
+    ]);
 
     const startThreadSandboxInBackground = useCallback(async (
         wc: any,
@@ -707,25 +1003,40 @@ createRoot(document.getElementById('root')!).render(
         if (abortIfStale('after_dependency_patch')) return;
         const depFingerprint = getDependencyFingerprint(fileMap);
         const criticalFingerprint = getCriticalConfigFingerprint(fileMap);
-        const projectDir = inferProjectDirectory(fileMap);
+        const inferredProjectDir = inferProjectDirectory(fileMap);
+        const projectDirResolution = await resolveProjectDirectoryForNpm(wc, fileMap, inferredProjectDir);
+        const projectDir = projectDirResolution.projectDir;
+        await syncShellWorkingDirectory(shellWriter, projectDir);
+        console.info('[SandboxDecision] project_dir_resolved', {
+            threadId,
+            depFingerprint,
+            inferredProjectDir,
+            projectDir,
+            packageJsonPath: projectDirResolution.packageJsonPath,
+            reasonCode: projectDirResolution.reasonCode,
+        });
         const localInstalledFingerprint = await readInstalledDependencyFingerprint(wc);
         const nodeModulesPresent = await hasInstalledNodeModules(wc, projectDir);
         let hasLocalDependencyCache =
             nodeModulesPresent &&
             localInstalledFingerprint === depFingerprint;
+        let indexedSnapshotRecord: { archiveBase64: string; archiveFormat: 'tar.gz' | 'zip' } | null = null;
         const prevMeta = threadRuntimeMeta.get(threadId);
         const incomingFiles = new Set([...fileMap.keys()].map((p) => p.replace(/^\//, '')));
-        let hasCachedDependencyPlan = false;
+        let cachedDependencyPlan: any = null;
         try {
             const cachedRes = await fetch(`${API_URL}/sandbox/dependencies/${encodeURIComponent(depFingerprint)}`, {
                 headers: {
                     Authorization: `Bearer ${authToken}`,
                 },
             });
-            hasCachedDependencyPlan = cachedRes.ok;
+            if (cachedRes.ok) {
+                cachedDependencyPlan = await cachedRes.json();
+            }
         } catch {
-            hasCachedDependencyPlan = false;
+            cachedDependencyPlan = null;
         }
+        const hasCachedDependencyPlan = !!cachedDependencyPlan;
         const hasThreadRuntimeHit = !!(
             prevMeta?.installSucceeded &&
             prevMeta.depFingerprint === depFingerprint &&
@@ -734,21 +1045,68 @@ createRoot(document.getElementById('root')!).render(
 
         if (!hasLocalDependencyCache) {
             const indexedSnapshot = await loadDependencySnapshot(depFingerprint);
-            if (indexedSnapshot && indexedSnapshot.toolchainVersion === SNAPSHOT_TOOLCHAIN_VERSION) {
+            if (indexedSnapshot.status === 'miss') {
+                console.info('[SandboxDecision] indexeddb_miss', { threadId, depFingerprint });
+            }
+            if (indexedSnapshot.status === 'corrupt') {
+                console.warn('[SandboxDecision] indexeddb_evicted_or_corrupt', { threadId, depFingerprint });
+            }
+            if (indexedSnapshot.status === 'hit' && indexedSnapshot.record.toolchainVersion === SNAPSHOT_TOOLCHAIN_VERSION) {
+                indexedSnapshotRecord = indexedSnapshot.record;
                 const restoredFromIndexedDb = await restoreNodeModulesSnapshot(
                     wc,
                     projectDir,
-                    base64ToBytes(indexedSnapshot.tarBase64),
+                    base64ToBytes(indexedSnapshot.record.archiveBase64),
+                    indexedSnapshot.record.archiveFormat,
                 );
                 if (restoredFromIndexedDb) {
                     await persistInstalledDependencyFingerprint(wc, depFingerprint);
                     hasLocalDependencyCache = true;
                     console.info('[SandboxDecision] indexeddb_snapshot_restored', { threadId, depFingerprint });
+                } else {
+                    console.warn('[SandboxDecision] indexeddb_restore_failed', { threadId, depFingerprint });
                 }
             }
         }
 
-        if (!hasLocalDependencyCache && hasCachedDependencyPlan) {
+        if (
+            cachedDependencyPlan?.snapshotState === 'upload_pending' &&
+            indexedSnapshotRecord &&
+            (cachedDependencyPlan?.uploadAttemptCount || 0) < 3
+        ) {
+            const retryAttempt = (cachedDependencyPlan?.uploadAttemptCount || 0) + 1;
+            console.info(`[SandboxDecision] snapshot_upload_retry_attempt_${retryAttempt}`, {
+                threadId,
+                depFingerprint,
+            });
+            const pendingBytes = base64ToBytes(indexedSnapshotRecord.archiveBase64);
+            try {
+                await fetch(
+                    `${API_URL}/sandbox/snapshots/${encodeURIComponent(depFingerprint)}?toolchainVersion=${encodeURIComponent(SNAPSHOT_TOOLCHAIN_VERSION)}`,
+                    {
+                        method: 'PUT',
+                        headers: {
+                            Authorization: `Bearer ${authToken}`,
+                            'Content-Type': 'application/gzip',
+                        },
+                        body: Uint8Array.from(pendingBytes).buffer,
+                    },
+                );
+            } catch {
+                // backend tracks retry budget; local flow continues
+            }
+        }
+
+        const canAttemptRemoteSnapshot = cachedDependencyPlan?.snapshotState !== 'upload_failed';
+        if (!canAttemptRemoteSnapshot && !hasLocalDependencyCache) {
+            console.warn('[SandboxDecision] snapshot_upload_failed', {
+                threadId,
+                depFingerprint,
+                reason: 'upload_failed_state',
+            });
+        }
+
+        if (!hasLocalDependencyCache && canAttemptRemoteSnapshot) {
             try {
                 const snapshotRes = await fetch(`${API_URL}/sandbox/snapshots/${encodeURIComponent(depFingerprint)}`, {
                     headers: {
@@ -757,18 +1115,28 @@ createRoot(document.getElementById('root')!).render(
                 });
                 if (snapshotRes.ok) {
                     const snapshotBytes = new Uint8Array(await snapshotRes.arrayBuffer());
-                    const restoredFromRemote = await restoreNodeModulesSnapshot(wc, projectDir, snapshotBytes);
+                    const isZipSnapshot = snapshotBytes.length > 1 && snapshotBytes[0] === 0x50 && snapshotBytes[1] === 0x4b;
+                    const remoteFormat: 'tar.gz' | 'zip' = isZipSnapshot ? 'zip' : 'tar.gz';
+                    const restoredFromRemote = await restoreNodeModulesSnapshot(wc, projectDir, snapshotBytes, remoteFormat);
                     if (restoredFromRemote) {
                         await persistInstalledDependencyFingerprint(wc, depFingerprint);
-                        await saveDependencySnapshot({
+                        const saveResult = await saveDependencySnapshot({
                             depFingerprint,
                             toolchainVersion: SNAPSHOT_TOOLCHAIN_VERSION,
                             createdAt: Date.now(),
-                            tarBase64: bytesToBase64(snapshotBytes),
+                            archiveBase64: bytesToBase64(snapshotBytes),
+                            archiveFormat: remoteFormat,
                         });
+                        if (saveResult === 'quota_exceeded') {
+                            console.warn('[SandboxDecision] indexeddb_quota_exceeded', { threadId, depFingerprint });
+                        }
                         hasLocalDependencyCache = true;
                         console.info('[SandboxDecision] supabase_snapshot_restored', { threadId, depFingerprint });
+                    } else {
+                        console.warn('[SandboxDecision] remote_snapshot_restore_failed', { threadId, depFingerprint });
                     }
+                } else if (snapshotRes.status === 404 && hasCachedDependencyPlan) {
+                    console.warn('[SandboxDecision] remote_meta_hit_snapshot_404', { threadId, depFingerprint });
                 }
             } catch (error) {
                 console.warn('[SandboxDecision] supabase_snapshot_restore_failed', {
@@ -815,7 +1183,9 @@ createRoot(document.getElementById('root')!).render(
         mountedFilesByThread.set(threadId, incomingFiles);
         activeMountedThreadId = threadId;
 
-        const shouldInstall = !(hasLocalDependencyCache || hasThreadRuntimeHit);
+        // Only skip install when dependency cache evidence matches this exact fingerprint.
+        // Mere node_modules presence is insufficient across thread switches.
+        const shouldInstall = !hasLocalDependencyCache;
         const decisionSource = hasLocalDependencyCache
             ? 'local_cache_hit'
             : hasThreadRuntimeHit
@@ -851,15 +1221,27 @@ createRoot(document.getElementById('root')!).render(
                 let attempts = 0;
                 while (attempts < 2) {
                     attempts += 1;
+                    await appendTerminalEvents(threadId, authToken, [
+                        { eventType: 'command', payload: 'npm install --no-audit --no-fund --legacy-peer-deps --prefer-offline', cwd: projectDir },
+                    ]);
                     const installProc = await wc.spawn(
                         'npm',
                         ['install', '--no-audit', '--no-fund', '--legacy-peer-deps', '--prefer-offline'],
-                        { env: { FORCE_COLOR: '1' } },
+                        { env: { FORCE_COLOR: '1' }, cwd: projectDir },
                     );
+                    console.info('[SandboxDecision] npm_spawn', {
+                        threadId,
+                        command: 'npm install',
+                        cwd: projectDir,
+                        packageJsonPath: projectDirResolution.packageJsonPath,
+                    });
                     installProc.output.pipeTo(new WritableStream({
                         write(data) { writeShellOutput(data); }
                     }));
                     installExit = await runProcessAndCollectExit(installProc, INSTALL_TIMEOUT_MS);
+                    await appendTerminalEvents(threadId, authToken, [
+                        { eventType: 'status', payload: `npm install exit ${installExit}`, cwd: projectDir, exitCode: installExit },
+                    ]);
                     if (installExit === 0) break;
                     if (attempts < 2) {
                         writeShellOutput('\r\n\x1b[33m⚠ Install failed once, retrying...\x1b[0m\r\n');
@@ -875,6 +1257,7 @@ createRoot(document.getElementById('root')!).render(
                     threadRuntimeMeta.set(threadId, {
                         depFingerprint,
                         criticalFingerprint,
+                        projectDir,
                         lastAppliedSeq: latestSeq,
                         installSucceeded: false,
                         lastBootAt: Date.now(),
@@ -887,13 +1270,32 @@ createRoot(document.getElementById('root')!).render(
                 await persistInstalledDependencyFingerprint(wc, depFingerprint);
                 const snapshotBytes = await createNodeModulesSnapshot(wc, projectDir);
                 if (snapshotBytes) {
-                    const snapshotBody = Uint8Array.from(snapshotBytes).buffer;
-                    await saveDependencySnapshot({
-                        depFingerprint,
-                        toolchainVersion: SNAPSHOT_TOOLCHAIN_VERSION,
-                        createdAt: Date.now(),
-                        tarBase64: bytesToBase64(snapshotBytes),
-                    });
+                    const estimatedIndexedDbBytes = Math.ceil(snapshotBytes.bytes.length * 1.37);
+                    if (estimatedIndexedDbBytes > MAX_INDEXEDDB_SNAPSHOT_BYTES) {
+                        console.warn('[SandboxDecision] indexeddb_quota_exceeded', {
+                            threadId,
+                            depFingerprint,
+                            estimatedBytes: estimatedIndexedDbBytes,
+                        });
+                    } else {
+                        const saveResult = await saveDependencySnapshot({
+                            depFingerprint,
+                            toolchainVersion: SNAPSHOT_TOOLCHAIN_VERSION,
+                            createdAt: Date.now(),
+                            archiveBase64: bytesToBase64(snapshotBytes.bytes),
+                            archiveFormat: snapshotBytes.format,
+                        });
+                        if (saveResult === 'quota_exceeded') {
+                            console.warn('[SandboxDecision] indexeddb_quota_exceeded', { threadId, depFingerprint });
+                        } else if (saveResult !== 'ok') {
+                            console.warn('[SandboxDecision] indexeddb_restore_failed', {
+                                threadId,
+                                depFingerprint,
+                                reason: 'indexeddb_save_failed',
+                            });
+                        }
+                    }
+                    const snapshotBody = Uint8Array.from(snapshotBytes.bytes).buffer;
                     void fetch(
                         `${API_URL}/sandbox/snapshots/${encodeURIComponent(depFingerprint)}?toolchainVersion=${encodeURIComponent(SNAPSHOT_TOOLCHAIN_VERSION)}`,
                         {
@@ -904,23 +1306,22 @@ createRoot(document.getElementById('root')!).render(
                             },
                             body: snapshotBody,
                         },
-                    ).catch(() => {
-                        /* best-effort remote snapshot publish */
-                    });
+                    )
+                        .then(async (res) => {
+                            if (!res.ok) {
+                                console.warn('[SandboxDecision] snapshot_upload_failed', {
+                                    threadId,
+                                    depFingerprint,
+                                    status: res.status,
+                                });
+                            }
+                        })
+                        .catch(() => {
+                            console.warn('[SandboxDecision] snapshot_upload_failed', { threadId, depFingerprint });
+                        });
+                } else {
+                    console.warn('[SandboxDecision] snapshot_create_failed', { threadId, depFingerprint });
                 }
-                void fetch(`${API_URL}/sandbox/dependencies/${encodeURIComponent(depFingerprint)}`, {
-                    method: 'PUT',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        Authorization: `Bearer ${authToken}`,
-                    },
-                    body: JSON.stringify({
-                        notes: `installed for thread ${threadId}`,
-                        toolchainVersion: SNAPSHOT_TOOLCHAIN_VERSION,
-                    }),
-                }).catch(() => {
-                    /* best-effort cache publish */
-                });
             } else {
                 setPreviewStatus('starting');
                 setPreviewStatusMessage('Reusing installed dependencies from cache...');
@@ -936,6 +1337,16 @@ createRoot(document.getElementById('root')!).render(
                 writeShellOutput('\r\n\x1b[36m⬢ Starting dev server...\x1b[0m\r\n');
                 const devProc = await wc.spawn('npm', ['run', 'dev'], {
                     env: { FORCE_COLOR: '1' },
+                    cwd: projectDir,
+                });
+                await appendTerminalEvents(threadId, authToken, [
+                    { eventType: 'command', payload: 'npm run dev', cwd: projectDir },
+                ]);
+                console.info('[SandboxDecision] npm_spawn', {
+                    threadId,
+                    command: 'npm run dev',
+                    cwd: projectDir,
+                    packageJsonPath: projectDirResolution.packageJsonPath,
                 });
                 devProc.output.pipeTo(new WritableStream({
                     write(data) { writeShellOutput(data); }
@@ -951,6 +1362,7 @@ createRoot(document.getElementById('root')!).render(
             threadRuntimeMeta.set(threadId, {
                 depFingerprint,
                 criticalFingerprint,
+                projectDir,
                 lastAppliedSeq: latestSeq,
                 installSucceeded: true,
                 lastBootAt: Date.now(),
@@ -963,6 +1375,7 @@ createRoot(document.getElementById('root')!).render(
                     threadId,
                     depFingerprint,
                     criticalFingerprint,
+                    projectDir,
                     lastAppliedSeq: latestSeq,
                     installSucceeded: true,
                     lastBootAt: Date.now(),
@@ -984,6 +1397,7 @@ createRoot(document.getElementById('root')!).render(
             threadRuntimeMeta.set(threadId, {
                 depFingerprint,
                 criticalFingerprint,
+                projectDir,
                 lastAppliedSeq: latestSeq,
                 installSucceeded: false,
                 lastBootAt: Date.now(),
@@ -996,6 +1410,7 @@ createRoot(document.getElementById('root')!).render(
                     threadId,
                     depFingerprint,
                     criticalFingerprint,
+                    projectDir,
                     lastAppliedSeq: latestSeq,
                     installSucceeded: false,
                     lastBootAt: Date.now(),
@@ -1009,7 +1424,7 @@ createRoot(document.getElementById('root')!).render(
                 error: String(err),
             });
         }
-    }, [API_URL, setFileSystem, setPreviewStatus, setPreviewStatusMessage, setSandboxRuntimeMetadata]);
+    }, [API_URL, appendTerminalEvents, setFileSystem, setPreviewStatus, setPreviewStatusMessage, setSandboxRuntimeMetadata, shellWriter]);
 
     const sendMessage = async (content: string) => {
         if (!content.trim() || !isLoaded || !isSignedIn) {
@@ -1445,6 +1860,7 @@ createRoot(document.getElementById('root')!).render(
             setMessages(formattedMessages);
             setCurrentThreadId(threadId);
             localStorage.setItem('currentThreadId', threadId);
+            void refreshTerminalSession(threadId, token);
 
             if (wc && fileMap.size > 0) {
                 // Make thread switching responsive: restore UI immediately,
@@ -1496,13 +1912,15 @@ createRoot(document.getElementById('root')!).render(
             }
             throw error;
         }
-    }, [getToken, isLoaded, isSignedIn, navigate, setThreadSwitchState, setServerUrl, setPreviewStatus, setPreviewStatusMessage, webContainerInstance, setMessages, setCurrentThreadId, setFileSystem, setActiveFile, startThreadSandboxInBackground]);
+    }, [getToken, isLoaded, isSignedIn, navigate, refreshTerminalSession, setThreadSwitchState, setServerUrl, setPreviewStatus, setPreviewStatusMessage, webContainerInstance, setMessages, setCurrentThreadId, setFileSystem, setActiveFile, startThreadSandboxInBackground]);
 
     return {
         messages,
         sendMessage,
         fetchThreads,
         loadThread,
+        runTerminalRecovery,
+        refreshTerminalSession,
         currentThreadId,
         isLoading,
     };
