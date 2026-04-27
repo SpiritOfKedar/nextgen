@@ -24,6 +24,32 @@ import type { BoltAction } from '../lib/boltProtocol';
 import { loadDependencySnapshot, saveDependencySnapshot } from '../lib/sandboxSnapshotCache';
 import JSZip from 'jszip';
 import { detectTerminalIssue } from '../lib/terminalIssues';
+import type { WebContainer } from '@webcontainer/api';
+
+/** Serialize WebContainer fs writes so the chat stream reader never stalls on slow I/O (fixes dropped Claude streams). */
+const queueBoltFileWrite = (
+    chainRef: { current: Promise<void> },
+    wc: WebContainer,
+    filePath: string,
+    fileContent: string,
+) => {
+    chainRef.current = chainRef.current.then(async () => {
+        try {
+            const absPath = '/' + filePath.replace(/^\//, '');
+            const dir = absPath.substring(0, absPath.lastIndexOf('/'));
+            if (dir && dir !== '/') {
+                try {
+                    await wc.fs.mkdir(dir, { recursive: true });
+                } catch {
+                    // Directory may already exist
+                }
+            }
+            await wc.fs.writeFile(absPath, fileContent);
+        } catch (err) {
+            console.error(`[Bolt] Failed to write ${filePath}:`, err);
+        }
+    });
+};
 
 // Strip bolt protocol XML tags from content for display in chat
 // Preserves narrative text and generates clean file summaries
@@ -1520,18 +1546,24 @@ createRoot(document.getElementById('root')!).render(
                 },
             ]);
 
-            // Navigate to builder now that we have a valid response
-            navigate('/builder');
-
             const parser = new BoltParser();
             const pendingShellCommands: string[] = [];
             // Track all files written during this stream for dependency patching
             const writtenFiles = new Map<string, string>();
+            const fsWriteChain = { current: Promise.resolve() };
 
             // ── Phase 1: Read the stream — write files immediately, queue shell commands ──
+            // Navigate only after the first bytes arrive so the TCP reader is not starved by
+            // heavy /builder layout + WebContainer work (which previously correlated with Claude streams dying mid-flight).
+            let didNavigateForStream = false;
             while (true) {
                 const { done, value } = await reader.read();
                 if (done) break;
+
+                if (!didNavigateForStream && value && value.byteLength > 0) {
+                    didNavigateForStream = true;
+                    navigate('/builder');
+                }
 
                 const chunk = decoder.decode(value);
                 accumulatedContent += chunk;
@@ -1547,22 +1579,10 @@ createRoot(document.getElementById('root')!).render(
                         const path = action.filePath;
                         const fileContent = action.content;
 
-                        // Write to WebContainer immediately so files are ready
+                        // Queue WebContainer writes — never await them here or the stream reader
+                        // stalls, TCP buffers fill, and the server-side Claude stream aborts mid-flight.
                         if (wc) {
-                            try {
-                                const absPath = '/' + path.replace(/^\//, '');
-                                const dir = absPath.substring(0, absPath.lastIndexOf('/'));
-                                if (dir && dir !== '/') {
-                                    try {
-                                        await wc.fs.mkdir(dir, { recursive: true });
-                                    } catch {
-                                        // Directory may already exist, ignore
-                                    }
-                                }
-                                await wc.fs.writeFile(absPath, fileContent);
-                            } catch (err) {
-                                console.error(`[Bolt] Failed to write ${path}:`, err);
-                            }
+                            queueBoltFileWrite(fsWriteChain, wc, path, fileContent);
                         }
 
                         // Track for dependency patching
@@ -1592,6 +1612,8 @@ createRoot(document.getElementById('root')!).render(
                 );
             }
 
+            await fsWriteChain.current;
+
             // Flush any remaining buffered actions from the parser
             const remaining = parser.parse('');
             for (const action of remaining) {
@@ -1600,16 +1622,7 @@ createRoot(document.getElementById('root')!).render(
                     const fileContent = action.content;
                     const wc = webContainerInstance ?? getWebContainerInstance();
                     if (wc) {
-                        try {
-                            const absPath = '/' + path.replace(/^\//, '');
-                            const dir = absPath.substring(0, absPath.lastIndexOf('/'));
-                            if (dir && dir !== '/') {
-                                try { await wc.fs.mkdir(dir, { recursive: true }); } catch { /* exists */ }
-                            }
-                            await wc.fs.writeFile(absPath, fileContent);
-                        } catch (err) {
-                            console.error(`[Bolt] Failed to write ${path}:`, err);
-                        }
+                        queueBoltFileWrite(fsWriteChain, wc, path, fileContent);
                     }
                     writtenFiles.set(path.replace(/^\//, ''), fileContent);
                     setFileSystem((prev) => upsertFile(prev, path, fileContent));
@@ -1620,6 +1633,8 @@ createRoot(document.getElementById('root')!).render(
                     pendingShellCommands.push(action.content.trim());
                 }
             }
+
+            await fsWriteChain.current;
 
             // ── Phase 1.5: Ensure root package.json, patch deps, then run shell ──
             const wcForNpm = webContainerInstance ?? getWebContainerInstance();

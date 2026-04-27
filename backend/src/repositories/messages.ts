@@ -29,19 +29,8 @@ export interface InsertMessageInput {
     status?: MessageStatus;
 }
 
-let schemaEnsured = false;
-const ensureSchema = async (): Promise<void> => {
-    if (schemaEnsured) return;
-    await getPool().query(`
-        ALTER TABLE public.messages
-        ADD COLUMN IF NOT EXISTS conversation_mode TEXT NULL
-    `);
-    await getPool().query(`
-        CREATE INDEX IF NOT EXISTS idx_messages_thread_mode_seq
-        ON public.messages(thread_id, conversation_mode, seq)
-    `);
-    schemaEnsured = true;
-};
+/** DDL runs once at boot — see config/runtimeSchema.ts */
+const ensureSchema = async (): Promise<void> => {};
 
 export const insert = async (input: InsertMessageInput, tx: Tx): Promise<MessageRow> => {
     await ensureSchema();

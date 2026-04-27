@@ -1,6 +1,7 @@
 import { Pool, PoolClient } from 'pg';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { log, errorFields } from '../lib/logger';
+import { ensureRuntimeSchema } from './runtimeSchema';
 
 let pool: Pool | null = null;
 let supabase: SupabaseClient | null = null;
@@ -13,6 +14,9 @@ const parseTimeoutMs = (raw: string | undefined, fallbackMs: number): number => 
 };
 
 const DB_CONNECT_TIMEOUT_MS = parseTimeoutMs(process.env.DB_CONNECT_TIMEOUT_MS, DEFAULT_DB_CONNECT_TIMEOUT_MS);
+
+/** Session statement_timeout (ms). Supabase defaults are tight; chat prep can include DDL-heavy first touches. */
+const DB_STATEMENT_TIMEOUT_MS = parseTimeoutMs(process.env.DB_STATEMENT_TIMEOUT_MS, 120_000);
 
 const withTimeout = async <T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> => {
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -56,6 +60,8 @@ const createPgPool = (connectionString: string): Pool => {
         max: 10,
         idleTimeoutMillis: 30_000,
         connectionTimeoutMillis: DB_CONNECT_TIMEOUT_MS,
+        // Raise per-session timeout so snapshot + index creation at boot (and heavy reads) are less likely to cancel mid-flight.
+        options: `-c statement_timeout=${DB_STATEMENT_TIMEOUT_MS}`,
     });
     nextPool.on('error', (err) => {
         log.error('db.pg_pool_idle_client_error', errorFields(err));
@@ -180,6 +186,8 @@ export const connectDB = async (): Promise<void> => {
             throw fallbackError;
         }
     }
+
+    await ensureRuntimeSchema(getPool());
 
     getSupabase();
     log.info('db.supabase_storage_ready', { bucket: STORAGE_BUCKET });

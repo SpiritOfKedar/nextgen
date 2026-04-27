@@ -7,26 +7,8 @@ export interface UpsertPlanContextInput {
     sourceMessageId: string;
 }
 
-let schemaEnsured = false;
-
-const ensureSchema = async (): Promise<void> => {
-    if (schemaEnsured) return;
-    const pool = getPool();
-    await pool.query(`
-        CREATE TABLE IF NOT EXISTS public.thread_plan_contexts (
-            thread_id UUID PRIMARY KEY REFERENCES public.threads(id) ON DELETE CASCADE,
-            user_id UUID NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
-            plan_context TEXT NOT NULL,
-            source_message_id UUID NOT NULL REFERENCES public.messages(id) ON DELETE CASCADE,
-            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        )
-    `);
-    await pool.query(`
-        CREATE INDEX IF NOT EXISTS idx_thread_plan_contexts_user_updated
-            ON public.thread_plan_contexts(user_id, updated_at DESC)
-    `);
-    schemaEnsured = true;
-};
+/** DDL runs once at boot — see config/runtimeSchema.ts */
+const ensureSchema = async (): Promise<void> => {};
 
 export const upsertPlanContext = async (
     input: UpsertPlanContextInput,

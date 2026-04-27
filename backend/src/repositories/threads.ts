@@ -2,21 +2,9 @@ import { getPool, Tx } from '../config/db';
 import { ThreadRow } from './types';
 
 const q = (tx: Tx | undefined) => tx ?? getPool();
-let schemaEnsured = false;
 
-const ensureSchema = async (): Promise<void> => {
-    if (schemaEnsured) return;
-    const pool = getPool();
-    await pool.query(`
-        ALTER TABLE public.threads
-        ADD COLUMN IF NOT EXISTS last_mode TEXT NULL
-    `);
-    await pool.query(`
-        ALTER TABLE public.threads
-        ADD COLUMN IF NOT EXISTS plan_context_updated_at TIMESTAMPTZ NULL
-    `);
-    schemaEnsured = true;
-};
+/** DDL runs once at boot — see config/runtimeSchema.ts */
+const ensureSchema = async (): Promise<void> => {};
 
 export const create = async (
     userId: string,

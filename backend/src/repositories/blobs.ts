@@ -74,20 +74,11 @@ export const putBlob = async (content: string, tx?: Tx): Promise<string> => {
     return sha;
 };
 
-/**
- * Resolve a sha256 to its content, using (1) the in-process LRU,
- * (2) the inlined content column, (3) Supabase Storage — in that order.
- */
-export const getBlob = async (sha: string, tx?: Tx): Promise<string> => {
+/** Load bytes for a row returned from code_blobs (LRU → inline column → Storage). */
+const materializeBlob = async (row: CodeBlobRow): Promise<string> => {
+    const sha = row.sha256;
     const cached = blobCache.get(sha);
     if (cached !== undefined) return cached;
-
-    const result = await q(tx).query<CodeBlobRow>(
-        `SELECT * FROM public.code_blobs WHERE sha256 = $1`,
-        [sha],
-    );
-    const row = result.rows[0];
-    if (!row) throw new Error(`Blob not found: ${sha}`);
 
     if (row.content !== null) {
         blobCache.set(sha, row.content);
@@ -109,14 +100,48 @@ export const getBlob = async (sha: string, tx?: Tx): Promise<string> => {
 };
 
 /**
- * Resolve many shas in parallel. Useful when assembling a thread snapshot.
+ * Resolve a sha256 to its content, using (1) the in-process LRU,
+ * (2) the inlined content column, (3) Supabase Storage — in that order.
  */
-export const getBlobs = async (shas: string[]): Promise<Map<string, string>> => {
+export const getBlob = async (sha: string, tx?: Tx): Promise<string> => {
+    const cached = blobCache.get(sha);
+    if (cached !== undefined) return cached;
+
+    const result = await q(tx).query<CodeBlobRow>(
+        `SELECT * FROM public.code_blobs WHERE sha256 = $1`,
+        [sha],
+    );
+    const row = result.rows[0];
+    if (!row) throw new Error(`Blob not found: ${sha}`);
+    return materializeBlob(row);
+};
+
+/**
+ * Resolve many shas in parallel. Uses one DB round-trip for metadata, then
+ * parallel Storage downloads — avoids N sequential SELECTs on large snapshots.
+ */
+export const getBlobs = async (shas: string[], tx?: Tx): Promise<Map<string, string>> => {
     const out = new Map<string, string>();
     const unique = Array.from(new Set(shas));
+    const needDb: string[] = [];
+    for (const sha of unique) {
+        const cached = blobCache.get(sha);
+        if (cached !== undefined) out.set(sha, cached);
+        else needDb.push(sha);
+    }
+    if (needDb.length === 0) return out;
+
+    const result = await q(tx).query<CodeBlobRow>(
+        `SELECT * FROM public.code_blobs WHERE sha256 = ANY($1::text[])`,
+        [needDb],
+    );
+    const bySha = new Map(result.rows.map((r) => [r.sha256, r]));
+
     await Promise.all(
-        unique.map(async (sha) => {
-            out.set(sha, await getBlob(sha));
+        needDb.map(async (sha) => {
+            const row = bySha.get(sha);
+            if (!row) throw new Error(`Blob not found: ${sha}`);
+            out.set(sha, await materializeBlob(row));
         }),
     );
     return out;

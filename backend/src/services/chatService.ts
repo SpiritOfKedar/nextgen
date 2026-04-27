@@ -246,6 +246,22 @@ const patchMissingDeps = (files: ExtractedFile[]): ExtractedFile[] => {
 const FLUSH_INTERVAL_MS = 250;
 const FLUSH_BYTE_THRESHOLD = 2048;
 
+/** Extra hint appended when the provider stream dies mid-flight (user sees this in chat). */
+const streamAbortUserHint = (err: unknown): string => {
+    const msg = err instanceof Error ? err.message : String(err);
+    const low = msg.toLowerCase();
+    if (low.includes('overloaded') || low.includes('529')) {
+        return " Claude's API is temporarily overloaded — wait a few seconds and retry.";
+    }
+    if (low.includes('rate limit') || low.includes('429')) {
+        return ' Rate limited — try again shortly or use another model.';
+    }
+    if (low.includes('abort') || low.includes('econnreset') || low.includes('etimedout') || low.includes('socket')) {
+        return ' The network connection dropped mid-response.';
+    }
+    return '';
+};
+
 class ChunkFlusher {
     private buffer: string[] = [];
     private bufferedBytes = 0;
@@ -508,7 +524,7 @@ export class ChatService {
                 assistantMessageId,
                 err instanceof Error ? err.message : String(err),
             );
-            yield `\n\n[error: stream interrupted — partial response saved]`;
+            yield `\n\n[error: stream interrupted — partial response saved]${streamAbortUserHint(err)}`;
             return;
         }
 
@@ -713,8 +729,12 @@ export class ChatService {
             stream: true,
         });
         for await (const chunk of stream) {
-            if (chunk.type === 'content_block_delta' && chunk.delta.type === 'text_delta') {
-                yield chunk.delta.text;
+            // SDK throws APIError on SSE `error` events (e.g. overloaded) — do not assume delta shape.
+            if (chunk.type === 'content_block_delta') {
+                const delta = chunk.delta as { type?: string; text?: string };
+                if (delta?.type === 'text_delta' && typeof delta.text === 'string' && delta.text.length > 0) {
+                    yield delta.text;
+                }
             }
         }
     }

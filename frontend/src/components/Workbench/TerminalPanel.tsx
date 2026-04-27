@@ -66,6 +66,8 @@ export const TerminalPanel: React.FC = () => {
 
     useEffect(() => {
         if (!terminalRef.current) return;
+        let disposed = false;
+        let resizeRaf = 0;
 
         const term = new Terminal({
             cursorBlink: true,
@@ -103,14 +105,25 @@ export const TerminalPanel: React.FC = () => {
         term.open(terminalRef.current);
 
         const fitTerm = () => {
+            if (disposed) return;
             const el = terminalRef.current;
-            if (!el || el.clientWidth === 0 || el.clientHeight === 0) return;
+            if (!el?.isConnected || el.clientWidth === 0 || el.clientHeight === 0) return;
+            if (!term.element?.isConnected) return;
             try {
                 fitAddon.fit();
                 resizeShell({ cols: term.cols, rows: term.rows });
             } catch {
-                // ignore — can happen during unmount
+                // ignore — can happen during unmount / zero-size layout
             }
+        };
+
+        const scheduleFit = () => {
+            if (disposed) return;
+            if (resizeRaf) cancelAnimationFrame(resizeRaf);
+            resizeRaf = requestAnimationFrame(() => {
+                resizeRaf = 0;
+                fitTerm();
+            });
         };
 
         // Wait for layout to complete and terminal to have valid dimensions
@@ -144,7 +157,7 @@ export const TerminalPanel: React.FC = () => {
             }
         });
 
-        const ro = new ResizeObserver(() => requestAnimationFrame(fitTerm));
+        const ro = new ResizeObserver(() => scheduleFit());
         ro.observe(terminalRef.current);
 
         // Forward keystrokes → shell stdin
@@ -166,10 +179,12 @@ export const TerminalPanel: React.FC = () => {
         });
 
         return () => {
+            disposed = true;
             clearTimeout(attachTimer);
+            if (resizeRaf) cancelAnimationFrame(resizeRaf);
+            ro.disconnect();
             setShellOutputCallback(null);
             removeOutputListener();
-            ro.disconnect();
             term.dispose();
         };
     }, [currentThreadId, setTerminalIssueByThread, setTerminalStatusByThread]); // eslint-disable-line react-hooks/exhaustive-deps
