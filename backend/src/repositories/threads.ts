@@ -26,7 +26,9 @@ export const findByIdForUser = async (
 ): Promise<ThreadRow | null> => {
     await ensureSchema();
     const result = await q(tx).query<ThreadRow>(
-        `SELECT * FROM public.threads WHERE id = $1 AND user_id = $2`,
+        `SELECT t.* FROM public.threads t
+         LEFT JOIN public.thread_collaborators tc ON tc.thread_id = t.id AND tc.user_id = $2
+         WHERE t.id = $1 AND (t.user_id = $2 OR tc.user_id IS NOT NULL)`,
         [threadId, userId],
     );
     return result.rows[0] ?? null;
@@ -35,9 +37,10 @@ export const findByIdForUser = async (
 export const listForUser = async (userId: string, tx?: Tx): Promise<ThreadRow[]> => {
     await ensureSchema();
     const result = await q(tx).query<ThreadRow>(
-        `SELECT * FROM public.threads
-         WHERE user_id = $1
-         ORDER BY updated_at DESC
+        `SELECT t.* FROM public.threads t
+         LEFT JOIN public.thread_collaborators tc ON tc.thread_id = t.id AND tc.user_id = $1
+         WHERE t.user_id = $1 OR tc.user_id IS NOT NULL
+         ORDER BY t.updated_at DESC
          LIMIT 200`,
         [userId],
     );

@@ -2,7 +2,8 @@ import React, { useState, useRef, useEffect } from 'react';
 import { InputArea } from './InputArea';
 import { MessageList } from './MessageList';
 import { ThreadList } from './ThreadList';
-import { PanelLeft, Plus } from 'lucide-react';
+import { ShareThreadModal } from './ShareThreadModal';
+import { PanelLeft, Plus, Share } from 'lucide-react';
 import logo from '../../assets/nextgen-logo.png';
 import { UserButton, useAuth } from '@clerk/clerk-react';
 import { useSetAtom, useAtom, useAtomValue } from 'jotai';
@@ -14,6 +15,7 @@ import { useChat } from '../../hooks/useChat';
 
 export const ChatPanel: React.FC = () => {
     const [isThreadListOpen, setIsThreadListOpen] = useState(false);
+    const [isShareModalOpen, setIsShareModalOpen] = useState(false);
     const navigate = useNavigate();
     const [messages, setMessages] = useAtom(messagesAtom);
     const [currentThreadId, setCurrentThreadId] = useAtom(currentThreadIdAtom);
@@ -107,6 +109,15 @@ export const ChatPanel: React.FC = () => {
                         >
                             <Plus className="w-5 h-5" />
                         </button>
+                        {currentThreadId && (
+                            <button
+                                onClick={() => setIsShareModalOpen(true)}
+                                className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-zinc-800 bg-zinc-900/70 text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800/90 transition-colors"
+                                title="Share Project"
+                            >
+                                <Share className="w-4 h-4" />
+                            </button>
+                        )}
                         <UserButton afterSignOutUrl="/" />
                     </div>
                 </div>
@@ -129,6 +140,11 @@ export const ChatPanel: React.FC = () => {
                     onClick={() => setIsThreadListOpen(false)}
                 />
             )}
+            
+            <ShareThreadModal 
+                isOpen={isShareModalOpen} 
+                onClose={() => setIsShareModalOpen(false)} 
+            />
         </div>
     );
 };

@@ -3,6 +3,7 @@ import { chatController } from '../controllers/chatController';
 import { sandboxController } from '../controllers/sandboxController';
 import { terminalController } from '../controllers/terminalController';
 import { figmaController } from '../controllers/figmaController';
+import * as collaboratorsController from '../controllers/collaboratorsController';
 import { authMiddleware } from '../middlewares/authMiddleware';
 
 const router = Router();
@@ -58,6 +59,14 @@ router.put('/sandbox/snapshots/:fingerprint', authMiddleware, sandboxController.
 router.get('/sandbox/templates/:templateId', authMiddleware, sandboxController.getTemplateSnapshot);
 // @ts-ignore
 router.put('/sandbox/templates/:templateId', authMiddleware, sandboxController.putTemplateSnapshot);
+
+// Collaborator endpoints
+// @ts-ignore
+router.get('/chat/:id/collaborators', authMiddleware, collaboratorsController.getCollaborators);
+// @ts-ignore
+router.post('/chat/:id/collaborators', authMiddleware, collaboratorsController.addCollaborator);
+// @ts-ignore
+router.delete('/chat/:id/collaborators/:userId', authMiddleware, collaboratorsController.removeCollaborator);
 
 router.get('/', (req, res) => {
     res.json({ message: 'Welcome to NextGen API' });

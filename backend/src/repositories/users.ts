@@ -29,3 +29,11 @@ export const findByClerkId = async (clerkId: string, tx?: Tx): Promise<UserRow |
     );
     return result.rows[0] ?? null;
 };
+
+export const findByEmail = async (email: string, tx?: Tx): Promise<UserRow | null> => {
+    const result = await q(tx).query<UserRow>(
+        `SELECT * FROM public.users WHERE email = $1`,
+        [email],
+    );
+    return result.rows[0] ?? null;
+};

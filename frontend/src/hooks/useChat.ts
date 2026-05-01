@@ -2096,6 +2096,61 @@ createRoot(document.getElementById('root')!).render(
         }
     }, [getToken, isLoaded, isSignedIn, navigate, refreshTerminalSession, setThreadSwitchState, setServerUrl, setPreviewStatus, setPreviewStatusMessage, webContainerInstance, setMessages, setCurrentThreadId, setFileSystem, setActiveFile, setChatMode, startThreadSandboxInBackground]);
 
+    const getCollaborators = useCallback(async (threadId: string) => {
+        if (!isLoaded || !isSignedIn) return [];
+        const token = await getToken();
+        if (!token) return [];
+
+        const res = await fetch(`${API_URL}/chat/${threadId}/collaborators`, {
+            headers: {
+                Authorization: `Bearer ${token}`,
+            },
+        });
+        if (!res.ok) {
+            const data = await res.json().catch(() => ({}));
+            throw new Error(data.error || 'Failed to fetch collaborators');
+        }
+        return res.json();
+    }, [isLoaded, isSignedIn, getToken]);
+
+    const addCollaborator = useCallback(async (threadId: string, email: string, role: string) => {
+        if (!isLoaded || !isSignedIn) throw new Error('Not authenticated');
+        const token = await getToken();
+        if (!token) throw new Error('Failed to get token');
+
+        const res = await fetch(`${API_URL}/chat/${threadId}/collaborators`, {
+            method: 'POST',
+            headers: {
+                Authorization: `Bearer ${token}`,
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ email, role }),
+        });
+        if (!res.ok) {
+            const data = await res.json().catch(() => ({}));
+            throw new Error(data.error || 'Failed to add collaborator');
+        }
+        return res.json();
+    }, [isLoaded, isSignedIn, getToken]);
+
+    const removeCollaborator = useCallback(async (threadId: string, userId: string) => {
+        if (!isLoaded || !isSignedIn) throw new Error('Not authenticated');
+        const token = await getToken();
+        if (!token) throw new Error('Failed to get token');
+
+        const res = await fetch(`${API_URL}/chat/${threadId}/collaborators/${userId}`, {
+            method: 'DELETE',
+            headers: {
+                Authorization: `Bearer ${token}`,
+            },
+        });
+        if (!res.ok) {
+            const data = await res.json().catch(() => ({}));
+            throw new Error(data.error || 'Failed to remove collaborator');
+        }
+        return res.json();
+    }, [isLoaded, isSignedIn, getToken]);
+
     return {
         messages,
         sendMessage,
@@ -2107,5 +2162,8 @@ createRoot(document.getElementById('root')!).render(
         refreshTerminalSession,
         currentThreadId,
         isLoading,
+        getCollaborators,
+        addCollaborator,
+        removeCollaborator,
     };
 };

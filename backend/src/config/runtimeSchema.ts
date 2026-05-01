@@ -61,6 +61,16 @@ export const ensureRuntimeSchema = async (pool: Pool): Promise<void> => {
         )
     `);
 
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS public.thread_collaborators (
+            thread_id UUID NOT NULL REFERENCES public.threads(id) ON DELETE CASCADE,
+            user_id UUID NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
+            role TEXT NOT NULL DEFAULT 'editor',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY (thread_id, user_id)
+        )
+    `);
+
     applied = true;
     log.info('db.runtime_schema_ready');
 };
