@@ -51,6 +51,16 @@ export const ensureRuntimeSchema = async (pool: Pool): Promise<void> => {
             ON public.thread_plan_contexts(user_id, updated_at DESC)
     `);
 
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS public.user_figma_connections (
+            user_id UUID PRIMARY KEY REFERENCES public.users(id) ON DELETE CASCADE,
+            access_token TEXT NOT NULL,
+            enabled BOOLEAN NOT NULL DEFAULT true,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+    `);
+
     applied = true;
     log.info('db.runtime_schema_ready');
 };

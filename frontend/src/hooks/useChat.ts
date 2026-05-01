@@ -794,6 +794,9 @@ export const useChat = () => {
         dataBase64?: string;
         textContent?: string;
     };
+    type FigmaLinkPayload = {
+        url: string;
+    };
 
 
     const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001/api';
@@ -1471,7 +1474,11 @@ createRoot(document.getElementById('root')!).render(
         }
     }, [API_URL, appendTerminalEvents, setFileSystem, setPreviewStatus, setPreviewStatusMessage, setSandboxRuntimeMetadata, shellWriter]);
 
-    const sendMessage = async (content: string, attachments: ChatAttachmentPayload[] = []) => {
+    const sendMessage = async (
+        content: string,
+        attachments: ChatAttachmentPayload[] = [],
+        figmaLinks: FigmaLinkPayload[] = [],
+    ) => {
         if (!content.trim() || !isLoaded || !isSignedIn) {
             console.warn('[useChat] sendMessage blocked:', { hasContent: !!content.trim(), isLoaded, isSignedIn });
             return;
@@ -1484,8 +1491,8 @@ createRoot(document.getElementById('root')!).render(
             id: Date.now().toString(),
             role: 'user' as const,
             content: attachments.length > 0
-                ? `[Mode: ${chatMode === 'plan' ? 'Plan' : 'Build'}]\n${content}\n\n[Attached ${attachments.length} file${attachments.length > 1 ? 's' : ''}]`
-                : `[Mode: ${chatMode === 'plan' ? 'Plan' : 'Build'}]\n${content}`,
+                ? `[Mode: ${chatMode === 'plan' ? 'Plan' : 'Build'}]\n${content}\n\n[Attached ${attachments.length} file${attachments.length > 1 ? 's' : ''}]${figmaLinks.length > 0 ? `\n[Figma context: ${figmaLinks.length} link${figmaLinks.length > 1 ? 's' : ''}]` : ''}`
+                : `[Mode: ${chatMode === 'plan' ? 'Plan' : 'Build'}]\n${content}${figmaLinks.length > 0 ? `\n\n[Figma context: ${figmaLinks.length} link${figmaLinks.length > 1 ? 's' : ''}]` : ''}`,
             timestamp: Date.now(),
         };
         setMessages((prev) => [...prev, userMessage]);
@@ -1510,6 +1517,7 @@ createRoot(document.getElementById('root')!).render(
                     model: selectedModel,
                     mode: chatMode,
                     attachments,
+                    figmaLinks,
                 }),
             });
 

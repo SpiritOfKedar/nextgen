@@ -7,7 +7,7 @@ const VALID_MODES = new Set(['plan', 'build']);
 
 export const chatController = {
     async sendMessage(req: Request, res: Response) {
-        const { message, threadId, model, attachments, mode } = req.body;
+        const { message, threadId, model, attachments, mode, figmaLinks } = req.body;
         const conversationMode = VALID_MODES.has(mode) ? mode : 'build';
 
         if (!message) {
@@ -26,6 +26,7 @@ export const chatController = {
                 model,
                 conversationMode,
                 Array.isArray(attachments) ? attachments : [],
+                Array.isArray(figmaLinks) ? figmaLinks : [],
                 { requestId: req.requestId, internalUserId: userId },
             );
 

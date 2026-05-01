@@ -6,6 +6,7 @@ End-to-end AI builder platform with:
 - Supabase Postgres + Storage persistence
 - Clerk auth
 - multi-provider LLM streaming (OpenAI, Anthropic, Gemini)
+- optional Figma MCP design-context import
 - WebContainer sandbox boot/install/snapshot reuse
 
 This README is the single source of truth for architecture, data flow, setup, and operations.
@@ -64,6 +65,8 @@ High-value frontend modules:
 High-value backend modules:
 - `backend/src/controllers/chatController.ts` – streaming chat endpoints
 - `backend/src/services/chatService.ts` – provider selection, mode policy, persistence pipeline
+- `backend/src/services/figmaMcpClient.ts` – Streamable HTTP MCP client for Figma tools
+- `backend/src/services/figmaDesignContextService.ts` – Figma URL parsing + prompt context assembly
 - `backend/src/controllers/sandboxController.ts` – dependency plan/snapshot APIs
 - `backend/src/controllers/terminalController.ts` – terminal events + recovery audits
 - `backend/src/repositories/*` – thread/message/file/blob/session persistence
@@ -83,6 +86,7 @@ flowchart LR
   BE --> AI1[OpenAI]
   BE --> AI2[Anthropic]
   BE --> AI3[Google Gemini]
+  BE --> MCP[Figma MCP]
   FE --> WC[WebContainer Sandbox]
   FE -->|snapshot metadata/archives| BE
   BE -->|dependency plan + snapshot| FE
@@ -121,9 +125,10 @@ sequenceDiagram
   participant LLM as Provider
   participant DB as Postgres
 
-  User->>FE: Enter prompt (+ optional attachments)
-  FE->>BE: POST /api/chat (message, threadId, model, mode, attachments)
+  User->>FE: Enter prompt (+ optional attachments/Figma links)
+  FE->>BE: POST /api/chat (message, threadId, model, mode, attachments, figmaLinks)
   BE->>DB: allocate seq + insert user + assistant(streaming)
+  BE->>BE: fetch optional Figma MCP design context
   BE->>LLM: start streaming completion
   loop streaming
     LLM-->>BE: text delta
@@ -203,6 +208,10 @@ Base URL (local): `http://localhost:3001/api`
 - `GET /chat/:threadId/files` – full current thread snapshot
 - `GET /chat/:threadId/files/delta?sinceSeq=<n>` – incremental file changes
 
+### Figma MCP
+- `GET /figma/status` – report backend Figma MCP enablement/config state
+- `POST /figma/inspect` – fetch read-only design context for a Figma file/frame/layer URL
+
 ### Terminal
 - `GET /terminal/:threadId/session`
 - `POST /terminal/:threadId/events`
@@ -276,6 +285,13 @@ DB_CONNECT_TIMEOUT_MS=10000
 OPENAI_API_KEY=sk-...
 ANTHROPIC_API_KEY=sk-ant-...
 GEMINI_API_KEY=...
+
+# Optional Figma MCP design context
+FIGMA_MCP_ENABLED=false
+FIGMA_MCP_URL=https://mcp.figma.com/mcp
+FIGMA_MCP_ACCESS_TOKEN=
+FIGMA_MCP_HEADERS_JSON=
+FIGMA_MCP_TIMEOUT_MS=45000
 
 # Optional logging
 LOG_LEVEL=info
@@ -386,4 +402,3 @@ Current test target includes chat mode policy validation.
 - Expand integration tests for streaming + sandbox snapshot lifecycle.
 - Add per-provider latency/error dashboards.
 - Add deploy guides (Docker, managed secrets, CI/CD pipeline).
-

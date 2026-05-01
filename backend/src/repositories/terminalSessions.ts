@@ -45,6 +45,42 @@ const ensureTables = async (): Promise<void> => {
       ON public.terminal_events(thread_id, created_at DESC);
   `);
   await pool.query(`
+    ALTER TABLE public.terminal_events ENABLE ROW LEVEL SECURITY;
+  `);
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1
+        FROM pg_policies
+        WHERE schemaname = 'public'
+          AND tablename = 'terminal_events'
+          AND policyname = 'terminal_events_select_own'
+      ) THEN
+        CREATE POLICY terminal_events_select_own
+          ON public.terminal_events
+          FOR SELECT
+          TO authenticated
+          USING (auth.uid() = user_id);
+      END IF;
+
+      IF NOT EXISTS (
+        SELECT 1
+        FROM pg_policies
+        WHERE schemaname = 'public'
+          AND tablename = 'terminal_events'
+          AND policyname = 'terminal_events_insert_own'
+      ) THEN
+        CREATE POLICY terminal_events_insert_own
+          ON public.terminal_events
+          FOR INSERT
+          TO authenticated
+          WITH CHECK (auth.uid() = user_id);
+      END IF;
+    END
+    $$;
+  `);
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS public.terminal_recovery_audits (
       id BIGSERIAL PRIMARY KEY,
       thread_id UUID NOT NULL REFERENCES public.threads(id) ON DELETE CASCADE,
@@ -61,6 +97,42 @@ const ensureTables = async (): Promise<void> => {
   await pool.query(`
     CREATE INDEX IF NOT EXISTS idx_terminal_recovery_thread_created
       ON public.terminal_recovery_audits(thread_id, created_at DESC);
+  `);
+  await pool.query(`
+    ALTER TABLE public.terminal_recovery_audits ENABLE ROW LEVEL SECURITY;
+  `);
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1
+        FROM pg_policies
+        WHERE schemaname = 'public'
+          AND tablename = 'terminal_recovery_audits'
+          AND policyname = 'terminal_recovery_audits_select_own'
+      ) THEN
+        CREATE POLICY terminal_recovery_audits_select_own
+          ON public.terminal_recovery_audits
+          FOR SELECT
+          TO authenticated
+          USING (auth.uid() = user_id);
+      END IF;
+
+      IF NOT EXISTS (
+        SELECT 1
+        FROM pg_policies
+        WHERE schemaname = 'public'
+          AND tablename = 'terminal_recovery_audits'
+          AND policyname = 'terminal_recovery_audits_insert_own'
+      ) THEN
+        CREATE POLICY terminal_recovery_audits_insert_own
+          ON public.terminal_recovery_audits
+          FOR INSERT
+          TO authenticated
+          WITH CHECK (auth.uid() = user_id);
+      END IF;
+    END
+    $$;
   `);
   tablesEnsured = true;
 };

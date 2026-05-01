@@ -1,18 +1,24 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { motion } from 'framer-motion';
-import { Paperclip, ArrowRight, X } from 'lucide-react';
+import { Paperclip, ArrowRight, X, Figma } from 'lucide-react';
 import { useChat } from '../../hooks/useChat';
 import { ModelSelector } from './ModelSelector';
+import { FigmaPanel } from './FigmaPanel';
 import { useAtom } from 'jotai';
 import { chatModeAtom } from '../../store/atoms';
+
+const FIGMA_URL_REGEX = /https:\/\/(?:www\.)?figma\.com\/(?:design|file|proto|board)\/[^\s"'<>]+/gi;
 
 export const InputArea: React.FC = () => {
     const [inputValue, setInputValue] = useState('');
     const [attachedFiles, setAttachedFiles] = useState<File[]>([]);
+    const [showFigmaPanel, setShowFigmaPanel] = useState(false);
+    const [manualFigmaLinks, setManualFigmaLinks] = useState<string[]>([]);
     const { sendMessage, isLoading } = useChat();
     const [chatMode, setChatMode] = useAtom(chatModeAtom);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
+    const figmaButtonRef = useRef<HTMLButtonElement>(null);
     const MAX_FILE_CHARS = 25_000;
     const MAX_TOTAL_ATTACHMENT_CHARS = 80_000;
     const MAX_FILE_SIZE_BYTES = 5 * 1024 * 1024;
@@ -160,6 +166,38 @@ export const InputArea: React.FC = () => {
         }));
     }, [attachedFiles]);
 
+    const figmaLinks = React.useMemo(() => {
+        const links: { url: string }[] = [];
+        const seen = new Set<string>();
+        // Links auto-detected from textarea
+        for (const match of inputValue.matchAll(FIGMA_URL_REGEX)) {
+            const cleaned = match[0].replace(/[),.;]+$/g, '');
+            if (seen.has(cleaned)) continue;
+            seen.add(cleaned);
+            links.push({ url: cleaned });
+            if (links.length >= 3) break;
+        }
+        // Links added via the Figma button popover
+        for (const url of manualFigmaLinks) {
+            if (seen.has(url)) continue;
+            seen.add(url);
+            links.push({ url });
+            if (links.length >= 3) break;
+        }
+        return links;
+    }, [inputValue, manualFigmaLinks]);
+
+    const handleAddFigmaLink = useCallback((url: string) => {
+        setManualFigmaLinks((prev) => {
+            if (prev.includes(url)) return prev;
+            return [...prev, url].slice(0, 3);
+        });
+    }, []);
+
+    const handleRemoveFigmaLink = useCallback((url: string) => {
+        setManualFigmaLinks((prev) => prev.filter((l) => l !== url));
+    }, []);
+
     useEffect(() => {
         return () => {
             imagePreviewUrls.forEach((item) => {
@@ -176,9 +214,11 @@ export const InputArea: React.FC = () => {
         const attachments = await buildOutgoingAttachments(attachedFiles);
         setInputValue('');
         setAttachedFiles([]);
+        setManualFigmaLinks([]);
+        setShowFigmaPanel(false);
         if (fileInputRef.current) fileInputRef.current.value = '';
         if (textareaRef.current) textareaRef.current.style.height = 'auto'; // Reset height
-        await sendMessage(content, attachments);
+        await sendMessage(content, attachments, figmaLinks);
     };
 
     const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -195,7 +235,7 @@ export const InputArea: React.FC = () => {
                     relative flex flex-col w-full 
                     bg-zinc-900/85 backdrop-blur-xl 
                     border 
-                    rounded-xl overflow-hidden 
+                    rounded-xl
                     border-zinc-800/70 shadow-sm
                     transition-all duration-300 ease-out
                     focus-within:border-zinc-700/80 focus-within:shadow-lg focus-within:ring-1 focus-within:ring-zinc-700/40
@@ -264,6 +304,32 @@ export const InputArea: React.FC = () => {
                     </div>
                 )}
 
+                {figmaLinks.length > 0 && (
+                    <div className="px-3 pb-2.5">
+                        <div className="flex flex-wrap gap-2">
+                            {figmaLinks.map((link, index) => (
+                                <div
+                                    key={`${link.url}-${index}`}
+                                    className="inline-flex h-8 max-w-full items-center gap-1.5 rounded-lg border border-purple-500/30 bg-purple-950/30 px-2.5 text-[11px] text-purple-100"
+                                >
+                                    <Figma className="h-3 w-3 shrink-0 text-purple-300" />
+                                    <span className="truncate max-w-[180px]" title={link.url}>Figma design {index + 1}</span>
+                                    {manualFigmaLinks.includes(link.url) && (
+                                        <button
+                                            type="button"
+                                            className="ml-0.5 text-purple-400 hover:text-purple-100 transition-colors"
+                                            onClick={() => handleRemoveFigmaLink(link.url)}
+                                            aria-label={`Remove Figma link ${index + 1}`}
+                                        >
+                                            <X className="h-3 w-3" />
+                                        </button>
+                                    )}
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                )}
+
                 {/* Grid: middle column minmax(0,1fr) shrinks so Build never clips (card uses overflow-hidden) */}
                 <div className="grid w-full min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 px-2.5 py-1.5 bg-zinc-900/65 border-t border-zinc-800/70">
                     <input
@@ -279,15 +345,44 @@ export const InputArea: React.FC = () => {
                         }}
                     />
 
-                    <button
-                        type="button"
-                        onClick={() => fileInputRef.current?.click()}
-                        className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-zinc-700/80 bg-zinc-900 text-zinc-300 hover:text-zinc-100 hover:bg-zinc-800/70 transition-colors"
-                        title="Add files"
-                        aria-label="Add files"
-                    >
-                        <Paperclip className="w-3.5 h-3.5 text-zinc-400" />
-                    </button>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                        <button
+                            type="button"
+                            onClick={() => fileInputRef.current?.click()}
+                            className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-zinc-700/80 bg-zinc-900 text-zinc-300 hover:text-zinc-100 hover:bg-zinc-800/70 transition-colors"
+                            title="Add files"
+                            aria-label="Add files"
+                        >
+                            <Paperclip className="w-3.5 h-3.5 text-zinc-400" />
+                        </button>
+
+                        {/* Figma MCP button */}
+                        <button
+                            ref={figmaButtonRef}
+                            type="button"
+                            onClick={() => setShowFigmaPanel((v) => !v)}
+                            className={`inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border transition-colors ${
+                                showFigmaPanel || figmaLinks.length > 0
+                                    ? 'border-purple-500/50 bg-purple-950/40 text-purple-300 hover:bg-purple-900/40'
+                                    : 'border-zinc-700/80 bg-zinc-900 text-zinc-300 hover:text-zinc-100 hover:bg-zinc-800/70'
+                            }`}
+                            title="Figma MCP"
+                            aria-label="Figma MCP"
+                            id="figma-mcp-button"
+                        >
+                            <Figma className="w-3.5 h-3.5" />
+                        </button>
+
+                        <FigmaPanel
+                            anchorRef={figmaButtonRef}
+                            isOpen={showFigmaPanel}
+                            onClose={() => setShowFigmaPanel(false)}
+                            figmaLinks={figmaLinks}
+                            onAddLink={handleAddFigmaLink}
+                            onRemoveLink={handleRemoveFigmaLink}
+                            manualFigmaLinks={manualFigmaLinks}
+                        />
+                    </div>
 
                     <div className="min-w-0 w-full flex justify-start overflow-hidden">
                         <div className="flex min-w-0 items-center gap-2 overflow-hidden">

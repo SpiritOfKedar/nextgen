@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { chatController } from '../controllers/chatController';
 import { sandboxController } from '../controllers/sandboxController';
 import { terminalController } from '../controllers/terminalController';
+import { figmaController } from '../controllers/figmaController';
 import { authMiddleware } from '../middlewares/authMiddleware';
 
 const router = Router();
@@ -33,6 +34,16 @@ router.get('/terminal/:threadId/session', authMiddleware, terminalController.get
 router.post('/terminal/:threadId/events', authMiddleware, terminalController.appendEvents);
 // @ts-ignore
 router.post('/terminal/:threadId/recovery-audits', authMiddleware, terminalController.appendRecoveryAudit);
+
+// Figma MCP design-context endpoints
+// @ts-ignore
+router.get('/figma/status', authMiddleware, figmaController.getStatus);
+// @ts-ignore
+router.post('/figma/inspect', authMiddleware, figmaController.inspect);
+// @ts-ignore
+router.post('/figma/connect', authMiddleware, figmaController.connect);
+// @ts-ignore
+router.delete('/figma/disconnect', authMiddleware, figmaController.disconnect);
 
 // Sandbox cache/snapshot architecture endpoints
 // @ts-ignore
