@@ -1,30 +1,30 @@
 import React from 'react';
 import { motion } from 'framer-motion';
-import { Sparkles, ChevronRight } from 'lucide-react';
 
 export const Hero: React.FC = () => {
     return (
-        <div className="flex flex-col items-center justify-center w-full max-w-4xl mx-auto text-center mt-20 md:mt-32">
-            {/* Top Pill */}
+        <div className="flex flex-col items-center justify-center w-full max-w-5xl mx-auto text-center mt-24 md:mt-32">
+            {/* Mono kicker */}
             <motion.div
-                initial={{ opacity: 0, y: -20 }}
+                initial={{ opacity: 0, y: -12 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ duration: 0.5 }}
-                className="inline-flex items-center gap-2 px-3 py-1.5 mb-8 text-xs font-medium text-zinc-300 bg-zinc-900/50 border border-zinc-800 rounded-full backdrop-blur-md hover:bg-zinc-800/50 transition-colors cursor-pointer"
+                className="inline-flex items-center gap-2 mb-8 font-mono text-[11px] tracking-[0.25em] uppercase text-neon"
             >
-                <Sparkles className="w-3 h-3 text-cyan-400" />
-                <span>Introducing Bolt V2</span>
-                <ChevronRight className="w-3 h-3 text-zinc-500" />
+                <span className="status-blink">◆</span>
+                <span>AI-powered no-code platform</span>
             </motion.div>
 
-            {/* Main Heading */}
+            {/* Main Heading — Neon-style two-tone */}
             <motion.h1
-                initial={{ opacity: 0, scale: 0.95 }}
+                initial={{ opacity: 0, scale: 0.97 }}
                 animate={{ opacity: 1, scale: 1 }}
                 transition={{ duration: 0.5, delay: 0.1 }}
-                className="text-6xl md:text-8xl font-bold tracking-tight text-white mb-6 font-outfit"
+                className="text-5xl md:text-7xl font-bold tracking-tight mb-6 font-outfit leading-[1.05]"
             >
-                What will you <span className="bg-gradient-to-r from-blue-400 via-cyan-400 to-teal-400 bg-clip-text text-transparent italic pr-2">build</span> today?
+                <span className="text-white">NextGen is the AI builder</span>
+                <br />
+                <span className="text-zinc-500">designed for apps and ideas.</span>
             </motion.h1>
 
             {/* Subtext */}
@@ -34,7 +34,8 @@ export const Hero: React.FC = () => {
                 transition={{ duration: 0.5, delay: 0.2 }}
                 className="text-lg text-zinc-400 mb-12 max-w-2xl"
             >
-                Create stunning apps & websites by chatting with AI.
+                Describe what you want. NextGen plans it, writes the code, and runs it
+                live in your browser — no setup, no code, no waiting.
             </motion.p>
         </div>
     );

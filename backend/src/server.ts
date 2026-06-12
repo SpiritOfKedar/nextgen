@@ -24,7 +24,7 @@ const main = async () => {
 
 main().catch((error) => {
     log.error('boot.server_failed', {
-        hint: 'Verify SUPABASE_DB_URL/SUPABASE_URL credentials and network reachability',
+        hint: 'Verify DATABASE_URL credentials and network reachability',
         ...errorFields(error),
     });
     process.exit(1);

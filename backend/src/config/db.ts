@@ -1,10 +1,8 @@
 import { Pool, PoolClient } from 'pg';
-import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { log, errorFields } from '../lib/logger';
 import { ensureRuntimeSchema } from './runtimeSchema';
 
 let pool: Pool | null = null;
-let supabase: SupabaseClient | null = null;
 const DEFAULT_DB_CONNECT_TIMEOUT_MS = 10_000;
 
 const parseTimeoutMs = (raw: string | undefined, fallbackMs: number): number => {
@@ -15,7 +13,7 @@ const parseTimeoutMs = (raw: string | undefined, fallbackMs: number): number => 
 
 const DB_CONNECT_TIMEOUT_MS = parseTimeoutMs(process.env.DB_CONNECT_TIMEOUT_MS, DEFAULT_DB_CONNECT_TIMEOUT_MS);
 
-/** Session statement_timeout (ms). Supabase defaults are tight; chat prep can include DDL-heavy first touches. */
+/** Session statement_timeout (ms). Chat prep can include DDL-heavy first touches. */
 const DB_STATEMENT_TIMEOUT_MS = parseTimeoutMs(process.env.DB_STATEMENT_TIMEOUT_MS, 120_000);
 
 const withTimeout = async <T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> => {
@@ -36,14 +34,14 @@ const withTimeout = async <T>(promise: Promise<T>, timeoutMs: number, label: str
 
 /**
  * Remove SSL-related query params from the URI. Newer `pg` / `pg-connection-string`
- * can treat `sslmode=require` like strict verification, which fails on Supabase with
+ * can treat `sslmode=require` like strict verification, which fails on some hosts with
  * "self-signed certificate in certificate chain". TLS is still enabled via the Pool
  * `ssl` option below.
  */
 const sanitizePgConnectionString = (connectionString: string): string => {
     try {
         const u = new URL(connectionString);
-        for (const key of ['sslmode', 'sslrootcert', 'sslcert', 'sslkey', 'sslcrl', 'uselibpqcompat']) {
+        for (const key of ['sslmode', 'sslrootcert', 'sslcert', 'sslkey', 'sslcrl', 'uselibpqcompat', 'channel_binding']) {
             u.searchParams.delete(key);
         }
         const out = u.toString();
@@ -53,6 +51,14 @@ const sanitizePgConnectionString = (connectionString: string): string => {
     }
 };
 
+const resolveDatabaseUrl = (): string => {
+    const url = process.env.DATABASE_URL ?? process.env.SUPABASE_DB_URL;
+    if (!url) {
+        throw new Error('DATABASE_URL must be set');
+    }
+    return url;
+};
+
 const createPgPool = (connectionString: string): Pool => {
     const nextPool = new Pool({
         connectionString: sanitizePgConnectionString(connectionString),
@@ -60,49 +66,16 @@ const createPgPool = (connectionString: string): Pool => {
         max: 10,
         idleTimeoutMillis: 30_000,
         connectionTimeoutMillis: DB_CONNECT_TIMEOUT_MS,
-        // Raise per-session timeout so snapshot + index creation at boot (and heavy reads) are less likely to cancel mid-flight.
-        options: `-c statement_timeout=${DB_STATEMENT_TIMEOUT_MS}`,
+    });
+    nextPool.on('connect', (client) => {
+        client.query(`SET statement_timeout = ${DB_STATEMENT_TIMEOUT_MS}`).catch((err) => {
+            log.warn('db.statement_timeout_set_failed', errorFields(err));
+        });
     });
     nextPool.on('error', (err) => {
         log.error('db.pg_pool_idle_client_error', errorFields(err));
     });
     return nextPool;
-};
-
-const isSupabasePoolerUrl = (connectionString: string): boolean => {
-    try {
-        return new URL(connectionString).hostname.endsWith('.pooler.supabase.com');
-    } catch {
-        return false;
-    }
-};
-
-const deriveDirectSupabaseDbUrl = (poolerConnectionString: string): string | null => {
-    try {
-        const supabaseUrl = process.env.SUPABASE_URL;
-        if (!supabaseUrl) return null;
-
-        const projectRef = new URL(supabaseUrl).hostname.split('.')[0];
-        if (!projectRef) return null;
-
-        const direct = new URL(poolerConnectionString);
-        if (!direct.hostname.endsWith('.pooler.supabase.com')) return null;
-
-        direct.hostname = `db.${projectRef}.supabase.co`;
-        direct.port = '5432';
-        direct.username = 'postgres';
-        if (!direct.pathname || direct.pathname === '/') {
-            direct.pathname = '/postgres';
-        }
-
-        return direct.toString();
-    } catch {
-        return null;
-    }
-};
-
-const isPoolerTenantError = (error: unknown): boolean => {
-    return error instanceof Error && /tenant or user not found/i.test(error.message);
 };
 
 const pingPool = async (targetPool: Pool): Promise<void> => {
@@ -122,75 +95,20 @@ const pingPool = async (targetPool: Pool): Promise<void> => {
     }
 };
 
-export const STORAGE_BUCKET = process.env.SUPABASE_STORAGE_BUCKET || 'code-files';
-
 export const getPool = (): Pool => {
     if (pool) return pool;
-    const connectionString = process.env.SUPABASE_DB_URL;
-    if (!connectionString) {
-        throw new Error('SUPABASE_DB_URL is not set');
-    }
-    pool = createPgPool(connectionString);
+    pool = createPgPool(resolveDatabaseUrl());
     return pool;
 };
 
-export const getSupabase = (): SupabaseClient => {
-    if (supabase) return supabase;
-    const url = process.env.SUPABASE_URL;
-    const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-    if (!url || !serviceKey) {
-        throw new Error('SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set');
-    }
-    supabase = createClient(url, serviceKey, {
-        auth: { persistSession: false, autoRefreshToken: false },
-    });
-    return supabase;
-};
-
 export const connectDB = async (): Promise<void> => {
-    const connectionString = process.env.SUPABASE_DB_URL;
-    let activePool = getPool();
+    const activePool = getPool();
 
-    try {
-        log.info('db.connect_start', { timeoutMs: DB_CONNECT_TIMEOUT_MS });
-        await pingPool(activePool);
-        log.info('db.postgres_connected', { mode: 'primary' });
-    } catch (error) {
-        const fallbackUrl = connectionString && isSupabasePoolerUrl(connectionString)
-            ? deriveDirectSupabaseDbUrl(connectionString)
-            : null;
-
-        if (!fallbackUrl || !isPoolerTenantError(error)) {
-            throw error;
-        }
-
-        log.warn('db.supabase_pooler_auth_failed_fallback', {
-            detail: 'Tenant or user not found — retrying with direct DB host',
-            ...errorFields(error),
-        });
-
-        try {
-            await activePool.end();
-        } catch {
-            // Ignore teardown errors and continue with fallback pool creation.
-        }
-
-        activePool = createPgPool(fallbackUrl);
-        pool = activePool;
-
-        try {
-            await pingPool(activePool);
-            log.info('db.postgres_connected', { mode: 'direct_host_fallback' });
-        } catch (fallbackError) {
-            pool = null;
-            throw fallbackError;
-        }
-    }
+    log.info('db.connect_start', { timeoutMs: DB_CONNECT_TIMEOUT_MS });
+    await pingPool(activePool);
+    log.info('db.postgres_connected');
 
     await ensureRuntimeSchema(getPool());
-
-    getSupabase();
-    log.info('db.supabase_storage_ready', { bucket: STORAGE_BUCKET });
 };
 
 export type Tx = PoolClient;

@@ -3,7 +3,7 @@
 End-to-end AI builder platform with:
 - a `frontend/` React + Vite client
 - a `backend/` Express + TypeScript API
-- Supabase Postgres + Storage persistence
+- Neon Postgres persistence (code blobs and sandbox snapshots stored inline)
 - Clerk auth
 - multi-provider LLM streaming (OpenAI, Anthropic, Gemini)
 - optional Figma MCP design-context import
@@ -70,7 +70,7 @@ High-value backend modules:
 - `backend/src/controllers/sandboxController.ts` – dependency plan/snapshot APIs
 - `backend/src/controllers/terminalController.ts` – terminal events + recovery audits
 - `backend/src/repositories/*` – thread/message/file/blob/session persistence
-- `backend/src/config/db.ts` – Postgres + Supabase client init/fallback behavior
+- `backend/src/config/db.ts` – Postgres pool init and transaction helpers
 
 ---
 
@@ -81,8 +81,7 @@ flowchart LR
   U[User] --> FE[Frontend React App]
   FE -->|Bearer token| BE[Backend API /api]
   BE --> CK[Clerk Auth]
-  BE --> DB[(Supabase Postgres)]
-  BE --> ST[(Supabase Storage)]
+  BE --> DB[(Neon Postgres)]
   BE --> AI1[OpenAI]
   BE --> AI2[Anthropic]
   BE --> AI3[Google Gemini]
@@ -268,12 +267,8 @@ FRONTEND_URL=http://localhost:5173
 CLERK_PUBLISHABLE_KEY=pk_test_...
 CLERK_SECRET_KEY=sk_test_...
 
-# Supabase
-SUPABASE_URL=https://<project-ref>.supabase.co
-SUPABASE_SERVICE_ROLE_KEY=<service-role-key>
-SUPABASE_DB_URL=postgresql://postgres.<project-ref>:<db-password>@<pooler-host>:6543/postgres?sslmode=require
-SUPABASE_STORAGE_BUCKET=code-files
-SUPABASE_SNAPSHOT_BUCKET=snapshots
+# Neon Postgres
+DATABASE_URL=postgresql://neondb_owner:<password>@<host>-pooler.<region>.aws.neon.tech/neondb?sslmode=require
 
 # Optional cache/ops
 UPSTASH_REDIS_REST_URL=
@@ -397,7 +392,7 @@ Current test target includes chat mode policy validation.
 
 ## Roadmap Ideas
 
-- Add database migration files and schema docs under `backend/migrations/`.
+- Baseline schema lives in `backend/migrations/001_baseline_schema.sql` (exported from production).
 - Add OpenAPI/Swagger spec for the full API.
 - Expand integration tests for streaming + sandbox snapshot lifecycle.
 - Add per-provider latency/error dashboards.

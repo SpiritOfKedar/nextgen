@@ -5,7 +5,7 @@ let applied = false;
 
 /**
  * Runs lightweight DDL once at boot. Previously this ran on the chat hot path
- * (first insert / first plan read) and could hit Supabase statement_timeout
+ * (first insert / first plan read) and could hit statement_timeout
  * while holding locks — especially under concurrent requests.
  */
 export const ensureRuntimeSchema = async (pool: Pool): Promise<void> => {
@@ -68,6 +68,14 @@ export const ensureRuntimeSchema = async (pool: Pool): Promise<void> => {
             role TEXT NOT NULL DEFAULT 'editor',
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             PRIMARY KEY (thread_id, user_id)
+        )
+    `);
+
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS public.sandbox_snapshots (
+            fingerprint TEXT PRIMARY KEY,
+            payload BYTEA NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
     `);
 

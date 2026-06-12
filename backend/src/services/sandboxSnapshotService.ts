@@ -1,60 +1,34 @@
-import { getSupabase } from '../config/db';
+import { getPool } from '../config/db';
 import { log } from '../lib/logger';
 
-const SNAPSHOT_BUCKET = process.env.SUPABASE_SNAPSHOT_BUCKET || 'snapshots';
-
 class SandboxSnapshotService {
-    constructor() {
-        if (!process.env.SUPABASE_SNAPSHOT_BUCKET) {
-            log.warn('sandbox.snapshot_bucket_env_defaulted', {
-                bucket: SNAPSHOT_BUCKET,
-            });
-        }
-    }
-
-    private snapshotPath(fingerprint: string): string {
-        return `${fingerprint}.tgz`;
-    }
-
     async getSnapshot(fingerprint: string): Promise<Buffer | null> {
-        const { data, error } = await getSupabase()
-            .storage
-            .from(SNAPSHOT_BUCKET)
-            .download(this.snapshotPath(fingerprint));
-        if (error || !data) {
-            log.warn('sandbox.snapshot_storage_download_failed', {
-                fingerprint,
-                bucket: SNAPSHOT_BUCKET,
-                detail: error?.message || 'empty_data',
-            });
+        const result = await getPool().query<{ payload: Buffer }>(
+            `SELECT payload FROM public.sandbox_snapshots WHERE fingerprint = $1`,
+            [fingerprint],
+        );
+        const row = result.rows[0];
+        if (!row) {
+            log.warn('sandbox.snapshot_download_miss', { fingerprint });
             return null;
         }
-        return Buffer.from(await data.arrayBuffer());
+        return row.payload;
     }
 
     async putSnapshot(fingerprint: string, payload: Buffer): Promise<void> {
-        const { error } = await getSupabase()
-            .storage
-            .from(SNAPSHOT_BUCKET)
-            .upload(this.snapshotPath(fingerprint), payload, {
-                contentType: 'application/gzip',
-                upsert: true,
-            });
-        if (error) {
-            log.warn('sandbox.snapshot_storage_upload_failed', {
-                fingerprint,
-                bucket: SNAPSHOT_BUCKET,
-                detail: error.message,
-            });
-            throw new Error(`Failed to upload dependency snapshot: ${error.message}`);
-        }
-        log.info('sandbox.snapshot_storage_uploaded', {
+        await getPool().query(
+            `INSERT INTO public.sandbox_snapshots (fingerprint, payload)
+             VALUES ($1, $2)
+             ON CONFLICT (fingerprint) DO UPDATE
+               SET payload = EXCLUDED.payload,
+                   created_at = NOW()`,
+            [fingerprint, payload],
+        );
+        log.info('sandbox.snapshot_uploaded', {
             fingerprint,
-            bucket: SNAPSHOT_BUCKET,
             bytes: payload.byteLength,
         });
     }
 }
 
 export const sandboxSnapshotService = new SandboxSnapshotService();
-

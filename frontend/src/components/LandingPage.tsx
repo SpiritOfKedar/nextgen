@@ -2,9 +2,12 @@ import React, { useEffect, useRef } from 'react';
 import { Navbar } from './Navbar';
 import { Hero } from './Hero';
 import { InputArea } from './Chat/InputArea';
-import { RecentThreads } from './Chat/RecentThreads';
 import { Footer } from './Footer';
 import { BackgroundGrid } from './Layout/BackgroundGrid';
+import { FeatureStrip } from './Landing/FeatureStrip';
+import { StatusTicker } from './Landing/StatusTicker';
+import { StatementSections } from './Landing/StatementSections';
+import { AgentSection } from './Landing/AgentSection';
 import { useSetAtom } from 'jotai';
 import { messagesAtom, currentThreadIdAtom, threadSwitchStateAtom } from '../store/atoms';
 import { fileSystemAtom, activeFileAtom } from '../store/fileSystem';
@@ -39,22 +42,32 @@ export const LandingPage: React.FC = () => {
     }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
     return (
-        <div className="min-h-screen bg-zinc-950 text-white selection:bg-cyan-500/30 font-sans relative overflow-y-auto">
-            <BackgroundGrid />
-            <div className="relative z-10">
-                <Navbar />
+        <div className="min-h-screen bg-zinc-950 text-white selection:bg-neon/30 font-sans relative">
+            <Navbar />
 
-                <main className="flex flex-col items-center justify-center pt-24 px-4 relative">
-                    <div className="z-10 w-full flex flex-col items-center gap-8">
+            {/* Hero zone with grid background */}
+            <div className="relative">
+                <BackgroundGrid />
+                <main className="relative z-10 flex flex-col items-center justify-center pt-28 px-4">
+                    <div className="w-full flex flex-col items-center gap-8">
                         <Hero />
                         <div className="relative z-10 w-full flex justify-center">
-                            <InputArea />
+                            <InputArea variant="mac" />
                         </div>
-                        <RecentThreads />
                     </div>
                 </main>
-                <Footer />
+
+                <div className="relative z-10">
+                    <FeatureStrip />
+                </div>
             </div>
+
+            {/* Marketing sections — solid black, Neon-style */}
+            <StatusTicker />
+            <StatementSections />
+            <StatusTicker />
+            <AgentSection />
+            <Footer />
         </div>
     );
 };

@@ -1179,7 +1179,7 @@ createRoot(document.getElementById('root')!).render(
                             console.warn('[SandboxDecision] indexeddb_quota_exceeded', { threadId, depFingerprint });
                         }
                         hasLocalDependencyCache = true;
-                        console.info('[SandboxDecision] supabase_snapshot_restored', { threadId, depFingerprint });
+                        console.info('[SandboxDecision] snapshot_restored', { threadId, depFingerprint });
                     } else {
                         console.warn('[SandboxDecision] remote_snapshot_restore_failed', { threadId, depFingerprint });
                     }
@@ -1187,7 +1187,7 @@ createRoot(document.getElementById('root')!).render(
                     console.warn('[SandboxDecision] remote_meta_hit_snapshot_404', { threadId, depFingerprint });
                 }
             } catch (error) {
-                console.warn('[SandboxDecision] supabase_snapshot_restore_failed', {
+                console.warn('[SandboxDecision] snapshot_restore_failed', {
                     threadId,
                     depFingerprint,
                     error: String(error),
@@ -1898,6 +1898,7 @@ createRoot(document.getElementById('root')!).render(
     }, [API_URL, getToken, isLoaded, isSignedIn, setActiveFile, setFileSystem, startThreadSandboxInBackground, webContainerInstance]);
 
     const loadThread = useCallback(async (threadId: string) => {
+        lastSyncedShellCwd = null;
         if (!threadId || typeof threadId !== 'string') {
             setThreadSwitchState({
                 status: 'error',

@@ -2,8 +2,11 @@
 
 @theme {
   --color-zinc-950: #09090b;
+  --color-neon: #00e599;
+  --color-neon-dim: #00b377;
   --font-sans: 'Inter', sans-serif;
   --font-outfit: 'Outfit', sans-serif;
+  --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
 }
 
 
@@ -18,6 +21,24 @@ body {
   background-color: var(--color-zinc-950);
   color: white;
   font-family: 'Inter', sans-serif;
+}
+
+/* Landing: scrolling status ticker */
+@keyframes ticker-scroll {
+  0% { transform: translateX(0); }
+  100% { transform: translateX(-50%); }
+}
+.landing-ticker {
+  animation: ticker-scroll 40s linear infinite;
+}
+
+/* Landing: soft pulse for status dots */
+@keyframes status-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+.status-blink {
+  animation: status-blink 2.2s ease-in-out infinite;
 }
 
 /* Custom scrollbar */

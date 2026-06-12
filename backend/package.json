@@ -7,7 +7,8 @@
     "dev": "nodemon src/server.ts",
     "build": "tsc",
     "start": "node dist/server.js",
-    "test": "npm run build && node --test tests/*.test.js"
+    "test": "npm run build && node --test tests/*.test.js",
+    "migrate:storage": "ts-node scripts/migrate-storage-to-postgres.ts"
   },
   "keywords": [],
   "author": "",
@@ -16,7 +17,6 @@
     "@anthropic-ai/sdk": "^0.73.0",
     "@clerk/clerk-sdk-node": "^4.13.23",
     "@google/generative-ai": "^0.24.1",
-    "@supabase/supabase-js": "^2.104.1",
     "cors": "^2.8.6",
     "dotenv": "^17.2.4",
     "express": "^5.2.1",

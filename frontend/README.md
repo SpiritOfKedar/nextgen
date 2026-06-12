@@ -50,6 +50,6 @@ Default preview URL is typically `http://localhost:4173`.
 
 - Frontend requires `VITE_CLERK_PUBLISHABLE_KEY`.
 - Frontend API target is controlled by `VITE_API_URL` (defaults to `http://localhost:3001/api`).
-- Backend DB startup depends on Supabase/Postgres env vars (`SUPABASE_DB_URL`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`).
+- Backend DB startup depends on Neon Postgres (`DATABASE_URL` in `backend/.env`).
 
 If backend terminal appears stuck during boot, check DB credentials/network and startup logs first.
