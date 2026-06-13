@@ -406,9 +406,8 @@ Current test target includes chat mode policy validation.
 - Ensure `Authorization: Bearer <token>` is reaching backend.
 
 ## Backend won’t start (DB errors)
-- Validate `SUPABASE_DB_URL`, `SUPABASE_URL`, and `SUPABASE_SERVICE_ROLE_KEY`.
+- Validate `DATABASE_URL` (Neon Postgres pooler URL from the Neon dashboard).
 - Confirm DB/network reachability from your machine.
-- If pooler auth has tenant/user mismatch, backend includes a direct-host fallback path.
 
 ## Frontend can’t call backend (CORS)
 - Confirm `FRONTEND_URL` matches actual frontend origin.
@@ -437,7 +436,6 @@ Current test target includes chat mode policy validation.
 
 ## Roadmap Ideas
 
-- Baseline schema lives in `backend/migrations/001_baseline_schema.sql` (exported from production).
 - Add OpenAPI/Swagger spec for the full API.
 - Expand integration tests for streaming + sandbox snapshot lifecycle.
 - Add per-provider latency/error dashboards.

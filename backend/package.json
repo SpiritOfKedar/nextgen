@@ -7,8 +7,7 @@
     "dev": "nodemon src/server.ts",
     "build": "tsc",
     "start": "node dist/server.js",
-    "test": "npm run build && node --test tests/*.test.js",
-    "migrate:storage": "ts-node scripts/migrate-storage-to-postgres.ts"
+    "test": "npm run build && node --test tests/*.test.js"
   },
   "keywords": [],
   "author": "",

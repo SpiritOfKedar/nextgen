@@ -32,8 +32,4 @@ build/
 
 # Backend Specific
 backend/src/generated/prisma
-backend/migrations/supabase_schema.sql
-backend/migrations/supabase_data.sql
-backend/migrations/pg_dump_err.txt
-backend/migrations/pg_data_err.txt
 coverage/
