@@ -1,6 +1,8 @@
 import { Pool, PoolClient } from 'pg';
 import { log, errorFields } from '../lib/logger';
 import { ensureRuntimeSchema } from './runtimeSchema';
+import { checkB2Connectivity } from '../services/b2StorageService';
+import { isB2Enabled } from './b2';
 
 let pool: Pool | null = null;
 const DEFAULT_DB_CONNECT_TIMEOUT_MS = 10_000;
@@ -109,6 +111,10 @@ export const connectDB = async (): Promise<void> => {
     log.info('db.postgres_connected');
 
     await ensureRuntimeSchema(getPool());
+
+    if (isB2Enabled()) {
+        void checkB2Connectivity();
+    }
 };
 
 export type Tx = PoolClient;

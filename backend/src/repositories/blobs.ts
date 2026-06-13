@@ -1,7 +1,9 @@
 import { createHash } from 'crypto';
 import { LRUCache } from 'lru-cache';
 import { getPool, Tx } from '../config/db';
+import { B2_BLOB_INLINE_MAX_BYTES, isB2Enabled } from '../config/b2';
 import { isRedisEnabled, redisGet, redisMGet, redisSet } from '../lib/redis';
+import { blobKey, getObject, putObject } from '../services/b2StorageService';
 import { CodeBlobRow } from './types';
 
 const q = (tx: Tx | undefined) => tx ?? getPool();
@@ -32,9 +34,12 @@ const cacheBlob = async (sha: string, content: string): Promise<void> => {
 export const sha256Hex = (content: string): string =>
     createHash('sha256').update(content, 'utf8').digest('hex');
 
+const shouldOffloadToB2 = (sizeBytes: number): boolean =>
+    isB2Enabled() && sizeBytes > B2_BLOB_INLINE_MAX_BYTES;
+
 /**
- * Idempotently store a file's content inline in code_blobs and return the sha256.
- * Safe under concurrent callers uploading the same content.
+ * Idempotently store a file's content and return the sha256.
+ * Large blobs go to B2; small blobs stay inline in Postgres.
  */
 export const putBlob = async (content: string, tx?: Tx): Promise<string> => {
     const sha = sha256Hex(content);
@@ -49,12 +54,23 @@ export const putBlob = async (content: string, tx?: Tx): Promise<string> => {
         return sha;
     }
 
-    await q(tx).query(
-        `INSERT INTO public.code_blobs (sha256, size_bytes, storage_path, mime_type, content)
-         VALUES ($1, $2, NULL, 'text/plain', $3)
-         ON CONFLICT (sha256) DO NOTHING`,
-        [sha, sizeBytes, content],
-    );
+    if (shouldOffloadToB2(sizeBytes)) {
+        const storagePath = blobKey(sha);
+        await putObject(storagePath, Buffer.from(content, 'utf8'), 'text/plain; charset=utf-8');
+        await q(tx).query(
+            `INSERT INTO public.code_blobs (sha256, size_bytes, storage_path, mime_type, content)
+             VALUES ($1, $2, $3, 'text/plain', NULL)
+             ON CONFLICT (sha256) DO NOTHING`,
+            [sha, sizeBytes, storagePath],
+        );
+    } else {
+        await q(tx).query(
+            `INSERT INTO public.code_blobs (sha256, size_bytes, storage_path, mime_type, content)
+             VALUES ($1, $2, NULL, 'text/plain', $3)
+             ON CONFLICT (sha256) DO NOTHING`,
+            [sha, sizeBytes, content],
+        );
+    }
 
     await cacheBlob(sha, content);
     return sha;
@@ -77,11 +93,21 @@ const materializeBlob = async (row: CodeBlobRow): Promise<string> => {
         await cacheBlob(sha, row.content);
         return row.content;
     }
-    throw new Error(`Blob ${sha} has no inline content`);
+
+    if (row.storage_path) {
+        const bytes = await getObject(row.storage_path);
+        if (bytes) {
+            const content = bytes.toString('utf8');
+            await cacheBlob(sha, content);
+            return content;
+        }
+    }
+
+    throw new Error(`Blob ${sha} has no inline content or B2 object`);
 };
 
 /**
- * Resolve a sha256 to its content: L1 LRU -> L2 Redis -> Postgres.
+ * Resolve a sha256 to its content: L1 LRU -> L2 Redis -> Postgres inline -> B2.
  */
 export const getBlob = async (sha: string, tx?: Tx): Promise<string> => {
     const cached = blobCache.get(sha);

@@ -111,6 +111,22 @@ export const ensureRuntimeSchema = async (pool: Pool): Promise<void> => {
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
     `);
+    await pool.query(`
+        ALTER TABLE public.sandbox_snapshots
+        ADD COLUMN IF NOT EXISTS storage_path TEXT NULL
+    `);
+    await pool.query(`
+        ALTER TABLE public.sandbox_snapshots
+        ADD COLUMN IF NOT EXISTS byte_size BIGINT NULL
+    `);
+    await pool.query(`
+        ALTER TABLE public.sandbox_snapshots
+        ALTER COLUMN payload DROP NOT NULL
+    `);
+    await pool.query(`
+        ALTER TABLE public.code_blobs
+        ADD COLUMN IF NOT EXISTS storage_path TEXT NULL
+    `);
 
     applied = true;
     log.info('db.runtime_schema_ready');
