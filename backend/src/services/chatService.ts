@@ -830,6 +830,32 @@ export class ChatService {
         }
     }
 
+    /**
+     * One-shot LLM completion stream for terminal recovery (no message persistence).
+     */
+    async streamRecoveryCompletion(
+        systemPrompt: string,
+        userContent: string,
+        model = 'gemini-2.5-flash',
+    ): Promise<AsyncGenerator<string>> {
+        const effectiveModel = resolveModelForMode(model, 'build');
+        const modelConfig = getModelConfig(effectiveModel);
+        const messages = [{ role: 'user', content: userContent }];
+        if (!modelConfig) {
+            return this.mockStream(`Unknown model: ${effectiveModel}`);
+        }
+        switch (modelConfig.provider) {
+            case 'openai':
+                return this.streamOpenAI(messages, [], 'build', modelConfig.apiModelId, systemPrompt);
+            case 'anthropic':
+                return this.streamAnthropic(messages, [], 'build', modelConfig.apiModelId, systemPrompt);
+            case 'google':
+                return this.streamGemini(messages, [], 'build', modelConfig.apiModelId, systemPrompt);
+            default:
+                return this.mockStream(`Unknown provider: ${modelConfig.provider}`);
+        }
+    }
+
     private async *mockStream(message: string): AsyncGenerator<string> {
         const responseText = `(Mock Response) ${message}`;
         for (const word of responseText.split(' ')) {

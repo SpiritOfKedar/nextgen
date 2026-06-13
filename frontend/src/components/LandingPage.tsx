@@ -46,10 +46,10 @@ export const LandingPage: React.FC = () => {
             <Navbar />
 
             {/* Hero zone with grid background */}
-            <div className="relative">
+            <div className="relative overflow-hidden pb-8">
                 <BackgroundGrid />
-                <main className="relative z-10 flex flex-col items-center justify-center pt-28 px-4">
-                    <div className="w-full flex flex-col items-center gap-8">
+                <main className="relative z-10 flex flex-col items-center justify-center pt-20 px-4 pb-6">
+                    <div className="w-full flex flex-col items-center gap-6">
                         <Hero />
                         <div className="relative z-10 w-full flex justify-center">
                             <InputArea variant="mac" />

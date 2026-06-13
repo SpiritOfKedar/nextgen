@@ -19,13 +19,19 @@ export const PreviewPanel: React.FC = () => {
             <div className="h-full w-full bg-zinc-950 flex flex-col items-center justify-center text-zinc-400">
                 <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-zinc-500 mb-3"></div>
                 <p className="mb-2">
-                    {previewStatus === 'booting' ? 'Booting WebContainer...'
-                        : previewStatus === 'error' ? 'Preview failed to start'
-                            : 'Waiting for dev server...'}
+                    {previewStatus === 'booting' ? 'Booting WebContainer…'
+                        : previewStatus === 'starting' ? 'Preparing preview…'
+                            : previewStatus === 'error' ? 'Preview failed to start'
+                                : 'Waiting for dev server…'}
                 </p>
                 <p className="text-xs text-zinc-600 text-center max-w-sm px-4">
-                    {previewStatusMessage || 'The preview will appear once `npm run dev` starts.'}
+                    {previewStatusMessage || 'The preview will appear once the dev server is live.'}
                 </p>
+                {previewStatus === 'error' && (
+                    <p className="text-xs text-amber-500/90 text-center max-w-sm px-4 mt-3">
+                        Open the Terminal tab and click Fix with agent to diagnose install or dev-server errors.
+                    </p>
+                )}
             </div>
         );
     }

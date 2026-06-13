@@ -13,6 +13,7 @@ import {
     terminalStatusByThreadAtom,
     terminalIssueByThreadAtom,
     writeShellOutput,
+    type TerminalIssue,
 } from '../store/webContainer';
 import { getWebContainerInstance } from './useWebContainer';
 import { fileSystemAtom, activeFileAtom } from '../store/fileSystem';
@@ -510,7 +511,7 @@ async function patchMissingDependencies(
 
     if (!pkg.dependencies) pkg.dependencies = {};
     for (const p of missingPackages) {
-        pkg.dependencies[p] = 'latest';
+        pkg.dependencies[p] = pinnedVersionForPackage(p);
     }
 
     const patchedPkg = JSON.stringify(pkg, null, 2);
@@ -577,8 +578,113 @@ const getCriticalConfigFingerprint = (fileMap: Map<string, string>): string => {
 const DEP_FINGERPRINT_MARKER_PATH = '/.boltly/dep-fingerprint';
 const SNAPSHOT_ARCHIVE_PATH = '/.boltly/dependency-snapshot.tgz';
 const SNAPSHOT_TOOLCHAIN_VERSION = 'webcontainer-npm-v1';
-const INSTALL_TIMEOUT_MS = 420_000;
+const VITE_REACT_BASE_FINGERPRINT = hashString(`${MINIMAL_ROOT_PACKAGE_JSON}\n---\n`);
+const INSTALL_FIRST_ATTEMPT_TIMEOUT_MS = 120_000;
+const INSTALL_RETRY_TIMEOUT_MS = 420_000;
 const MAX_INDEXEDDB_SNAPSHOT_BYTES = 120 * 1024 * 1024;
+
+const COMMON_PACKAGE_VERSIONS: Record<string, string> = {
+    'framer-motion': '^11.0.0',
+    'react-router-dom': '^6.28.0',
+    'date-fns': '^3.6.0',
+    uuid: '^10.0.0',
+    zod: '^3.23.0',
+    zustand: '^5.0.0',
+    '@tanstack/react-query': '^5.60.0',
+    axios: '^1.7.0',
+    'react-icons': '^5.3.0',
+    '@dnd-kit/core': '^6.1.0',
+    '@dnd-kit/sortable': '^8.0.0',
+    recharts: '^2.13.0',
+    sonner: '^1.7.0',
+};
+
+const pinnedVersionForPackage = (name: string): string =>
+    COMMON_PACKAGE_VERSIONS[name] ?? '^1.0.0';
+
+const parsePackageJsonDepNames = (content: string): Set<string> => {
+    try {
+        const pkg = JSON.parse(content);
+        return new Set([
+            ...Object.keys(pkg.dependencies || {}),
+            ...Object.keys(pkg.devDependencies || {}),
+        ]);
+    } catch {
+        return new Set();
+    }
+};
+
+const getAddedPackageNames = (basePkgContent: string, currentPkgContent: string): string[] => {
+    const base = parsePackageJsonDepNames(basePkgContent);
+    const current = parsePackageJsonDepNames(currentPkgContent);
+    return [...current].filter((name) => !base.has(name));
+};
+
+type InstallPlan = {
+    kind: 'ci' | 'install' | 'delta';
+    label: string;
+    program: string;
+    args: string[];
+    deltaPackages?: string[];
+};
+
+const buildInstallPlan = (fileMap: Map<string, string>, deltaPackages: string[]): InstallPlan => {
+    if (deltaPackages.length > 0) {
+        return {
+            kind: 'delta',
+            label: `npm install ${deltaPackages.length} new package${deltaPackages.length > 1 ? 's' : ''}`,
+            program: 'npm',
+            args: ['install', ...deltaPackages, '--no-audit', '--no-fund', '--legacy-peer-deps', '--prefer-offline'],
+            deltaPackages,
+        };
+    }
+    const hasLockfile = !!(fileMap.get('package-lock.json') || '').trim();
+    if (hasLockfile) {
+        return {
+            kind: 'ci',
+            label: 'npm ci',
+            program: 'npm',
+            args: ['ci', '--no-audit', '--no-fund', '--legacy-peer-deps', '--prefer-offline'],
+        };
+    }
+    return {
+        kind: 'install',
+        label: 'npm install',
+        program: 'npm',
+        args: ['install', '--no-audit', '--no-fund', '--legacy-peer-deps', '--prefer-offline'],
+    };
+};
+
+const attemptRestoreFingerprintSnapshot = async (
+    wc: any,
+    projectDir: string,
+    fingerprint: string,
+    authToken: string,
+    apiUrl: string,
+): Promise<boolean> => {
+    const indexedSnapshot = await loadDependencySnapshot(fingerprint);
+    if (indexedSnapshot.status === 'hit' && indexedSnapshot.record.toolchainVersion === SNAPSHOT_TOOLCHAIN_VERSION) {
+        const restored = await restoreNodeModulesSnapshot(
+            wc,
+            projectDir,
+            base64ToBytes(indexedSnapshot.record.archiveBase64),
+            indexedSnapshot.record.archiveFormat,
+        );
+        if (restored) return true;
+    }
+    try {
+        const snapshotRes = await fetch(`${apiUrl}/sandbox/snapshots/${encodeURIComponent(fingerprint)}`, {
+            headers: { Authorization: `Bearer ${authToken}` },
+        });
+        if (!snapshotRes.ok) return false;
+        const snapshotBytes = new Uint8Array(await snapshotRes.arrayBuffer());
+        const isZip = snapshotBytes.length > 1 && snapshotBytes[0] === 0x50 && snapshotBytes[1] === 0x4b;
+        const format: 'tar.gz' | 'zip' = isZip ? 'zip' : 'tar.gz';
+        return restoreNodeModulesSnapshot(wc, projectDir, snapshotBytes, format);
+    } catch {
+        return false;
+    }
+};
 
 const readInstalledDependencyFingerprint = async (wc: any): Promise<string | null> => {
     try {
@@ -755,6 +861,35 @@ const restoreNodeModulesSnapshot = async (
     }
 };
 
+const flattenFileSystem = (items: FileSystemItem[], prefix = ''): { filePath: string; content: string }[] => {
+    const out: { filePath: string; content: string }[] = [];
+    for (const item of items) {
+        const path = prefix ? `${prefix}/${item.name}` : item.name;
+        if (item.type === 'file') {
+            out.push({ filePath: path, content: item.content });
+        } else {
+            out.push(...flattenFileSystem(item.children, path));
+        }
+    }
+    return out;
+};
+
+const selectRecoveryFiles = (files: { filePath: string; content: string }[]): { filePath: string; content: string }[] => {
+    const priority = ['package.json', 'package-lock.json', 'vite.config.ts', 'vite.config.js', 'tsconfig.json', 'index.html'];
+    const picked = new Map<string, { filePath: string; content: string }>();
+    for (const p of priority) {
+        const match = files.find((f) => f.filePath === p);
+        if (match) picked.set(p, match);
+    }
+    for (const f of files) {
+        if (picked.size >= 12) break;
+        if (f.filePath.startsWith('src/') && /\.(tsx?|jsx?)$/.test(f.filePath)) {
+            picked.set(f.filePath, f);
+        }
+    }
+    return [...picked.values()];
+};
+
 export const useChat = () => {
     const { getToken, isLoaded, isSignedIn } = useAuth();
     const [messages, setMessages] = useAtom(messagesAtom);
@@ -777,6 +912,7 @@ export const useChat = () => {
     const setRecoveryAuditsByThread = useSetAtom(recoveryAuditsByThreadAtom);
     const setTerminalStatusByThread = useSetAtom(terminalStatusByThreadAtom);
     const setTerminalIssueByThread = useSetAtom(terminalIssueByThreadAtom);
+    const fileSystem = useAtomValue(fileSystemAtom);
 
     const [isLoading, setIsLoading] = useState(false);
     type ThreadVersionItem = {
@@ -839,54 +975,164 @@ export const useChat = () => {
     }, [API_URL, setRecoveryAuditsByThread, setTerminalIssueByThread, setTerminalSessionByThread]);
 
     const runTerminalRecovery = useCallback(async (
-        input: { threadId: string; triggerSource: 'manual' | 'auto' },
+        input: {
+            threadId: string;
+            triggerSource: 'manual' | 'auto';
+            terminalOutput?: string;
+            issue?: TerminalIssue | null;
+        },
     ) => {
-        const { threadId, triggerSource } = input;
+        const { threadId, triggerSource, terminalOutput = '', issue = null } = input;
         if (!threadId || !isLoaded || !isSignedIn) return;
         const token = await getToken();
         if (!token) return;
         const meta = threadRuntimeMeta.get(threadId);
         const cwd = meta?.projectDir || '/';
-        const issueCode = 'auto_recovery';
-        const plannedCommands = [
-            `cd "${cwd}"`,
-            'npm install --legacy-peer-deps --prefer-offline',
-            'npm run dev',
-        ];
-        const executedCommands: string[] = [];
+        const issueCode = issue?.code || 'auto_recovery';
         const wc = webContainerInstance ?? getWebContainerInstance();
         if (!wc) return;
 
         setTerminalStatusByThread((prev) => ({ ...prev, [threadId]: 'running' }));
+        writeShellOutput('\r\n\x1b[36m⬢ Agent analyzing terminal output…\x1b[0m\r\n');
+        setPreviewStatus('starting');
+        setPreviewStatusMessage('Agent is fixing terminal and project files…');
+
+        const recoveryFiles = selectRecoveryFiles(flattenFileSystem(fileSystem));
+        const plannedCommands: string[] = [];
+        const executedCommands: string[] = [];
         let status: 'resolved' | 'failed' = 'failed';
         let detail = '';
-        for (const command of plannedCommands) {
-            executedCommands.push(command);
-            try {
-                const [program, ...args] = command.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) || [command];
-                const normalizedArgs = args.map((a) => a.replace(/^["']|["']$/g, ''));
-                const proc = await wc.spawn(program, normalizedArgs, { cwd, env: { FORCE_COLOR: '1' } });
-                proc.output.pipeTo(new WritableStream({ write(data) { writeShellOutput(data); } }));
-                const exitCode = await proc.exit;
-                await appendTerminalEvents(threadId, token, [
-                    { eventType: 'command', payload: command, cwd },
-                    { eventType: 'status', payload: `exit:${exitCode}`, cwd, exitCode },
-                ]);
-                if (exitCode !== 0) {
-                    detail = `${command} failed with exit ${exitCode}`;
+
+        try {
+            const response = await fetch(`${API_URL}/terminal/${encodeURIComponent(threadId)}/recover`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    Authorization: `Bearer ${token}`,
+                },
+                body: JSON.stringify({
+                    terminalOutput,
+                    issueCode,
+                    issueMessage: issue?.message,
+                    suggestedCommands: issue?.suggestedCommands ?? [],
+                    projectDir: cwd,
+                    model: selectedModel,
+                    files: recoveryFiles,
+                }),
+            });
+
+            if (!response.ok) {
+                const errText = await response.text().catch(() => '');
+                throw new Error(`Recovery API failed (${response.status}): ${errText || response.statusText}`);
+            }
+
+            const reader = response.body?.getReader();
+            if (!reader) throw new Error('Recovery stream unavailable');
+
+            const decoder = new TextDecoder();
+            const parser = new BoltParser();
+            const pendingShellCommands: string[] = [];
+            const writtenFiles = new Map<string, string>();
+            const fsWriteChain = { current: Promise.resolve() };
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                const chunk = decoder.decode(value);
+                const actions = parser.parse(chunk);
+                for (const action of actions) {
+                    if (action.type === 'file' && action.filePath) {
+                        const path = action.filePath;
+                        const fileContent = action.content;
+                        queueBoltFileWrite(fsWriteChain, wc, path, fileContent);
+                        writtenFiles.set(path.replace(/^\//, ''), fileContent);
+                        setFileSystem((prev) => upsertFile(prev, path, fileContent));
+                        const fileName = path.split('/').pop()!;
+                        setActiveFile({ path: path.replace(/^\//, ''), name: fileName, content: fileContent });
+                    }
+                    if (action.type === 'shell') {
+                        pendingShellCommands.push(action.content.trim());
+                    }
+                }
+            }
+
+            const remaining = parser.parse('');
+            for (const action of remaining) {
+                if (action.type === 'file' && action.filePath) {
+                    const path = action.filePath;
+                    const fileContent = action.content;
+                    queueBoltFileWrite(fsWriteChain, wc, path, fileContent);
+                    writtenFiles.set(path.replace(/^\//, ''), fileContent);
+                    setFileSystem((prev) => upsertFile(prev, path, fileContent));
+                }
+                if (action.type === 'shell') {
+                    pendingShellCommands.push(action.content.trim());
+                }
+            }
+
+            await fsWriteChain.current;
+
+            const shellQueue = normalizeShellCommandQueue(pendingShellCommands);
+            if (shellQueue.length === 0 && writtenFiles.size === 0) {
+                throw new Error('Agent returned no file or shell fixes');
+            }
+
+            for (const command of shellQueue) {
+                plannedCommands.push(command);
+                executedCommands.push(command);
+                try {
+                    const tokens = command.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) || [command];
+                    const program = tokens[0] ?? command;
+                    const args = tokens.slice(1).map((a) => a.replace(/^["']|["']$/g, ''));
+                    const proc = await wc.spawn(program, args, { cwd, env: { FORCE_COLOR: '1' } });
+                    proc.output.pipeTo(new WritableStream({ write(data) { writeShellOutput(data); } }));
+                    const isLongRunning = /^npm\s+run\s+dev\b/i.test(command);
+                    let exitCode = 0;
+                    if (isLongRunning) {
+                        activeDevProcess = proc;
+                        activeDevServerFingerprint = meta?.depFingerprint ?? null;
+                        status = 'resolved';
+                        writeShellOutput('\r\n\x1b[32m✓ Dev server restarted by recovery agent\x1b[0m\r\n');
+                        break;
+                    }
+                    const timeoutMs = /^npm\s+(install|i|ci)\b/i.test(command)
+                        ? INSTALL_FIRST_ATTEMPT_TIMEOUT_MS
+                        : 120_000;
+                    exitCode = await runProcessAndCollectExit(proc, timeoutMs);
+                    await appendTerminalEvents(threadId, token, [
+                        { eventType: 'command', payload: command, cwd },
+                        { eventType: 'status', payload: `exit:${exitCode}`, cwd, exitCode },
+                    ]);
+                    if (exitCode !== 0) {
+                        detail = `${command} failed with exit ${exitCode}`;
+                        status = 'failed';
+                        break;
+                    }
+                    status = 'resolved';
+                } catch (error) {
+                    detail = error instanceof Error ? error.message : String(error);
                     status = 'failed';
                     break;
                 }
-                if (command.includes('npm run dev')) status = 'resolved';
-            } catch (error) {
-                detail = error instanceof Error ? error.message : String(error);
-                status = 'failed';
-                break;
             }
+
+            if (status === 'resolved' && writtenFiles.size > 0 && shellQueue.every((c) => !/^npm\s+run\s+dev\b/i.test(c))) {
+                writeShellOutput('\r\n\x1b[32m✓ Agent applied file fixes\x1b[0m\r\n');
+            }
+        } catch (error) {
+            detail = error instanceof Error ? error.message : String(error);
+            status = 'failed';
+            writeShellOutput(`\r\n\x1b[31m✗ Recovery failed: ${detail}\x1b[0m\r\n`);
+            setPreviewStatus('error');
+            setPreviewStatusMessage(detail);
         }
 
         setTerminalStatusByThread((prev) => ({ ...prev, [threadId]: status === 'resolved' ? 'idle' : 'error' }));
         setTerminalIssueByThread((prev) => ({ ...prev, [threadId]: status === 'resolved' ? null : prev[threadId] ?? null }));
+        if (status === 'resolved') {
+            setPreviewStatus('starting');
+            setPreviewStatusMessage('Recovery applied. Waiting for dev server…');
+        }
 
         await fetch(`${API_URL}/terminal/${encodeURIComponent(threadId)}/recovery-audits`, {
             method: 'POST',
@@ -910,10 +1156,16 @@ export const useChat = () => {
     }, [
         API_URL,
         appendTerminalEvents,
+        fileSystem,
         getToken,
         isLoaded,
         isSignedIn,
         refreshTerminalSession,
+        selectedModel,
+        setActiveFile,
+        setFileSystem,
+        setPreviewStatus,
+        setPreviewStatusMessage,
         setTerminalIssueByThread,
         setTerminalStatusByThread,
         webContainerInstance,
@@ -1194,6 +1446,42 @@ createRoot(document.getElementById('root')!).render(
                 });
             }
         }
+
+        let deltaPackages: string[] = [];
+        if (!hasLocalDependencyCache) {
+            const baseRestored = await attemptRestoreFingerprintSnapshot(
+                wc,
+                projectDir,
+                VITE_REACT_BASE_FINGERPRINT,
+                authToken,
+                API_URL,
+            );
+            if (baseRestored) {
+                if (depFingerprint === VITE_REACT_BASE_FINGERPRINT) {
+                    await persistInstalledDependencyFingerprint(wc, depFingerprint);
+                    hasLocalDependencyCache = true;
+                    setPreviewStatus('starting');
+                    setPreviewStatusMessage('Restoring cached dependencies…');
+                    console.info('[SandboxDecision] base_snapshot_exact_hit', { threadId, depFingerprint });
+                } else {
+                    deltaPackages = getAddedPackageNames(
+                        MINIMAL_ROOT_PACKAGE_JSON,
+                        fileMap.get('package.json') || '',
+                    );
+                    setPreviewStatus('starting');
+                    setPreviewStatusMessage(
+                        deltaPackages.length > 0
+                            ? `Restoring base stack, then installing ${deltaPackages.length} new package${deltaPackages.length > 1 ? 's' : ''}…`
+                            : 'Restoring base stack cache…',
+                    );
+                    console.info('[SandboxDecision] base_snapshot_restored', { threadId, depFingerprint, deltaPackages });
+                }
+            }
+        } else {
+            setPreviewStatus('starting');
+            setPreviewStatusMessage('Restoring cached dependencies…');
+        }
+
         if (abortIfStale('after_snapshot_restore_checks')) return;
 
         // Incremental sync: delete only files known in mounted project but absent now.
@@ -1262,43 +1550,56 @@ createRoot(document.getElementById('root')!).render(
             if (abortIfStale('before_install_gate')) return;
             if (shouldInstall) {
                 await repairRootForNpm(wc, true);
+                const installPlan = buildInstallPlan(fileMap, deltaPackages);
+                const installLabel = installPlan.label;
                 setPreviewStatus('starting');
-                setPreviewStatusMessage('Installing dependencies (fingerprint changed)...');
-                writeShellOutput('\r\n\x1b[36m⬢ Installing dependencies...\x1b[0m\r\n');
+                setPreviewStatusMessage(
+                    installPlan.kind === 'delta'
+                        ? `Installing ${installPlan.deltaPackages?.length ?? 0} new packages…`
+                        : installPlan.kind === 'ci'
+                            ? 'Installing dependencies from lockfile…'
+                            : 'Installing dependencies…',
+                );
+                writeShellOutput(`\r\n\x1b[36m⬢ ${installLabel}...\x1b[0m\r\n`);
                 let installExit = 0;
                 let attempts = 0;
                 while (attempts < 2) {
                     attempts += 1;
+                    const timeoutMs = attempts === 1 ? INSTALL_FIRST_ATTEMPT_TIMEOUT_MS : INSTALL_RETRY_TIMEOUT_MS;
+                    const cmdPayload = `${installPlan.program} ${installPlan.args.join(' ')}`;
                     await appendTerminalEvents(threadId, authToken, [
-                        { eventType: 'command', payload: 'npm install --no-audit --no-fund --legacy-peer-deps --prefer-offline', cwd: projectDir },
+                        { eventType: 'command', payload: cmdPayload, cwd: projectDir },
                     ]);
                     const installProc = await wc.spawn(
-                        'npm',
-                        ['install', '--no-audit', '--no-fund', '--legacy-peer-deps', '--prefer-offline'],
+                        installPlan.program,
+                        installPlan.args,
                         { env: { FORCE_COLOR: '1' }, cwd: projectDir },
                     );
                     console.info('[SandboxDecision] npm_spawn', {
                         threadId,
-                        command: 'npm install',
+                        command: installLabel,
+                        kind: installPlan.kind,
                         cwd: projectDir,
                         packageJsonPath: projectDirResolution.packageJsonPath,
                     });
                     installProc.output.pipeTo(new WritableStream({
                         write(data) { writeShellOutput(data); }
                     }));
-                    installExit = await runProcessAndCollectExit(installProc, INSTALL_TIMEOUT_MS);
+                    installExit = await runProcessAndCollectExit(installProc, timeoutMs);
                     await appendTerminalEvents(threadId, authToken, [
-                        { eventType: 'status', payload: `npm install exit ${installExit}`, cwd: projectDir, exitCode: installExit },
+                        { eventType: 'status', payload: `${installLabel} exit ${installExit}`, cwd: projectDir, exitCode: installExit },
                     ]);
                     if (installExit === 0) break;
                     if (attempts < 2) {
-                        writeShellOutput('\r\n\x1b[33m⚠ Install failed once, retrying...\x1b[0m\r\n');
+                        writeShellOutput('\r\n\x1b[33m⚠ Install failed once, retrying with extended timeout...\x1b[0m\r\n');
                         console.warn('[SandboxDecision] install_retry', { threadId, depFingerprint, installExit, attempts });
                     }
                 }
 
                 if (installExit !== 0) {
-                    const msg = installExit === -1 ? `npm install timed out (${INSTALL_TIMEOUT_MS / 1000}s)` : `npm install failed (exit ${installExit})`;
+                    const msg = installExit === -1
+                        ? `${installLabel} timed out. Open Terminal and click Fix with agent.`
+                        : `${installLabel} failed (exit ${installExit}). Open Terminal and click Fix with agent.`;
                     setPreviewStatus('error');
                     setPreviewStatusMessage(msg);
                     writeShellOutput(`\r\n\x1b[31m✗ ${msg}\x1b[0m\r\n`);
@@ -1372,7 +1673,7 @@ createRoot(document.getElementById('root')!).render(
                 }
             } else {
                 setPreviewStatus('starting');
-                setPreviewStatusMessage('Reusing installed dependencies from cache...');
+                setPreviewStatusMessage('Dependencies ready. Starting dev server…');
             }
 
             if (shouldRestartServer) {
@@ -1381,7 +1682,7 @@ createRoot(document.getElementById('root')!).render(
                     try { await activeDevProcess.kill(); } catch { /* ignore */ }
                 }
                 setPreviewStatus('starting');
-                setPreviewStatusMessage('Starting development server...');
+                setPreviewStatusMessage('Starting development server…');
                 writeShellOutput('\r\n\x1b[36m⬢ Starting dev server...\x1b[0m\r\n');
                 const devProc = await wc.spawn('npm', ['run', 'dev'], {
                     env: { FORCE_COLOR: '1' },
@@ -1474,14 +1775,21 @@ createRoot(document.getElementById('root')!).render(
         }
     }, [API_URL, appendTerminalEvents, setFileSystem, setPreviewStatus, setPreviewStatusMessage, setSandboxRuntimeMetadata, shellWriter]);
 
+    type SendMessageResult = { ok: true } | { ok: false; error: string };
+
     const sendMessage = async (
         content: string,
         attachments: ChatAttachmentPayload[] = [],
         figmaLinks: FigmaLinkPayload[] = [],
-    ) => {
-        if (!content.trim() || !isLoaded || !isSignedIn) {
-            console.warn('[useChat] sendMessage blocked:', { hasContent: !!content.trim(), isLoaded, isSignedIn });
-            return;
+    ): Promise<SendMessageResult> => {
+        if (!content.trim()) {
+            return { ok: false, error: 'Enter a prompt describing what you want to build.' };
+        }
+        if (!isLoaded) {
+            return { ok: false, error: 'Still loading — try again in a moment.' };
+        }
+        if (!isSignedIn) {
+            return { ok: false, error: 'Sign in to start building.' };
         }
 
         console.log('[useChat] sendMessage called:', { content: content.substring(0, 50), model: selectedModel });
@@ -1502,7 +1810,7 @@ createRoot(document.getElementById('root')!).render(
             const token = await getToken();
             if (!token) {
                 console.error('[useChat] Failed to get token. Aborting send.');
-                return;
+                return { ok: false, error: 'Could not get auth token. Try signing in again.' };
             }
             console.log('[useChat] Sending to API...', { threadId: localStorage.getItem('currentThreadId'), model: selectedModel });
             const response = await fetch(`${API_URL}/chat`, {
@@ -1539,7 +1847,9 @@ createRoot(document.getElementById('root')!).render(
             // Handle Streaming Response
             const reader = response.body?.getReader();
             const decoder = new TextDecoder();
-            if (!reader) return;
+            if (!reader) {
+                return { ok: false, error: 'Server returned an empty response.' };
+            }
 
             const assistantMessageId = Date.now() + 1 + '';
             let accumulatedContent = '';
@@ -1730,9 +2040,9 @@ createRoot(document.getElementById('root')!).render(
                 }
             }
 
+            return { ok: true };
         } catch (error) {
             console.error('Chat Error:', error);
-            // Show error as an assistant message so the user knows what happened
             const errorMsg = error instanceof Error ? error.message : 'Something went wrong';
             setMessages((prev) => [
                 ...prev,
@@ -1743,6 +2053,7 @@ createRoot(document.getElementById('root')!).render(
                     timestamp: Date.now(),
                 },
             ]);
+            return { ok: false, error: errorMsg };
         } finally {
             setIsLoading(false);
         }

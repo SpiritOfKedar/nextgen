@@ -1,5 +1,7 @@
 import { Request, Response } from 'express';
 import * as terminalRepo from '../repositories/terminalSessions';
+import { terminalRecoveryService } from '../services/terminalRecoveryService';
+import { ThreadAccessError } from '../services/chatService';
 import { log, errorFields } from '../lib/logger';
 
 export const terminalController = {
@@ -84,6 +86,63 @@ export const terminalController = {
         ...errorFields(error),
       });
       return res.status(500).json({ error: 'Failed to append recovery audit' });
+    }
+  },
+
+  async recover(req: Request, res: Response) {
+    try {
+      if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+      const threadId = Array.isArray(req.params.threadId) ? req.params.threadId[0] : req.params.threadId;
+      if (!threadId) return res.status(400).json({ error: 'threadId is required' });
+
+      const terminalOutput = typeof req.body?.terminalOutput === 'string' ? req.body.terminalOutput : '';
+      const issueCode = typeof req.body?.issueCode === 'string' ? req.body.issueCode : 'unknown';
+      const issueMessage = typeof req.body?.issueMessage === 'string' ? req.body.issueMessage : undefined;
+      const projectDir = typeof req.body?.projectDir === 'string' ? req.body.projectDir : '/';
+      const model = typeof req.body?.model === 'string' ? req.body.model : undefined;
+      const suggestedCommands = Array.isArray(req.body?.suggestedCommands)
+        ? req.body.suggestedCommands.filter((c: unknown) => typeof c === 'string')
+        : [];
+      const files = Array.isArray(req.body?.files)
+        ? req.body.files
+            .filter((f: any) => f && typeof f.filePath === 'string' && typeof f.content === 'string')
+            .slice(0, 12)
+            .map((f: any) => ({ filePath: f.filePath, content: f.content.slice(0, 8_000) }))
+        : [];
+
+      const stream = await terminalRecoveryService.generateRecoveryStream({
+        threadId,
+        userId: req.user.id,
+        terminalOutput,
+        issueCode,
+        issueMessage,
+        suggestedCommands,
+        projectDir,
+        model,
+        files,
+      });
+
+      res.setHeader('Content-Type', 'text/plain');
+      res.setHeader('Transfer-Encoding', 'chunked');
+
+      for await (const chunk of stream) {
+        res.write(chunk);
+      }
+      res.end();
+    } catch (error) {
+      log.error('terminal.recover_failed', {
+        requestId: req.requestId,
+        internalUserId: req.user?.id,
+        threadId: req.params.threadId,
+        ...errorFields(error),
+      });
+      if (!res.headersSent) {
+        if (error instanceof ThreadAccessError) {
+          return res.status(404).json({ error: error.message });
+        }
+        return res.status(500).json({ error: error instanceof Error ? error.message : 'Recovery failed' });
+      }
+      res.end();
     }
   },
 };

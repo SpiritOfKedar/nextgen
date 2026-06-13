@@ -51,6 +51,7 @@ export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default' }) => 
     const setMessages = useSetAtom(messagesAtom);
     const setCurrentThreadId = useSetAtom(currentThreadIdAtom);
     const [historyError, setHistoryError] = useState<string | null>(null);
+    const [submitError, setSubmitError] = useState<string | null>(null);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
     const figmaButtonRef = useRef<HTMLButtonElement>(null);
@@ -268,15 +269,35 @@ export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default' }) => 
 
     const handleSendMessage = async () => {
         if ((!inputValue.trim() && attachedFiles.length === 0) || isLoading) return;
+
+        if (!isLoaded) {
+            setSubmitError('Still loading — try again in a moment.');
+            return;
+        }
+        if (!isSignedIn) {
+            setSubmitError('Sign in to start building.');
+            return;
+        }
+
+        setSubmitError(null);
         const content = inputValue.trim() || 'Use attached file(s) as context.';
+        const savedInput = inputValue;
+        const savedFiles = attachedFiles;
+        const savedFigmaLinks = manualFigmaLinks;
         const attachments = await buildOutgoingAttachments(attachedFiles);
         setInputValue('');
         setAttachedFiles([]);
         setManualFigmaLinks([]);
         setShowFigmaPanel(false);
         if (fileInputRef.current) fileInputRef.current.value = '';
-        if (textareaRef.current) textareaRef.current.style.height = 'auto'; // Reset height
-        await sendMessage(content, attachments, figmaLinks);
+        if (textareaRef.current) textareaRef.current.style.height = 'auto';
+        const result = await sendMessage(content, attachments, figmaLinks);
+        if (!result.ok) {
+            setInputValue(savedInput);
+            setAttachedFiles(savedFiles);
+            setManualFigmaLinks(savedFigmaLinks);
+            setSubmitError(result.error);
+        }
     };
 
     const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -337,7 +358,7 @@ export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default' }) => 
     return (
         <div className={`w-full mx-auto px-3 sm:px-4 ${isMac ? 'max-w-5xl' : 'max-w-4xl'}`}>
             <motion.div
-                className={`${shellClass} ${isMac ? 'min-h-[480px]' : ''}`}
+                className={`${shellClass} ${isMac ? 'h-[min(480px,70vh)] max-h-[70vh]' : ''}`}
                 initial={{ y: 20, opacity: 0 }}
                 animate={{ y: 0, opacity: 1 }}
                 transition={{ delay: 0.1, duration: 0.4 }}
@@ -352,9 +373,9 @@ export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default' }) => 
                 )}
 
                 {isMac ? (
-                    <div className="flex flex-1 min-h-0 min-h-[360px]">
+                    <div className="flex flex-1 min-h-0 overflow-hidden">
                         {/* History sidebar */}
-                        <aside className="w-52 shrink-0 flex flex-col border-r border-black/50 bg-[#1a1a1c]">
+                        <aside className="w-52 shrink-0 flex flex-col min-h-0 overflow-hidden border-r border-black/50 bg-[#1a1a1c]">
                             <div className="flex items-center justify-between px-3 py-2.5 border-b border-black/40">
                                 <span className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
                                     History
@@ -369,7 +390,7 @@ export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default' }) => 
                                     New
                                 </button>
                             </div>
-                            <div className="flex-1 overflow-y-auto custom-scrollbar py-1">
+                            <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar py-1">
                                 {!isLoaded ? (
                                     <p className="px-3 py-4 text-xs text-zinc-600">Loading…</p>
                                 ) : !isSignedIn ? (
@@ -435,7 +456,10 @@ export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default' }) => 
                                 className={`${textareaClass} flex-1`}
                                 placeholder="Describe your app idea..."
                                 value={inputValue}
-                                onChange={(e) => setInputValue(e.target.value)}
+                                onChange={(e) => {
+                                    setInputValue(e.target.value);
+                                    if (submitError) setSubmitError(null);
+                                }}
                                 onKeyDown={handleKeyDown}
                                 onPaste={handlePaste}
                             />
@@ -495,7 +519,10 @@ export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default' }) => 
                         className={textareaClass}
                         placeholder="Describe your app idea..."
                         value={inputValue}
-                        onChange={(e) => setInputValue(e.target.value)}
+                        onChange={(e) => {
+                            setInputValue(e.target.value);
+                            if (submitError) setSubmitError(null);
+                        }}
                         onKeyDown={handleKeyDown}
                         onPaste={handlePaste}
                         style={{ overflow: 'hidden' }}
@@ -678,6 +705,22 @@ export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default' }) => 
                         <ArrowRight className="w-3 h-3 shrink-0" />
                     </button>
                 </div>
+
+                {submitError && (
+                    <div className="px-3 py-2 border-t border-red-500/20 bg-red-950/30 text-xs text-red-300 flex items-start justify-between gap-2">
+                        <span>{submitError}</span>
+                        {!isSignedIn && isLoaded && (
+                            <SignInButton mode="modal">
+                                <button
+                                    type="button"
+                                    className="shrink-0 rounded px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide bg-white/10 text-zinc-100 hover:bg-white/15 transition-colors"
+                                >
+                                    Sign in
+                                </button>
+                            </SignInButton>
+                        )}
+                    </div>
+                )}
             </motion.div>
 
             {!isMac && (

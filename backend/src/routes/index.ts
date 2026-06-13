@@ -35,6 +35,8 @@ router.get('/terminal/:threadId/session', authMiddleware, terminalController.get
 router.post('/terminal/:threadId/events', authMiddleware, terminalController.appendEvents);
 // @ts-ignore
 router.post('/terminal/:threadId/recovery-audits', authMiddleware, terminalController.appendRecoveryAudit);
+// @ts-ignore
+router.post('/terminal/:threadId/recover', authMiddleware, terminalController.recover);
 
 // Figma MCP design-context endpoints
 // @ts-ignore

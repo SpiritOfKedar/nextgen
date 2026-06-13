@@ -17,8 +17,21 @@ const main = async () => {
         log.info('boot.orphan_streaming_aborted', { count: aborted });
     }
 
-    app.listen(PORT, () => {
+    const server = app.listen(PORT, () => {
         log.info('boot.server_listening', { port: PORT });
+    });
+
+    server.on('error', (error: NodeJS.ErrnoException) => {
+        if (error.code === 'EADDRINUSE') {
+            log.error('boot.port_in_use', {
+                port: PORT,
+                hint: `Port ${PORT} is already in use. Set PORT in backend/.env to a free port and update VITE_API_URL in frontend/.env.`,
+                ...errorFields(error),
+            });
+        } else {
+            log.error('boot.server_listen_failed', errorFields(error));
+        }
+        process.exit(1);
     });
 };
 

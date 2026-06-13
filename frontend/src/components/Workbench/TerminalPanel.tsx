@@ -189,15 +189,34 @@ export const TerminalPanel: React.FC = () => {
         };
     }, [currentThreadId, setTerminalIssueByThread, setTerminalStatusByThread]); // eslint-disable-line react-hooks/exhaustive-deps
     const issue = useAtomValue(terminalIssueByThreadAtom)[currentThreadId || ''];
+    const terminalStatus = useAtomValue(terminalStatusByThreadAtom)[currentThreadId || ''];
     const latestAudit = useAtomValue(recoveryAuditsByThreadAtom)[currentThreadId || '']?.[0];
+    const isRecovering = terminalStatus === 'running';
+
+    const invokeRecovery = (triggerSource: 'manual' | 'auto') => {
+        if (!currentThreadId || isRecovering) return;
+        void runTerminalRecovery({
+            threadId: currentThreadId,
+            triggerSource,
+            terminalOutput: outputBufferRef.current.slice(-12000),
+            issue,
+        });
+    };
+
     return (
         <div className="relative h-full w-full bg-zinc-950 p-1 overflow-hidden">
-            {issue && currentThreadId && (
+            {isRecovering && (
+                <div className="mx-1 mb-1 rounded border border-blue-700/50 bg-blue-900/20 px-2 py-1 text-xs text-blue-200">
+                    Agent is analyzing terminal output and applying fixes…
+                </div>
+            )}
+            {issue && currentThreadId && !isRecovering && (
                 <div className="mx-1 mb-1 flex items-center justify-between rounded border border-amber-700/50 bg-amber-900/20 px-2 py-1 text-xs text-amber-200">
                     <span>{issue.message}</span>
                     <button
-                        className="rounded border border-amber-600/60 px-2 py-0.5 hover:bg-amber-800/30"
-                        onClick={() => void runTerminalRecovery({ threadId: currentThreadId, triggerSource: 'auto' })}
+                        className="rounded border border-amber-600/60 px-2 py-0.5 hover:bg-amber-800/30 disabled:opacity-50"
+                        disabled={isRecovering}
+                        onClick={() => invokeRecovery('auto')}
                     >
                         Fix with agent
                     </button>
@@ -212,10 +231,11 @@ export const TerminalPanel: React.FC = () => {
             {currentThreadId && (
                 <div className="absolute bottom-3 right-3">
                     <button
-                        className="rounded border border-zinc-700 bg-zinc-900/80 px-2 py-1 text-[11px] text-zinc-300 hover:text-white"
-                        onClick={() => void runTerminalRecovery({ threadId: currentThreadId, triggerSource: 'manual' })}
+                        className="rounded border border-zinc-700 bg-zinc-900/80 px-2 py-1 text-[11px] text-zinc-300 hover:text-white disabled:opacity-50"
+                        disabled={isRecovering}
+                        onClick={() => invokeRecovery('manual')}
                     >
-                        Run recovery
+                        {isRecovering ? 'Recovering…' : 'Run recovery'}
                     </button>
                 </div>
             )}
