@@ -933,6 +933,11 @@ export const useChat = () => {
     type FigmaLinkPayload = {
         url: string;
     };
+    type StitchContextPayload = {
+        projectId?: string;
+        prompt?: string;
+        screenId?: string;
+    };
 
 
     const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001/api';
@@ -1781,6 +1786,7 @@ createRoot(document.getElementById('root')!).render(
         content: string,
         attachments: ChatAttachmentPayload[] = [],
         figmaLinks: FigmaLinkPayload[] = [],
+        stitchContext: StitchContextPayload | null = null,
     ): Promise<SendMessageResult> => {
         if (!content.trim()) {
             return { ok: false, error: 'Enter a prompt describing what you want to build.' };
@@ -1794,13 +1800,18 @@ createRoot(document.getElementById('root')!).render(
 
         console.log('[useChat] sendMessage called:', { content: content.substring(0, 50), model: selectedModel });
 
+        const stitchSuffix = stitchContext ? '\n[Stitch context attached]' : '';
+        const figmaSuffix = figmaLinks.length > 0
+            ? `\n[Figma context: ${figmaLinks.length} link${figmaLinks.length > 1 ? 's' : ''}]`
+            : '';
+
         // Optimistic UI update
         const userMessage = {
             id: Date.now().toString(),
             role: 'user' as const,
             content: attachments.length > 0
-                ? `[Mode: ${chatMode === 'plan' ? 'Plan' : 'Build'}]\n${content}\n\n[Attached ${attachments.length} file${attachments.length > 1 ? 's' : ''}]${figmaLinks.length > 0 ? `\n[Figma context: ${figmaLinks.length} link${figmaLinks.length > 1 ? 's' : ''}]` : ''}`
-                : `[Mode: ${chatMode === 'plan' ? 'Plan' : 'Build'}]\n${content}${figmaLinks.length > 0 ? `\n\n[Figma context: ${figmaLinks.length} link${figmaLinks.length > 1 ? 's' : ''}]` : ''}`,
+                ? `[Mode: ${chatMode === 'plan' ? 'Plan' : 'Build'}]\n${content}\n\n[Attached ${attachments.length} file${attachments.length > 1 ? 's' : ''}]${figmaSuffix}${stitchSuffix}`
+                : `[Mode: ${chatMode === 'plan' ? 'Plan' : 'Build'}]\n${content}${figmaSuffix || stitchSuffix ? `\n\n${figmaSuffix}${stitchSuffix}` : ''}`,
             timestamp: Date.now(),
         };
         setMessages((prev) => [...prev, userMessage]);
@@ -1826,6 +1837,7 @@ createRoot(document.getElementById('root')!).render(
                     mode: chatMode,
                     attachments,
                     figmaLinks,
+                    stitchContext: stitchContext || undefined,
                 }),
             });
 

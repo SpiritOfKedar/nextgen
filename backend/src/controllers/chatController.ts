@@ -7,7 +7,7 @@ const VALID_MODES = new Set(['plan', 'build']);
 
 export const chatController = {
     async sendMessage(req: Request, res: Response) {
-        const { message, threadId, model, attachments, mode, figmaLinks } = req.body;
+        const { message, threadId, model, attachments, mode, figmaLinks, stitchContext } = req.body;
         const conversationMode = VALID_MODES.has(mode) ? mode : 'build';
 
         if (!message) {
@@ -19,6 +19,13 @@ export const chatController = {
                 return res.status(401).json({ error: 'Unauthorized' });
             }
             const userId = req.user.id;
+            const stitchInput = stitchContext && typeof stitchContext === 'object'
+                ? {
+                    projectId: typeof stitchContext.projectId === 'string' ? stitchContext.projectId : undefined,
+                    prompt: typeof stitchContext.prompt === 'string' ? stitchContext.prompt : undefined,
+                    screenId: typeof stitchContext.screenId === 'string' ? stitchContext.screenId : undefined,
+                }
+                : null;
             const { stream, threadId: newThreadId } = await chatService.generateResponse(
                 message,
                 threadId,
@@ -27,6 +34,7 @@ export const chatController = {
                 conversationMode,
                 Array.isArray(attachments) ? attachments : [],
                 Array.isArray(figmaLinks) ? figmaLinks : [],
+                stitchInput,
                 { requestId: req.requestId, internalUserId: userId },
             );
 

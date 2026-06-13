@@ -94,21 +94,21 @@ export const sandboxController = {
         }
     },
 
-    getTemplateSnapshot(req: Request, res: Response) {
+    async getTemplateSnapshot(req: Request, res: Response) {
         const templateId = Array.isArray(req.params.templateId) ? req.params.templateId[0] : req.params.templateId;
         if (!templateId) return res.status(400).json({ error: 'templateId is required' });
-        const snapshot = sandboxCacheService.getTemplateSnapshot(templateId);
+        const snapshot = await sandboxCacheService.getTemplateSnapshot(templateId);
         if (!snapshot) return res.status(404).json({ error: 'Template snapshot not found' });
         return res.json(snapshot);
     },
 
-    putTemplateSnapshot(req: Request, res: Response) {
+    async putTemplateSnapshot(req: Request, res: Response) {
         const templateId = Array.isArray(req.params.templateId) ? req.params.templateId[0] : req.params.templateId;
         if (!templateId) return res.status(400).json({ error: 'templateId is required' });
         const fingerprint = typeof req.body?.fingerprint === 'string' ? req.body.fingerprint : '';
         if (!fingerprint) return res.status(400).json({ error: 'fingerprint is required' });
         const metadata = typeof req.body?.metadata === 'object' && req.body.metadata ? req.body.metadata : undefined;
-        const snapshot = sandboxCacheService.putTemplateSnapshot({
+        const snapshot = await sandboxCacheService.putTemplateSnapshot({
             templateId,
             fingerprint,
             metadata,

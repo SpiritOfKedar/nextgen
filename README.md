@@ -7,6 +7,8 @@ End-to-end AI builder platform with:
 - Clerk auth
 - multi-provider LLM streaming (OpenAI, Anthropic, Gemini)
 - optional Figma MCP design-context import
+- optional Google Stitch MCP design-context import (API key)
+- push project files to GitHub (PAT, create or existing repo)
 - WebContainer sandbox boot/install/snapshot reuse
 
 This README is the single source of truth for architecture, data flow, setup, and operations.
@@ -70,6 +72,7 @@ High-value backend modules:
 - `backend/src/controllers/sandboxController.ts` – dependency plan/snapshot APIs
 - `backend/src/controllers/terminalController.ts` – terminal events + recovery audits
 - `backend/src/repositories/*` – thread/message/file/blob/session persistence
+- `backend/src/lib/redis.ts` – shared Upstash Redis client (blob L2 cache, sandbox + MCP context)
 - `backend/src/config/db.ts` – Postgres pool init and transaction helpers
 
 ---
@@ -211,6 +214,19 @@ Base URL (local): `http://localhost:3001/api`
 - `GET /figma/status` – report backend Figma MCP enablement/config state
 - `POST /figma/inspect` – fetch read-only design context for a Figma file/frame/layer URL
 
+### Google Stitch MCP
+- `GET /stitch/status` – MCP enabled + user connected
+- `POST /stitch/connect` – `{ apiKey, defaultProjectId? }`
+- `DELETE /stitch/disconnect` – remove user connection
+- `POST /stitch/inspect` – preview Stitch design context
+
+### GitHub Push
+- `GET /github/status` – connected + GitHub login
+- `POST /github/connect` – `{ accessToken }` (PAT with repo scope)
+- `DELETE /github/disconnect` – remove stored token
+- `GET /github/link/:threadId` – last pushed repo for thread
+- `POST /github/push` – push WebContainer project files to GitHub
+
 ### Terminal
 - `GET /terminal/:threadId/session`
 - `POST /terminal/:threadId/events`
@@ -270,7 +286,8 @@ CLERK_SECRET_KEY=sk_test_...
 # Neon Postgres
 DATABASE_URL=postgresql://neondb_owner:<password>@<host>-pooler.<region>.aws.neon.tech/neondb?sslmode=require
 
-# Optional cache/ops
+# Optional cache/ops (Upstash Redis)
+# Used for: code blob L2 cache, sandbox dependency/template metadata, Figma/Stitch MCP context (15m TTL)
 UPSTASH_REDIS_REST_URL=
 UPSTASH_REDIS_REST_TOKEN=
 SANDBOX_TOOLCHAIN_VERSION=webcontainer-npm-v1
@@ -287,6 +304,12 @@ FIGMA_MCP_URL=https://mcp.figma.com/mcp
 FIGMA_MCP_ACCESS_TOKEN=
 FIGMA_MCP_HEADERS_JSON=
 FIGMA_MCP_TIMEOUT_MS=45000
+
+# Optional Google Stitch MCP design context (per-user API key via UI; env key is fallback)
+STITCH_MCP_ENABLED=false
+STITCH_MCP_URL=https://stitch.googleapis.com/mcp
+STITCH_MCP_API_KEY=
+STITCH_MCP_TIMEOUT_MS=45000
 
 # Optional logging
 LOG_LEVEL=info
@@ -321,6 +344,28 @@ npm run dev
 
 Frontend default URL:
 - `http://localhost:5173`
+
+---
+
+## Integrations
+
+### Google Stitch MCP
+
+1. Obtain a Stitch API key from Google Stitch.
+2. In the chat input toolbar, click the Stitch button and connect your API key (optionally set a default project ID).
+3. Attach context (project ID, prompt, and/or screen ID) before sending a message.
+4. The backend resolves design context via `https://stitch.googleapis.com/mcp` and injects it into the system prompt.
+
+Optional server fallback env vars: `STITCH_MCP_ENABLED`, `STITCH_MCP_API_KEY`, `STITCH_MCP_URL`.
+
+### GitHub Push
+
+1. Create a GitHub Personal Access Token with `repo` scope.
+2. In the workbench file tree, click **GitHub** and connect your token (stored server-side only).
+3. Choose **Create new repo** or **Push to existing**, set branch and commit message, then push.
+4. Files are collected from the WebContainer (same paths as zip download; excludes `node_modules`, `.boltly`, `.git`).
+
+The last pushed repo per thread is remembered via `thread_github_links`.
 
 ---
 

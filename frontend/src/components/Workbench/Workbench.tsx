@@ -1,6 +1,6 @@
 
 import React, { useState } from 'react';
-import { Terminal, Code, Play, History } from 'lucide-react';
+import { Terminal, Code, Play, History, Download, Github } from 'lucide-react';
 import { EditorPanel } from './EditorPanel';
 import { TerminalPanel } from './TerminalPanel';
 import { FileTree } from './FileTree';
@@ -10,7 +10,10 @@ import { useWebContainer } from '../../hooks/useWebContainer';
 import { PreviewPanel } from './PreviewPanel';
 import { useAtomValue } from 'jotai';
 import { currentThreadIdAtom } from '../../store/atoms';
+import { webContainerAtom } from '../../store/webContainer';
 import { VersionHistoryModal } from './VersionHistoryModal';
+import { PushToGitHubModal } from './PushToGitHubModal';
+import { downloadProjectFromWebContainer } from '../../lib/projectDownload';
 
 interface TabButtonProps {
     active: boolean;
@@ -22,8 +25,28 @@ interface TabButtonProps {
 export const Workbench: React.FC = () => {
     const [activeTab, setActiveTab] = useState<'code' | 'preview' | 'terminal'>('code');
     const [isVersionModalOpen, setIsVersionModalOpen] = useState(false);
+    const [showGitHubModal, setShowGitHubModal] = useState(false);
+    const [isDownloading, setIsDownloading] = useState(false);
     const { isLoading, error } = useWebContainer(); // Init WebContainer on mount
     const currentThreadId = useAtomValue(currentThreadIdAtom);
+    const webContainer = useAtomValue(webContainerAtom);
+
+    const handleDownload = async () => {
+        if (!webContainer) {
+            window.alert('WebContainer is not ready yet.');
+            return;
+        }
+        setIsDownloading(true);
+        try {
+            const count = await downloadProjectFromWebContainer(webContainer, { fileNamePrefix: 'project' });
+            window.alert(`Downloaded ${count} file${count === 1 ? '' : 's'} as zip.`);
+        } catch (err) {
+            const message = err instanceof Error ? err.message : 'Failed to download project zip.';
+            window.alert(message);
+        } finally {
+            setIsDownloading(false);
+        }
+    };
 
     if (error) {
         return (
@@ -75,7 +98,28 @@ export const Workbench: React.FC = () => {
                     />
                 </div>
 
-                <div className="absolute right-3 top-1/2 -translate-y-1/2">
+                <div className="absolute right-3 top-1/2 -translate-y-1/2 flex items-center gap-1.5">
+                    <button
+                        type="button"
+                        onClick={() => setShowGitHubModal(true)}
+                        disabled={!currentThreadId}
+                        className="inline-flex h-7 w-7 items-center justify-center rounded-md text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors disabled:cursor-not-allowed disabled:opacity-40"
+                        title={currentThreadId ? 'Push to GitHub' : 'Start a thread to push to GitHub'}
+                        aria-label="Push to GitHub"
+                    >
+                        <Github className="h-3.5 w-3.5" />
+                    </button>
+                    <button
+                        type="button"
+                        onClick={handleDownload}
+                        disabled={isDownloading || !webContainer}
+                        className="inline-flex h-7 w-7 items-center justify-center rounded-md text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors disabled:cursor-not-allowed disabled:opacity-40"
+                        title="Download project as zip"
+                        aria-label="Download project"
+                    >
+                        <Download className="h-3.5 w-3.5" />
+                    </button>
+                    <div className="mx-0.5 h-4 w-px bg-zinc-800" aria-hidden />
                     <button
                         type="button"
                         onClick={() => setIsVersionModalOpen(true)}
@@ -95,6 +139,8 @@ export const Workbench: React.FC = () => {
                 {activeTab === 'preview' && <PreviewPanel />}
                 {activeTab === 'terminal' && <TerminalPanel />}
             </div>
+
+            <PushToGitHubModal isOpen={showGitHubModal} onClose={() => setShowGitHubModal(false)} />
 
             {currentThreadId && (
                 <VersionHistoryModal

@@ -1,3 +1,5 @@
+import { isRedisEnabled, redisGet, redisSet } from '../lib/redis';
+
 export type SnapshotState = 'available' | 'upload_pending' | 'upload_failed';
 
 export type DependencyCacheRecord = {
@@ -20,54 +22,22 @@ type TemplateSnapshotRecord = {
 };
 
 class SandboxCacheService {
-    private readonly templateSnapshots = new Map<string, TemplateSnapshotRecord>();
-    private readonly redisUrl = (process.env.UPSTASH_REDIS_REST_URL || '').replace(/\/$/, '');
-    private readonly redisToken = process.env.UPSTASH_REDIS_REST_TOKEN || '';
+    /** In-process fallback when Redis is unavailable. */
+    private readonly templateSnapshotsLocal = new Map<string, TemplateSnapshotRecord>();
     private readonly depTtlSeconds = 7 * 24 * 60 * 60;
+    private readonly templateTtlSeconds = 30 * 24 * 60 * 60;
     private readonly defaultToolchainVersion = process.env.SANDBOX_TOOLCHAIN_VERSION || 'webcontainer-npm-v1';
-
-    constructor() {
-        if (!this.redisEnabled) {
-            console.warn('[SandboxCache] Upstash Redis credentials missing; dependency metadata cache disabled.');
-        }
-    }
-
-    private get redisEnabled(): boolean {
-        return !!this.redisUrl && !!this.redisToken;
-    }
 
     private getDepKey(fingerprint: string): string {
         return `sandbox:dep:${fingerprint}`;
     }
 
-    private async redisGet(key: string): Promise<string | null> {
-        if (!this.redisEnabled) return null;
-        const res = await fetch(`${this.redisUrl}/get/${encodeURIComponent(key)}`, {
-            method: 'GET',
-            headers: {
-                Authorization: `Bearer ${this.redisToken}`,
-            },
-        });
-        if (!res.ok) return null;
-        const data = await res.json() as { result: string | null };
-        return data.result ?? null;
-    }
-
-    private async redisSetWithTtl(key: string, value: string, ttlSeconds: number): Promise<void> {
-        if (!this.redisEnabled) return;
-        await fetch(
-            `${this.redisUrl}/set/${encodeURIComponent(key)}/${encodeURIComponent(value)}?EX=${ttlSeconds}`,
-            {
-                method: 'POST',
-                headers: {
-                    Authorization: `Bearer ${this.redisToken}`,
-                },
-            },
-        );
+    private getTemplateKey(templateId: string): string {
+        return `sandbox:template:${templateId}`;
     }
 
     async getDependencyPlan(fingerprint: string): Promise<DependencyCacheRecord | null> {
-        const raw = await this.redisGet(this.getDepKey(fingerprint));
+        const raw = await redisGet(this.getDepKey(fingerprint));
         if (!raw) return null;
         try {
             return JSON.parse(raw) as DependencyCacheRecord;
@@ -96,7 +66,7 @@ class SandboxCacheService {
             lockfileSha: input.lockfileSha,
             notes: input.notes,
         };
-        await this.redisSetWithTtl(this.getDepKey(input.fingerprint), JSON.stringify(record), this.depTtlSeconds);
+        await redisSet(this.getDepKey(input.fingerprint), JSON.stringify(record), this.depTtlSeconds);
         return record;
     }
 
@@ -118,17 +88,30 @@ class SandboxCacheService {
         });
     }
 
-    getTemplateSnapshot(templateId: string): TemplateSnapshotRecord | null {
-        return this.templateSnapshots.get(templateId) ?? null;
+    async getTemplateSnapshot(templateId: string): Promise<TemplateSnapshotRecord | null> {
+        const raw = await redisGet(this.getTemplateKey(templateId));
+        if (raw) {
+            try {
+                return JSON.parse(raw) as TemplateSnapshotRecord;
+            } catch {
+                // fall through to local
+            }
+        }
+        return this.templateSnapshotsLocal.get(templateId) ?? null;
     }
 
-    putTemplateSnapshot(input: Omit<TemplateSnapshotRecord, 'createdAt'>): TemplateSnapshotRecord {
+    async putTemplateSnapshot(input: Omit<TemplateSnapshotRecord, 'createdAt'>): Promise<TemplateSnapshotRecord> {
         const record: TemplateSnapshotRecord = {
             ...input,
             createdAt: new Date().toISOString(),
         };
-        this.templateSnapshots.set(input.templateId, record);
+        await redisSet(this.getTemplateKey(input.templateId), JSON.stringify(record), this.templateTtlSeconds);
+        this.templateSnapshotsLocal.set(input.templateId, record);
         return record;
+    }
+
+    getStatus(): { redisEnabled: boolean } {
+        return { redisEnabled: isRedisEnabled() };
     }
 }
 

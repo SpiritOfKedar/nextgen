@@ -1,5 +1,6 @@
 import { figmaMcpClient, FigmaMcpTool, FigmaMcpConfig } from './figmaMcpClient';
 import { log, errorFields } from '../lib/logger';
+import { getCachedJson, setCachedJson } from '../lib/cacheJson';
 
 export interface ParsedFigmaLink {
     url: string;
@@ -30,6 +31,8 @@ type ResolveOptions = {
 const MAX_FIGMA_LINKS = 3;
 const MAX_TOOL_TEXT_CHARS = 18_000;
 const MAX_TOTAL_CONTEXT_CHARS = 48_000;
+const FIGMA_CONTEXT_CACHE_TTL = 15 * 60;
+const FIGMA_CACHE_NS = 'mcp:figma';
 
 const PREFERRED_READ_TOOLS = [
     'get_metadata',
@@ -192,6 +195,14 @@ class FigmaDesignContextService {
         const contexts: FigmaDesignContext[] = [];
 
         for (const link of links) {
+            const cacheKeyParts = [options.userId || 'anon', link.url, link.nodeId || ''];
+            const cached = await getCachedJson<FigmaDesignContext>(FIGMA_CACHE_NS, cacheKeyParts);
+            if (cached) {
+                contexts.push(cached);
+                remainingBudget -= cached.toolContexts.reduce((n, t) => n + t.text.length, 0);
+                continue;
+            }
+
             const toolContexts: FigmaToolContext[] = [];
             const warnings: string[] = [];
 
@@ -219,12 +230,16 @@ class FigmaDesignContextService {
                 }
             }
 
-            contexts.push({
+            const resolved: FigmaDesignContext = {
                 ...link,
                 fetchedAt: new Date().toISOString(),
                 toolContexts,
                 warnings,
-            });
+            };
+            if (toolContexts.length > 0) {
+                await setCachedJson(FIGMA_CACHE_NS, cacheKeyParts, resolved, FIGMA_CONTEXT_CACHE_TTL);
+            }
+            contexts.push(resolved);
         }
 
         log.info('figma.context_resolved', {

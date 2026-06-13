@@ -3,6 +3,8 @@ import { chatController } from '../controllers/chatController';
 import { sandboxController } from '../controllers/sandboxController';
 import { terminalController } from '../controllers/terminalController';
 import { figmaController } from '../controllers/figmaController';
+import { stitchController } from '../controllers/stitchController';
+import { githubController } from '../controllers/githubController';
 import * as collaboratorsController from '../controllers/collaboratorsController';
 import { authMiddleware } from '../middlewares/authMiddleware';
 
@@ -47,6 +49,28 @@ router.post('/figma/inspect', authMiddleware, figmaController.inspect);
 router.post('/figma/connect', authMiddleware, figmaController.connect);
 // @ts-ignore
 router.delete('/figma/disconnect', authMiddleware, figmaController.disconnect);
+
+// Google Stitch MCP endpoints
+// @ts-ignore
+router.get('/stitch/status', authMiddleware, stitchController.getStatus);
+// @ts-ignore
+router.post('/stitch/connect', authMiddleware, stitchController.connect);
+// @ts-ignore
+router.delete('/stitch/disconnect', authMiddleware, stitchController.disconnect);
+// @ts-ignore
+router.post('/stitch/inspect', authMiddleware, stitchController.inspect);
+
+// GitHub push endpoints
+// @ts-ignore
+router.get('/github/status', authMiddleware, githubController.getStatus);
+// @ts-ignore
+router.post('/github/connect', authMiddleware, githubController.connect);
+// @ts-ignore
+router.delete('/github/disconnect', authMiddleware, githubController.disconnect);
+// @ts-ignore
+router.get('/github/link/:threadId', authMiddleware, githubController.getThreadLink);
+// @ts-ignore
+router.post('/github/push', authMiddleware, githubController.push);
 
 // Sandbox cache/snapshot architecture endpoints
 // @ts-ignore

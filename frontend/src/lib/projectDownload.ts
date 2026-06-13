@@ -1,8 +1,13 @@
 import JSZip from 'jszip';
 
-const EXCLUDED_ROOT_ENTRIES = new Set(['node_modules', '.boltly', '.git']);
+export const EXCLUDED_ROOT_ENTRIES = new Set(['node_modules', '.boltly', '.git']);
 
-const normalizeForZip = (value: string): string => {
+export type ProjectFileEntry = {
+  path: string;
+  content: string;
+};
+
+const normalizePath = (value: string): string => {
   const trimmed = value.trim();
   if (!trimmed || trimmed === '/') return '';
   return trimmed.replace(/^\/+/, '').replace(/\/+/g, '/');
@@ -32,6 +37,43 @@ const isDirectory = async (wc: any, path: string): Promise<boolean> => {
   }
 };
 
+const collectDirectoryFiles = async (
+  wc: any,
+  absoluteDirPath: string,
+  relativePath: string,
+  out: ProjectFileEntry[],
+): Promise<void> => {
+  const entries = await readDirectoryEntries(wc, absoluteDirPath);
+
+  for (const entry of entries) {
+    if (!relativePath && EXCLUDED_ROOT_ENTRIES.has(entry)) continue;
+
+    const childAbsPath = absoluteDirPath === '/' ? `/${entry}` : `${absoluteDirPath}/${entry}`;
+    const childRelPath = normalizePath(relativePath ? `${relativePath}/${entry}` : entry);
+    if (!childRelPath) continue;
+
+    if (await isDirectory(wc, childAbsPath)) {
+      await collectDirectoryFiles(wc, childAbsPath, childRelPath, out);
+      continue;
+    }
+
+    try {
+      const raw = await wc.fs.readFile(childAbsPath);
+      const content = typeof raw === 'string' ? raw : new TextDecoder().decode(raw);
+      out.push({ path: childRelPath, content });
+    } catch {
+      // Ignore unreadable file and continue.
+    }
+  }
+};
+
+export const collectProjectFilesFromWebContainer = async (wc: any): Promise<ProjectFileEntry[]> => {
+  if (!wc) throw new Error('WebContainer is not ready yet.');
+  const files: ProjectFileEntry[] = [];
+  await collectDirectoryFiles(wc, '/', '', files);
+  return files;
+};
+
 const addDirectoryToZip = async (
   wc: any,
   zip: JSZip,
@@ -45,7 +87,7 @@ const addDirectoryToZip = async (
     if (!zipRelativePath && EXCLUDED_ROOT_ENTRIES.has(entry)) continue;
 
     const childAbsPath = absoluteDirPath === '/' ? `/${entry}` : `${absoluteDirPath}/${entry}`;
-    const childZipPath = normalizeForZip(zipRelativePath ? `${zipRelativePath}/${entry}` : entry);
+    const childZipPath = normalizePath(zipRelativePath ? `${zipRelativePath}/${entry}` : entry);
     if (!childZipPath) continue;
 
     if (await isDirectory(wc, childAbsPath)) {
@@ -67,12 +109,14 @@ const addDirectoryToZip = async (
 };
 
 export const downloadProjectFromWebContainer = async (wc: any, options: DownloadProjectOptions = {}): Promise<number> => {
-  if (!wc) throw new Error('WebContainer is not ready yet.');
+  const files = await collectProjectFilesFromWebContainer(wc);
+  if (files.length === 0) {
+    throw new Error('No project files found to download.');
+  }
 
   const zip = new JSZip();
-  const fileCount = await addDirectoryToZip(wc, zip, '/', '');
-  if (fileCount === 0) {
-    throw new Error('No project files found to download.');
+  for (const file of files) {
+    zip.file(file.path, file.content);
   }
 
   const blob = await zip.generateAsync({ type: 'blob' });
@@ -90,6 +134,5 @@ export const downloadProjectFromWebContainer = async (wc: any, options: Download
     URL.revokeObjectURL(url);
   }
 
-  return fileCount;
+  return files.length;
 };
-

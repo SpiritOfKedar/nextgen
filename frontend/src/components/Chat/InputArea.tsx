@@ -5,6 +5,7 @@ import { SignInButton, useAuth } from '@clerk/clerk-react';
 import { useChat } from '../../hooks/useChat';
 import { ModelSelector } from './ModelSelector';
 import { FigmaPanel } from './FigmaPanel';
+import { StitchPanel, type StitchContextPayload } from './StitchPanel';
 import { useAtom, useAtomValue, useSetAtom } from 'jotai';
 import { chatModeAtom, threadsAtom, threadSwitchStateAtom, currentThreadIdAtom, messagesAtom } from '../../store/atoms';
 
@@ -42,7 +43,9 @@ export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default' }) => 
     const [inputValue, setInputValue] = useState('');
     const [attachedFiles, setAttachedFiles] = useState<File[]>([]);
     const [showFigmaPanel, setShowFigmaPanel] = useState(false);
+    const [showStitchPanel, setShowStitchPanel] = useState(false);
     const [manualFigmaLinks, setManualFigmaLinks] = useState<string[]>([]);
+    const [stitchContext, setStitchContext] = useState<StitchContextPayload | null>(null);
     const { sendMessage, isLoading, fetchThreads, loadThread } = useChat();
     const [chatMode, setChatMode] = useAtom(chatModeAtom);
     const threads = useAtomValue(threadsAtom);
@@ -55,6 +58,7 @@ export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default' }) => 
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
     const figmaButtonRef = useRef<HTMLButtonElement>(null);
+    const stitchButtonRef = useRef<HTMLButtonElement>(null);
     const MAX_FILE_CHARS = 25_000;
     const MAX_TOTAL_ATTACHMENT_CHARS = 80_000;
     const MAX_FILE_SIZE_BYTES = 5 * 1024 * 1024;
@@ -214,6 +218,7 @@ export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default' }) => 
         setInputValue('');
         setAttachedFiles([]);
         setManualFigmaLinks([]);
+        setStitchContext(null);
         localStorage.removeItem('currentThreadId');
     };
 
@@ -284,18 +289,22 @@ export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default' }) => 
         const savedInput = inputValue;
         const savedFiles = attachedFiles;
         const savedFigmaLinks = manualFigmaLinks;
+        const savedStitchContext = stitchContext;
         const attachments = await buildOutgoingAttachments(attachedFiles);
         setInputValue('');
         setAttachedFiles([]);
         setManualFigmaLinks([]);
+        setStitchContext(null);
         setShowFigmaPanel(false);
+        setShowStitchPanel(false);
         if (fileInputRef.current) fileInputRef.current.value = '';
         if (textareaRef.current) textareaRef.current.style.height = 'auto';
-        const result = await sendMessage(content, attachments, figmaLinks);
+        const result = await sendMessage(content, attachments, figmaLinks, stitchContext);
         if (!result.ok) {
             setInputValue(savedInput);
             setAttachedFiles(savedFiles);
             setManualFigmaLinks(savedFigmaLinks);
+            setStitchContext(savedStitchContext);
             setSubmitError(result.error);
         }
     };
@@ -334,6 +343,14 @@ export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default' }) => 
         : 'border-purple-500/50 bg-purple-950/40 text-purple-300 hover:bg-purple-900/40';
 
     const figmaBtnIdle = isMac
+        ? 'text-zinc-400 hover:text-zinc-200 hover:bg-white/5'
+        : 'border-zinc-700/80 bg-zinc-900 text-zinc-300 hover:text-zinc-100 hover:bg-zinc-800/70';
+
+    const stitchBtnActive = isMac
+        ? 'text-blue-300 bg-blue-500/10'
+        : 'border-blue-500/50 bg-blue-950/40 text-blue-300 hover:bg-blue-900/40';
+
+    const stitchBtnIdle = isMac
         ? 'text-zinc-400 hover:text-zinc-200 hover:bg-white/5'
         : 'border-zinc-700/80 bg-zinc-900 text-zinc-300 hover:text-zinc-100 hover:bg-zinc-800/70';
 
@@ -604,6 +621,22 @@ export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default' }) => 
                     </div>
                 )}
 
+                {stitchContext && (
+                    <div className="px-3 pb-2.5">
+                        <div className="inline-flex h-8 max-w-full items-center gap-1.5 rounded-lg border border-blue-500/30 bg-blue-950/30 px-2.5 text-[11px] text-blue-100">
+                            <span className="truncate max-w-[220px]">Stitch context attached</span>
+                            <button
+                                type="button"
+                                className="ml-0.5 text-blue-400 hover:text-blue-100 transition-colors"
+                                onClick={() => setStitchContext(null)}
+                                aria-label="Remove Stitch context"
+                            >
+                                <X className="h-3 w-3" />
+                            </button>
+                        </div>
+                    </div>
+                )}
+
                 <div className={toolbarClass}>
                     <input
                         type="file"
@@ -651,6 +684,30 @@ export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default' }) => 
                             onAddLink={handleAddFigmaLink}
                             onRemoveLink={handleRemoveFigmaLink}
                             manualFigmaLinks={manualFigmaLinks}
+                        />
+
+                        <button
+                            ref={stitchButtonRef}
+                            type="button"
+                            onClick={() => setShowStitchPanel((v) => !v)}
+                            className={`${iconBtnClass} ${
+                                showStitchPanel || stitchContext ? stitchBtnActive : stitchBtnIdle
+                            }`}
+                            title="Google Stitch MCP"
+                            aria-label="Google Stitch MCP"
+                            id="stitch-mcp-button"
+                        >
+                            <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="currentColor" aria-hidden>
+                                <path d="M12 2L2 7l10 5 10-5-10-5zm0 7.5L4.5 6.75 12 10.5l7.5-3.75L12 9.5zm-8 3.25L12 17.5l8-4.75v2.5L12 20l-8-4.75v-2.5z" />
+                            </svg>
+                        </button>
+
+                        <StitchPanel
+                            anchorRef={stitchButtonRef}
+                            isOpen={showStitchPanel}
+                            onClose={() => setShowStitchPanel(false)}
+                            stitchContext={stitchContext}
+                            onStitchContextChange={setStitchContext}
                         />
                     </div>
 

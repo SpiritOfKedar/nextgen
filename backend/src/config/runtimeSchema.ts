@@ -62,6 +62,39 @@ export const ensureRuntimeSchema = async (pool: Pool): Promise<void> => {
     `);
 
     await pool.query(`
+        CREATE TABLE IF NOT EXISTS public.user_stitch_connections (
+            user_id UUID PRIMARY KEY REFERENCES public.users(id) ON DELETE CASCADE,
+            api_key TEXT NOT NULL,
+            default_project_id TEXT NULL,
+            enabled BOOLEAN NOT NULL DEFAULT true,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+    `);
+
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS public.user_github_connections (
+            user_id UUID PRIMARY KEY REFERENCES public.users(id) ON DELETE CASCADE,
+            access_token TEXT NOT NULL,
+            github_login TEXT NULL,
+            enabled BOOLEAN NOT NULL DEFAULT true,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+    `);
+
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS public.thread_github_links (
+            thread_id UUID PRIMARY KEY REFERENCES public.threads(id) ON DELETE CASCADE,
+            owner TEXT NOT NULL,
+            repo TEXT NOT NULL,
+            default_branch TEXT NOT NULL DEFAULT 'main',
+            last_pushed_sha TEXT NULL,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+    `);
+
+    await pool.query(`
         CREATE TABLE IF NOT EXISTS public.thread_collaborators (
             thread_id UUID NOT NULL REFERENCES public.threads(id) ON DELETE CASCADE,
             user_id UUID NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
