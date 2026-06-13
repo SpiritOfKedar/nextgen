@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Terminal } from 'xterm';
 import { FitAddon } from 'xterm-addon-fit';
 import { useAtomValue, useSetAtom } from 'jotai';
@@ -11,35 +11,39 @@ import {
     terminalStatusByThreadAtom,
     recoveryAuditsByThreadAtom,
 } from '../../store/webContainer';
-import { currentThreadIdAtom } from '../../store/atoms';
+import { currentThreadIdAtom, selectedModelAtom } from '../../store/atoms';
 import { detectTerminalIssue } from '../../lib/terminalIssues';
 import { useAuth } from '@clerk/clerk-react';
 import { useChat } from '../../hooks/useChat';
+import { X } from 'lucide-react';
 import 'xterm/css/xterm.css';
 
 /**
- * Pure display component — the jsh shell process is managed by useWebContainer.
- * This component only:
- *   1. Creates an xterm instance
- *   2. Attaches to the shared shell output (replays buffered output on mount)
- *   3. Forwards keystrokes to the shared shell input writer
+ * Terminal display — jsh shell is managed by useWebContainer.
+ * Layout uses flex so banners/footer never overlap the scrollable xterm area.
  */
 export const TerminalPanel: React.FC = () => {
     const terminalRef = useRef<HTMLDivElement>(null);
+    const fitRef = useRef<(() => void) | null>(null);
     const shellWriterRef = useRef<WritableStreamDefaultWriter<string> | null>(null);
     const shellWriter = useAtomValue(shellInputWriterAtom);
     const currentThreadId = useAtomValue(currentThreadIdAtom);
+    const selectedModel = useAtomValue(selectedModelAtom);
     const setTerminalIssueByThread = useSetAtom(terminalIssueByThreadAtom);
     const setTerminalStatusByThread = useSetAtom(terminalStatusByThreadAtom);
     const { getToken } = useAuth();
     const { runTerminalRecovery } = useChat();
     const outputBufferRef = useRef('');
     const eventBufferRef = useRef<Array<{ eventType: string; payload: string; cwd?: string; exitCode?: number | null }>>([]);
+    const [dismissedIssueCode, setDismissedIssueCode] = useState<string | null>(null);
 
-    // Keep ref in sync so the onData closure always has the latest writer
     useEffect(() => {
         shellWriterRef.current = shellWriter;
     }, [shellWriter]);
+
+    useEffect(() => {
+        setDismissedIssueCode(null);
+    }, [currentThreadId]);
 
     useEffect(() => {
         if (!currentThreadId) return;
@@ -56,9 +60,7 @@ export const TerminalPanel: React.FC = () => {
                     Authorization: `Bearer ${token}`,
                 },
                 body: JSON.stringify({ events }),
-            }).catch(() => {
-                // best effort
-            });
+            }).catch(() => undefined);
         };
         const timer = setInterval(() => void flush(), 1200);
         return () => clearInterval(timer);
@@ -113,9 +115,11 @@ export const TerminalPanel: React.FC = () => {
                 fitAddon.fit();
                 resizeShell({ cols: term.cols, rows: term.rows });
             } catch {
-                // ignore — can happen during unmount / zero-size layout
+                /* ignore during unmount / zero-size layout */
             }
         };
+
+        fitRef.current = fitTerm;
 
         const scheduleFit = () => {
             if (disposed) return;
@@ -126,20 +130,14 @@ export const TerminalPanel: React.FC = () => {
             });
         };
 
-        // Wait for layout to complete and terminal to have valid dimensions
-        // before attaching output callback, otherwise xterm crashes on 'dimensions'.
-        // Use requestAnimationFrame + setTimeout to ensure the DOM has painted.
         const attachTimer = setTimeout(() => {
             requestAnimationFrame(() => {
                 fitTerm();
-                // Only attach output callback after terminal is properly sized
                 setShellOutputCallback((data) => {
                     try {
-                        if (term.element) {
-                            term.write(data);
-                        }
+                        if (term.element) term.write(data);
                     } catch {
-                        // swallow write errors (e.g. terminal disposed)
+                        /* terminal disposed */
                     }
                 });
             });
@@ -160,26 +158,23 @@ export const TerminalPanel: React.FC = () => {
         const ro = new ResizeObserver(() => scheduleFit());
         ro.observe(terminalRef.current);
 
-        // Forward keystrokes → shell stdin
         term.onData((data) => {
             const writer = shellWriterRef.current;
             if (currentThreadId) {
                 eventBufferRef.current.push({ eventType: 'input', payload: data });
             }
             if (writer) {
-                writer.write(data).catch(() => {
-                    // Writer may be closed — ignore
-                });
+                writer.write(data).catch(() => undefined);
             }
         });
 
-        // Forward resize → shell process
         term.onResize(({ cols, rows }) => {
             resizeShell({ cols, rows });
         });
 
         return () => {
             disposed = true;
+            fitRef.current = null;
             clearTimeout(attachTimer);
             if (resizeRaf) cancelAnimationFrame(resizeRaf);
             ro.disconnect();
@@ -187,11 +182,18 @@ export const TerminalPanel: React.FC = () => {
             removeOutputListener();
             term.dispose();
         };
-    }, [currentThreadId, setTerminalIssueByThread, setTerminalStatusByThread]); // eslint-disable-line react-hooks/exhaustive-deps
+    }, [currentThreadId, setTerminalIssueByThread, setTerminalStatusByThread]);
+
     const issue = useAtomValue(terminalIssueByThreadAtom)[currentThreadId || ''];
     const terminalStatus = useAtomValue(terminalStatusByThreadAtom)[currentThreadId || ''];
     const latestAudit = useAtomValue(recoveryAuditsByThreadAtom)[currentThreadId || '']?.[0];
     const isRecovering = terminalStatus === 'running';
+
+    const showIssueBanner = !!(issue && currentThreadId && !isRecovering && dismissedIssueCode !== issue.code);
+
+    useEffect(() => {
+        fitRef.current?.();
+    }, [isRecovering, showIssueBanner, latestAudit?.status]);
 
     const invokeRecovery = (triggerSource: 'manual' | 'auto') => {
         if (!currentThreadId || isRecovering) return;
@@ -200,48 +202,69 @@ export const TerminalPanel: React.FC = () => {
             triggerSource,
             terminalOutput: outputBufferRef.current.slice(-12000),
             issue,
+            model: selectedModel,
         });
     };
 
     return (
-        <div className="relative h-full w-full bg-zinc-950 p-1 overflow-hidden">
+        <div className="flex h-full min-h-0 flex-col bg-zinc-950">
             {isRecovering && (
-                <div className="mx-1 mb-1 rounded border border-blue-700/50 bg-blue-900/20 px-2 py-1 text-xs text-blue-200">
-                    Agent is analyzing terminal output and applying fixes…
+                <div className="shrink-0 border-b border-blue-800/40 bg-blue-950/30 px-3 py-1.5 text-xs text-blue-200">
+                    Diagnosing and verifying fix (up to 3 rounds) · model: <span className="font-medium text-blue-100">{selectedModel}</span>
                 </div>
             )}
-            {issue && currentThreadId && !isRecovering && (
-                <div className="mx-1 mb-1 flex items-center justify-between rounded border border-amber-700/50 bg-amber-900/20 px-2 py-1 text-xs text-amber-200">
-                    <span>{issue.message}</span>
+
+            {showIssueBanner && (
+                <div className="shrink-0 flex items-center gap-2 border-b border-amber-800/40 bg-amber-950/25 px-3 py-1.5 text-xs text-amber-200">
+                    <span className="min-w-0 flex-1 truncate">{issue!.message}</span>
                     <button
-                        className="rounded border border-amber-600/60 px-2 py-0.5 hover:bg-amber-800/30 disabled:opacity-50"
+                        type="button"
+                        className="shrink-0 rounded border border-amber-600/50 px-2 py-0.5 hover:bg-amber-900/40 disabled:opacity-50"
                         disabled={isRecovering}
                         onClick={() => invokeRecovery('auto')}
                     >
                         Fix with agent
                     </button>
-                </div>
-            )}
-            <div className="h-full w-full" ref={terminalRef} />
-            {latestAudit && (
-                <div className="absolute left-3 bottom-3 max-w-[70%] rounded border border-zinc-800 bg-zinc-900/80 px-2 py-1 text-[11px] text-zinc-400">
-                    last recovery: {latestAudit.status}
-                    {latestAudit.status === 'failed' && latestAudit.detail ? (
-                        <span className="ml-1 text-zinc-500">— {latestAudit.detail}</span>
-                    ) : null}
-                </div>
-            )}
-            {currentThreadId && (
-                <div className="absolute bottom-3 right-3">
                     <button
-                        className="rounded border border-zinc-700 bg-zinc-900/80 px-2 py-1 text-[11px] text-zinc-300 hover:text-white disabled:opacity-50"
-                        disabled={isRecovering}
-                        onClick={() => invokeRecovery('manual')}
+                        type="button"
+                        className="shrink-0 rounded p-0.5 text-amber-400/80 hover:bg-amber-900/40 hover:text-amber-200"
+                        aria-label="Dismiss error banner"
+                        onClick={() => setDismissedIssueCode(issue!.code)}
                     >
-                        {isRecovering ? 'Recovering…' : 'Run recovery'}
+                        <X className="h-3.5 w-3.5" />
                     </button>
                 </div>
             )}
+
+            <div className="min-h-0 flex-1 overflow-hidden p-1">
+                <div className="h-full w-full" ref={terminalRef} />
+            </div>
+
+            <div className="shrink-0 flex items-center justify-between gap-2 border-t border-zinc-800/80 bg-zinc-950 px-2 py-1.5">
+                <div className="min-w-0 flex-1 truncate text-[11px] text-zinc-500">
+                    {latestAudit ? (
+                        <>
+                            Last recovery: <span className={latestAudit.status === 'resolved' ? 'text-green-500/90' : 'text-red-400/90'}>{latestAudit.status}</span>
+                            {latestAudit.status === 'failed' && latestAudit.detail ? (
+                                <span className="text-zinc-600"> — {latestAudit.detail}</span>
+                            ) : null}
+                        </>
+                    ) : (
+                        <span>Recovery uses the model selected in chat</span>
+                    )}
+                </div>
+                {currentThreadId && (
+                    <button
+                        type="button"
+                        className="shrink-0 rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800 hover:text-white disabled:opacity-50"
+                        disabled={isRecovering}
+                        onClick={() => invokeRecovery('manual')}
+                        title={`Run recovery with ${selectedModel}`}
+                    >
+                        {isRecovering ? 'Recovering…' : `Fix (${selectedModel.split('-').slice(0, 2).join(' ')})`}
+                    </button>
+                )}
+            </div>
         </div>
     );
 };

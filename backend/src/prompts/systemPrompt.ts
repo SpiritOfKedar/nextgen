@@ -39,8 +39,8 @@ You must provide your code output using the following XML-based protocol. This a
       "version": "0.0.0",
       "type": "module",
       "scripts": {
-        "dev": "vite",
-        "build": "vite build"
+        "dev": "node ./node_modules/vite/bin/vite.js",
+        "build": "node ./node_modules/vite/bin/vite.js build"
       },
       "dependencies": {
         "react": "^18.3.1",

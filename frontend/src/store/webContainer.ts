@@ -40,6 +40,22 @@ export function setShellOutputCallback(cb: ((data: string) => void) | null) {
     }
 }
 
+/** Full retained shell output buffer (tail-capped). */
+export function getShellOutputBuffer(): string {
+    return _outputBuf;
+}
+
+/** Mark current buffer length — use with getShellOutputSince for verify windows. */
+export function markShellOutputPosition(): number {
+    return _outputBuf.length;
+}
+
+/** Output appended since markShellOutputPosition. */
+export function getShellOutputSince(position: number): string {
+    if (position >= _outputBuf.length) return '';
+    return _outputBuf.slice(position);
+}
+
 /** Called by the shell process output stream. Routes to xterm or buffer. */
 export function writeShellOutput(data: string) {
     _outputBuf += data;
@@ -66,7 +82,8 @@ export interface TerminalIssue {
     code: string;
     confidence: number;
     message: string;
-    suggestedCommands: string[];
+    /** Likely root causes for the recovery agent — not commands to blindly execute */
+    diagnosticHints: string[];
 }
 
 export interface RecoveryAudit {

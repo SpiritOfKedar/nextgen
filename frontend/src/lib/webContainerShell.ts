@@ -1,4 +1,5 @@
 import type { WebContainer } from '@webcontainer/api';
+import { repairViteScriptsForWebContainer } from './webContainerScripts';
 
 export const INSTALL_FIRST_ATTEMPT_TIMEOUT_MS = 120_000;
 
@@ -244,6 +245,60 @@ export type ExecuteShellCommandsOptions = {
     defaultTimeoutMs?: number;
 };
 
+const isNpmRunScript = (command: string): boolean =>
+    /^npm\s+run\s+(dev|build|preview)\b/i.test(command.trim());
+
+export async function runCommandWithCapturedOutput(
+    wc: WebContainer,
+    command: string,
+    cwd: string,
+    options?: {
+        timeoutMs?: number;
+        writeOutput?: (data: string) => void;
+        beforeNpmInstall?: () => Promise<void>;
+    },
+): Promise<{ exitCode: number; output: string }> {
+    const chunks: string[] = [];
+    const writeOutput = options?.writeOutput ?? (() => undefined);
+    const { program, args } = tokenizeShellCommand(command);
+
+    if (isNpmInstallCommand(command)) {
+        await options?.beforeNpmInstall?.();
+    }
+    if (isNpmRunScript(command)) {
+        await repairViteScriptsForWebContainer(wc, {
+            projectDir: cwd,
+            announce: options?.writeOutput,
+        });
+    }
+
+    const proc = await wc.spawn(program, args, {
+        env: WEBCONTAINER_SPAWN_ENV,
+        cwd,
+    });
+    await proc.output.pipeTo(new WritableStream({
+        write(data) {
+            chunks.push(data);
+            writeOutput(data);
+        },
+    }));
+
+    const timeoutMs = isNpmInstallCommand(command)
+        ? (options?.timeoutMs ?? BUILD_INSTALL_TIMEOUT_MS)
+        : (options?.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS);
+    const exitCode = await runProcessAndCollectExit(proc, timeoutMs);
+    return { exitCode, output: chunks.join('') };
+}
+
+export const packageJsonHasScript = (fileMap: Map<string, string>, scriptName: string): boolean => {
+    try {
+        const pkg = JSON.parse(fileMap.get('package.json') || '{}');
+        return typeof pkg.scripts?.[scriptName] === 'string';
+    } catch {
+        return false;
+    }
+};
+
 export async function executeShellCommandsInWebContainer(
     options: ExecuteShellCommandsOptions,
 ): Promise<ShellExecutionResult> {
@@ -299,6 +354,12 @@ export async function executeShellCommandsInWebContainer(
         try {
             if (isNpmInstallCommand(adjustedCommand)) {
                 await beforeNpmInstall?.();
+            }
+            if (isNpmRunScript(adjustedCommand)) {
+                await repairViteScriptsForWebContainer(wc, {
+                    projectDir: commandCwd,
+                    announce: writeOutput,
+                });
             }
 
             const { program, args } = tokenizeShellCommand(adjustedCommand);

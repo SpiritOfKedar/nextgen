@@ -20,7 +20,10 @@ export const MINIMAL_ROOT_PACKAGE_JSON = JSON.stringify(
         private: true,
         version: '0.0.0',
         type: 'module',
-        scripts: { dev: 'vite', build: 'vite build' },
+        scripts: {
+            dev: 'node ./node_modules/vite/bin/vite.js',
+            build: 'node ./node_modules/vite/bin/vite.js build',
+        },
         dependencies: {
             react: '^18.3.1',
             'react-dom': '^18.3.1',

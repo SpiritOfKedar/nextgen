@@ -23,16 +23,17 @@ import { useNavigate } from 'react-router-dom';
 import { BoltParser } from '../lib/boltProtocol';
 import type { BoltAction } from '../lib/boltProtocol';
 import { detectTerminalIssue } from '../lib/terminalIssues';
+import { runIterativeRecovery } from '../lib/terminalRecoveryLoop';
 import {
     executeShellCommandsInWebContainer,
     inferProjectDirectory,
     normalizeShellCommandQueue,
     normalizeWrittenPath,
-    resolveProjectDirectoryForNpm,
     resetSyncedShellCwd,
     syncShellWorkingDirectory,
     WEBCONTAINER_SPAWN_ENV,
 } from '../lib/webContainerShell';
+import { repairViteScriptsForWebContainer } from '../lib/webContainerScripts';
 import {
     ensureProjectDependencies,
     filterInstallShellCommands,
@@ -433,22 +434,6 @@ const flattenFileSystem = (items: FileSystemItem[], prefix = ''): { filePath: st
     return out;
 };
 
-const selectRecoveryFiles = (files: { filePath: string; content: string }[]): { filePath: string; content: string }[] => {
-    const priority = ['package.json', 'package-lock.json', 'vite.config.ts', 'vite.config.js', 'tsconfig.json', 'index.html'];
-    const picked = new Map<string, { filePath: string; content: string }>();
-    for (const p of priority) {
-        const match = files.find((f) => f.filePath === p);
-        if (match) picked.set(p, match);
-    }
-    for (const f of files) {
-        if (picked.size >= 12) break;
-        if (f.filePath.startsWith('src/') && /\.(tsx?|jsx?)$/.test(f.filePath)) {
-            picked.set(f.filePath, f);
-        }
-    }
-    return [...picked.values()];
-};
-
 const buildFileMap = (
     tree: FileSystemItem[],
     writtenFiles: Map<string, string> = new Map(),
@@ -467,6 +452,7 @@ const RECOVERY_BOOTSTRAP_ISSUE_CODES = new Set([
     'cwd_package_json_missing',
     'install_failed',
     'dev_server_failed',
+    'vite_permission_denied',
     'vite_missing_binary',
     'module_resolution_failed',
     'peer_dependency_conflict',
@@ -571,9 +557,10 @@ export const useChat = () => {
             triggerSource: 'manual' | 'auto';
             terminalOutput?: string;
             issue?: TerminalIssue | null;
+            model?: string;
         },
     ) => {
-        const { threadId, triggerSource, terminalOutput = '', issue = null } = input;
+        const { threadId, triggerSource, terminalOutput = '', issue = null, model = selectedModel } = input;
         if (!threadId || !isLoaded || !isSignedIn) return;
         const token = await getToken();
         if (!token) return;
@@ -581,241 +568,100 @@ export const useChat = () => {
         const wc = webContainerInstance ?? getWebContainerInstance();
         if (!wc) return;
 
-        const initialFileMap = buildFileMap(fileSystem);
-        let projectDir = (await resolveProjectDirectoryForNpm(
-            wc,
-            initialFileMap,
-            inferProjectDirectory(initialFileMap),
-        )).projectDir;
-        await syncShellWorkingDirectory(shellWriter, projectDir);
+        const baseFileMap = buildFileMap(fileSystem);
+        const sessionWrites = new Map<string, string>();
 
         setTerminalStatusByThread((prev) => ({ ...prev, [threadId]: 'running' }));
-        writeShellOutput('\r\n\x1b[36m⬢ Agent analyzing terminal output…\x1b[0m\r\n');
+        writeShellOutput(`\r\n\x1b[36m⬢ Agent analyzing terminal output (up to 3 fix rounds, model: ${model})…\x1b[0m\r\n`);
         setPreviewStatus('starting');
-        setPreviewStatusMessage('Agent is fixing terminal and project files…');
+        setPreviewStatusMessage('Agent is diagnosing and fixing…');
 
-        const recoveryFiles = selectRecoveryFiles(flattenFileSystem(fileSystem));
-        const plannedCommands: string[] = [];
-        let executedCommands: string[] = [];
         let status: 'resolved' | 'failed' = 'failed';
         let detail = '';
+        let plannedCommands: string[] = [];
+        let executedCommands: string[] = [];
+        let projectDir = '/';
 
         try {
-            const response = await fetch(`${API_URL}/terminal/${encodeURIComponent(threadId)}/recover`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    Authorization: `Bearer ${token}`,
-                },
-                body: JSON.stringify({
-                    terminalOutput,
-                    issueCode,
-                    issueMessage: issue?.message,
-                    suggestedCommands: issue?.suggestedCommands ?? [],
-                    projectDir,
-                    files: recoveryFiles,
-                }),
-            });
-
-            if (!response.ok) {
-                const errText = await response.text().catch(() => '');
-                throw new Error(`Recovery API failed (${response.status}): ${errText || response.statusText}`);
-            }
-
-            const reader = response.body?.getReader();
-            if (!reader) throw new Error('Recovery stream unavailable');
-
-            const decoder = new TextDecoder();
-            const parser = new BoltParser();
-            const pendingShellCommands: string[] = [];
-            const writtenFiles = new Map<string, string>();
-            const fsWriteChain = { current: Promise.resolve() };
-
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
-                const chunk = decoder.decode(value);
-                const actions = parser.parse(chunk);
-                for (const action of actions) {
-                    if (action.type === 'file' && action.filePath) {
-                        const path = action.filePath;
-                        const fileContent = action.content;
-                        queueBoltFileWrite(fsWriteChain, wc, path, fileContent);
-                        writtenFiles.set(path.replace(/^\//, ''), fileContent);
-                        setFileSystem((prev) => upsertFile(prev, path, fileContent));
-                        const fileName = path.split('/').pop()!;
-                        openEditorTab({ path: path.replace(/^\//, ''), name: fileName, content: fileContent });
-                    }
-                    if (action.type === 'shell') {
-                        pendingShellCommands.push(action.content.trim());
-                    }
-                }
-            }
-
-            const remaining = parser.parse('');
-            for (const action of remaining) {
-                if (action.type === 'file' && action.filePath) {
-                    const path = action.filePath;
-                    const fileContent = action.content;
-                    queueBoltFileWrite(fsWriteChain, wc, path, fileContent);
-                    writtenFiles.set(path.replace(/^\//, ''), fileContent);
-                    setFileSystem((prev) => upsertFile(prev, path, fileContent));
-                }
-                if (action.type === 'shell') {
-                    pendingShellCommands.push(action.content.trim());
-                }
-            }
-
-            await fsWriteChain.current;
-
-            const fileMap = buildFileMap(fileSystem, writtenFiles);
-            projectDir = (await resolveProjectDirectoryForNpm(
-                wc,
-                fileMap,
-                inferProjectDirectory(writtenFiles.size > 0 ? writtenFiles : fileMap),
-            )).projectDir;
-            await syncShellWorkingDirectory(shellWriter, projectDir);
-            await ensureRootPackageJsonExists(writtenFiles, wc, setFileSystem);
-            await patchMissingDependencies(writtenFiles, wc, setFileSystem);
-
-            const recoveryFileMap = buildFileMap(fileSystem, writtenFiles);
-            await syncProjectFiles(wc, threadId, recoveryFileMap, []);
-
-            if (writtenFiles.size === 0 && pendingShellCommands.length === 0) {
-                throw new Error('Agent returned no file or shell fixes');
-            }
-
-            let devServerStarted = false;
-            let installSucceeded = false;
-
-            const depResult = await ensureProjectDependencies({
+            const result = await runIterativeRecovery({
                 wc,
                 threadId,
-                fileMap: recoveryFileMap,
-                authToken: token,
+                token,
                 apiUrl: API_URL,
-                writeShellOutput,
+                model,
+                initialTerminalOutput: terminalOutput,
+                initialIssue: issue,
+                getFileMap: () => {
+                    const map = new Map(baseFileMap);
+                    for (const [k, v] of sessionWrites) map.set(k, v);
+                    return map;
+                },
+                shellWriter,
+                repairRootForNpm: (announce) => repairRootForNpm(wc, announce),
+                ensureRootPackageJson: async () => {
+                    await ensureRootPackageJsonExists(sessionWrites, wc, setFileSystem);
+                },
+                patchMissingDeps: async () => {
+                    await patchMissingDependencies(sessionWrites, wc, setFileSystem);
+                },
+                onFileWritten: (path, content) => {
+                    const normalized = path.replace(/^\//, '');
+                    sessionWrites.set(normalized, content);
+                    setFileSystem((prev) => upsertFile(prev, path, content));
+                    const fileName = path.split('/').pop()!;
+                    openEditorTab({ path: normalized, name: fileName, content });
+                },
                 onPreviewStatus: (previewStatus, message) => {
                     setPreviewStatus(previewStatus);
                     setPreviewStatusMessage(message);
                 },
-                repairRootForNpm: (announce) => repairRootForNpm(wc, announce),
                 appendTerminalEvents: (events) => appendTerminalEvents(threadId, token, events),
+                killActiveDevProcess: async () => {
+                    if (activeDevProcess?.kill) {
+                        try { await activeDevProcess.kill(); } catch { /* ignore */ }
+                        activeDevProcess = null;
+                    }
+                },
+                onDevServerStarted: (proc) => {
+                    activeDevProcess = proc;
+                    const fileMap = buildFileMap(fileSystem, sessionWrites);
+                    activeDevServerFingerprint = getDependencyFingerprint(fileMap);
+                    activeCriticalFingerprint = getCriticalConfigFingerprint(fileMap);
+                },
+                bootstrapIssueCodes: RECOVERY_BOOTSTRAP_ISSUE_CODES,
+                initialIssueCode: issueCode,
             });
 
-            if (!depResult.ok) {
-                throw new Error(depResult.errorMessage ?? 'Dependency install failed during recovery');
-            }
-
-            projectDir = depResult.projectDir;
-            await syncShellWorkingDirectory(shellWriter, projectDir);
-            installSucceeded = true;
-            activeDevServerFingerprint = depResult.depFingerprint;
-            activeCriticalFingerprint = depResult.criticalFingerprint;
-
-            const shellQueue = filterInstallShellCommands(normalizeShellCommandQueue(pendingShellCommands));
-            plannedCommands.push(...shellQueue);
-
-            if (shellQueue.length > 0) {
-                const execResult = await executeShellCommandsInWebContainer({
-                    wc,
-                    commands: shellQueue,
-                    initialCwd: projectDir,
-                    writeOutput: writeShellOutput,
-                    failOnNonZeroExit: true,
-                    beforeNpmInstall: () => repairRootForNpm(wc, true),
-                    onCommandComplete: async (command, cwd, exitCode) => {
-                        await appendTerminalEvents(threadId, token, [
-                            { eventType: 'command', payload: command, cwd },
-                            { eventType: 'status', payload: `exit:${exitCode}`, cwd, exitCode },
-                        ]);
-                    },
-                    onDevServerStarted: (proc, command, cwd) => {
-                        devServerStarted = true;
-                        activeDevProcess = proc;
-                        activeDevServerFingerprint = depResult.depFingerprint;
-                        activeCriticalFingerprint = depResult.criticalFingerprint;
-                        status = 'resolved';
-                        writeShellOutput('\r\n\x1b[32m✓ Dev server restarted by recovery agent\x1b[0m\r\n');
-                        void appendTerminalEvents(threadId, token, [
-                            { eventType: 'command', payload: command, cwd },
-                        ]);
-                    },
-                });
-                executedCommands = execResult.executedCommands;
-                devServerStarted = devServerStarted || execResult.devServerStarted;
-                projectDir = execResult.finalCwd;
-                if (execResult.devProcess) {
-                    activeDevProcess = execResult.devProcess;
-                }
-                if (execResult.status === 'failed') {
-                    status = 'failed';
-                    detail = execResult.detail ?? 'Shell command failed during recovery';
-                } else {
-                    status = 'resolved';
-                }
-            } else {
-                status = 'resolved';
-            }
-
-            if (
-                status === 'resolved' &&
-                !devServerStarted &&
-                RECOVERY_BOOTSTRAP_ISSUE_CODES.has(issueCode)
-            ) {
-                const bootstrapCommands = ['npm run dev'];
-                plannedCommands.push(...bootstrapCommands);
-
-                const bootstrapResult = await executeShellCommandsInWebContainer({
-                    wc,
-                    commands: bootstrapCommands,
-                    initialCwd: projectDir,
-                    writeOutput: writeShellOutput,
-                    failOnNonZeroExit: true,
-                    onCommandComplete: async (command, cwd, exitCode) => {
-                        await appendTerminalEvents(threadId, token, [
-                            { eventType: 'command', payload: command, cwd },
-                            { eventType: 'status', payload: `exit:${exitCode}`, cwd, exitCode },
-                        ]);
-                    },
-                    onDevServerStarted: (proc, command, cwd) => {
-                        devServerStarted = true;
-                        activeDevProcess = proc;
-                        activeDevServerFingerprint = depResult.depFingerprint;
-                        activeCriticalFingerprint = depResult.criticalFingerprint;
-                        writeShellOutput('\r\n\x1b[32m✓ Dev server started after recovery\x1b[0m\r\n');
-                        void appendTerminalEvents(threadId, token, [
-                            { eventType: 'command', payload: command, cwd },
-                        ]);
-                    },
-                });
-                executedCommands.push(...bootstrapResult.executedCommands);
-                projectDir = bootstrapResult.finalCwd;
-                if (bootstrapResult.devProcess) {
-                    activeDevProcess = bootstrapResult.devProcess;
-                }
-                if (bootstrapResult.status === 'failed') {
-                    status = 'failed';
-                    detail = bootstrapResult.detail ?? 'Post-recovery bootstrap failed';
-                } else {
-                    status = 'resolved';
-                }
-            }
-
-            if (status === 'resolved' && writtenFiles.size > 0 && !devServerStarted) {
-                writeShellOutput('\r\n\x1b[32m✓ Agent applied file fixes\x1b[0m\r\n');
-            }
+            status = result.status;
+            detail = result.detail ?? '';
+            plannedCommands = result.plannedCommands;
+            executedCommands = result.executedCommands;
+            projectDir = result.projectDir;
 
             if (status === 'resolved') {
+                writeShellOutput(
+                    `\r\n\x1b[32m✓ Recovery succeeded${result.roundsUsed > 1 ? ` after ${result.roundsUsed} rounds` : ''}\x1b[0m\r\n`,
+                );
                 const prevMeta = threadRuntimeMeta.get(threadId);
                 if (prevMeta) {
                     threadRuntimeMeta.set(threadId, {
                         ...prevMeta,
                         projectDir,
-                        installSucceeded: installSucceeded || prevMeta.installSucceeded,
+                        installSucceeded: true,
                     });
                 }
+                setPreviewStatus('starting');
+                setPreviewStatusMessage('Recovery verified. Preview should load shortly…');
+            } else {
+                writeShellOutput(`\r\n\x1b[31m✗ Recovery failed after ${result.roundsUsed} round(s): ${detail}\x1b[0m\r\n`);
+                setPreviewStatus('error');
+                setPreviewStatusMessage(detail);
             }
+
+            setTerminalIssueByThread((prev) => ({
+                ...prev,
+                [threadId]: status === 'resolved' ? null : result.finalIssue,
+            }));
         } catch (error) {
             detail = error instanceof Error ? error.message : String(error);
             status = 'failed';
@@ -825,11 +671,6 @@ export const useChat = () => {
         }
 
         setTerminalStatusByThread((prev) => ({ ...prev, [threadId]: status === 'resolved' ? 'idle' : 'error' }));
-        setTerminalIssueByThread((prev) => ({ ...prev, [threadId]: status === 'resolved' ? null : prev[threadId] ?? null }));
-        if (status === 'resolved') {
-            setPreviewStatus('starting');
-            setPreviewStatusMessage('Recovery applied. Waiting for dev server…');
-        }
 
         await fetch(`${API_URL}/terminal/${encodeURIComponent(threadId)}/recovery-audits`, {
             method: 'POST',
@@ -845,9 +686,7 @@ export const useChat = () => {
                 status,
                 detail,
             }),
-        }).catch(() => {
-            // ignore best effort
-        });
+        }).catch(() => undefined);
 
         await refreshTerminalSession(threadId, token);
     }, [
@@ -866,6 +705,7 @@ export const useChat = () => {
         setTerminalStatusByThread,
         shellWriter,
         webContainerInstance,
+        selectedModel,
     ]);
 
     const startThreadSandboxInBackground = useCallback(async (
@@ -894,7 +734,10 @@ export const useChat = () => {
                 private: true,
                 version: '0.0.0',
                 type: 'module',
-                scripts: { dev: 'vite', build: 'vite build' },
+                scripts: {
+                    dev: 'node ./node_modules/vite/bin/vite.js',
+                    build: 'node ./node_modules/vite/bin/vite.js build',
+                },
                 dependencies: {
                     'react': '^18.3.1',
                     'react-dom': '^18.3.1',
@@ -1066,6 +909,15 @@ createRoot(document.getElementById('root')!).render(
                 if (activeDevProcess?.kill) {
                     try { await activeDevProcess.kill(); } catch { /* ignore */ }
                 }
+                await repairViteScriptsForWebContainer(wc, {
+                    fileMap,
+                    projectDir,
+                    announce: writeShellOutput,
+                    onPatched: (content) => {
+                        fileMap.set('package.json', content);
+                        setFileSystem((prev) => upsertFile(prev, 'package.json', content));
+                    },
+                });
                 setPreviewStatus('starting');
                 setPreviewStatusMessage('Starting development server…');
                 writeShellOutput('\r\n\x1b[36m⬢ Starting dev server...\x1b[0m\r\n');

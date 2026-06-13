@@ -100,8 +100,29 @@ export const terminalController = {
       const issueMessage = typeof req.body?.issueMessage === 'string' ? req.body.issueMessage : undefined;
       const projectDir = typeof req.body?.projectDir === 'string' ? req.body.projectDir : '/';
       const model = typeof req.body?.model === 'string' ? req.body.model : undefined;
-      const suggestedCommands = Array.isArray(req.body?.suggestedCommands)
-        ? req.body.suggestedCommands.filter((c: unknown) => typeof c === 'string')
+      const recoveryRound = typeof req.body?.recoveryRound === 'number' ? req.body.recoveryRound : undefined;
+      const maxRecoveryRounds = typeof req.body?.maxRecoveryRounds === 'number' ? req.body.maxRecoveryRounds : undefined;
+      const priorAttempts = Array.isArray(req.body?.priorAttempts)
+        ? req.body.priorAttempts
+            .filter((a: unknown) => a && typeof a === 'object')
+            .slice(0, 5)
+            .map((a: any) => ({
+              round: Number(a.round) || 0,
+              filesChanged: Array.isArray(a.filesChanged) ? a.filesChanged.filter((x: unknown) => typeof x === 'string') : [],
+              commandsExecuted: Array.isArray(a.commandsExecuted) ? a.commandsExecuted.filter((x: unknown) => typeof x === 'string') : [],
+              result: typeof a.result === 'string' ? a.result : '',
+              errorSnippets: typeof a.errorSnippets === 'string' ? a.errorSnippets.slice(0, 4000) : '',
+              issueCode: typeof a.issueCode === 'string' ? a.issueCode : undefined,
+            }))
+        : [];
+      const diagnosticHints = Array.isArray(req.body?.diagnosticHints)
+        ? req.body.diagnosticHints.filter((c: unknown) => typeof c === 'string')
+        : Array.isArray(req.body?.suggestedCommands)
+          ? req.body.suggestedCommands.filter((c: unknown) => typeof c === 'string')
+          : [];
+      const errorSnippets = typeof req.body?.errorSnippets === 'string' ? req.body.errorSnippets : undefined;
+      const referencedPaths = Array.isArray(req.body?.referencedPaths)
+        ? req.body.referencedPaths.filter((p: unknown) => typeof p === 'string')
         : [];
       const files = Array.isArray(req.body?.files)
         ? req.body.files
@@ -116,10 +137,15 @@ export const terminalController = {
         terminalOutput,
         issueCode,
         issueMessage,
-        suggestedCommands,
+        diagnosticHints,
+        errorSnippets,
+        referencedPaths,
         projectDir,
         model,
         files,
+        recoveryRound,
+        maxRecoveryRounds,
+        priorAttempts,
       });
 
       res.setHeader('Content-Type', 'text/plain');
