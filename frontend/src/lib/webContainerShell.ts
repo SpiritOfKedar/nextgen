@@ -1,6 +1,15 @@
 import type { WebContainer } from '@webcontainer/api';
 
 export const INSTALL_FIRST_ATTEMPT_TIMEOUT_MS = 120_000;
+
+/** npm cache + color for all WebContainer spawns */
+export const WEBCONTAINER_SPAWN_ENV: Record<string, string> = {
+    FORCE_COLOR: '1',
+    npm_config_cache: '/.boltly/npm-cache',
+    npm_config_prefer_offline: 'true',
+    npm_config_audit: 'false',
+    npm_config_fund: 'false',
+};
 const BUILD_INSTALL_TIMEOUT_MS = 300_000;
 const DEFAULT_COMMAND_TIMEOUT_MS = 120_000;
 
@@ -293,10 +302,10 @@ export async function executeShellCommandsInWebContainer(
             }
 
             const { program, args } = tokenizeShellCommand(adjustedCommand);
-            const proc = await wc.spawn(program, args, {
-                env: { FORCE_COLOR: '1' },
-                cwd: commandCwd,
-            });
+                        const proc = await wc.spawn(program, args, {
+                            env: WEBCONTAINER_SPAWN_ENV,
+                            cwd: commandCwd,
+                        });
             proc.output.pipeTo(new WritableStream({
                 write(data) { writeOutput(data); },
             }));

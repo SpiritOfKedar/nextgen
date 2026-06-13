@@ -1,6 +1,6 @@
 import { useCallback, useState } from 'react';
 import { useAtom, useSetAtom, useAtomValue } from 'jotai';
-import { messagesAtom, currentThreadIdAtom, threadSwitchStateAtom, threadsAtom, selectedModelAtom, chatModeAtom } from '../store/atoms';
+import { messagesAtom, currentThreadIdAtom, threadSwitchStateAtom, threadsAtom, selectedModelAtom, chatModeAtom, type ChatMode } from '../store/atoms';
 import {
     previewStatusAtom,
     previewStatusMessageAtom,
@@ -22,20 +22,25 @@ import { useAuth } from '@clerk/clerk-react';
 import { useNavigate } from 'react-router-dom';
 import { BoltParser } from '../lib/boltProtocol';
 import type { BoltAction } from '../lib/boltProtocol';
-import { loadDependencySnapshot, saveDependencySnapshot } from '../lib/sandboxSnapshotCache';
-import JSZip from 'jszip';
 import { detectTerminalIssue } from '../lib/terminalIssues';
 import {
     executeShellCommandsInWebContainer,
     inferProjectDirectory,
-    INSTALL_FIRST_ATTEMPT_TIMEOUT_MS,
     normalizeShellCommandQueue,
     normalizeWrittenPath,
     resolveProjectDirectoryForNpm,
     resetSyncedShellCwd,
-    runProcessAndCollectExit,
     syncShellWorkingDirectory,
+    WEBCONTAINER_SPAWN_ENV,
 } from '../lib/webContainerShell';
+import {
+    ensureProjectDependencies,
+    filterInstallShellCommands,
+    getCriticalConfigFingerprint,
+    getDependencyFingerprint,
+    MINIMAL_ROOT_PACKAGE_JSON,
+    syncProjectFiles,
+} from '../lib/sandboxInstall';
 import type { WebContainer } from '@webcontainer/api';
 
 /** Serialize WebContainer fs writes so the chat stream reader never stalls on slow I/O (fixes dropped Claude streams). */
@@ -199,35 +204,7 @@ const BUILTIN_MODULES = new Set([
 ]);
 
 /** Vite + React + Tailwind v4 baseline when the model forgets root package.json (prevents ENOENT on npm). */
-const MINIMAL_ROOT_PACKAGE_JSON = JSON.stringify(
-    {
-        name: 'generated-app',
-        private: true,
-        version: '0.0.0',
-        type: 'module',
-        scripts: { dev: 'vite', build: 'vite build' },
-        dependencies: {
-            react: '^18.3.1',
-            'react-dom': '^18.3.1',
-            'lucide-react': '^0.400.0',
-            clsx: '^2.1.0',
-            'tailwind-merge': '^2.2.0',
-            'class-variance-authority': '^0.7.0',
-            '@radix-ui/react-slot': '^1.0.0',
-        },
-        devDependencies: {
-            '@types/react': '^18.3.0',
-            '@types/react-dom': '^18.3.0',
-            '@vitejs/plugin-react': '^4.3.0',
-            typescript: '^5.5.0',
-            vite: '^5.4.0',
-            tailwindcss: '^4.0.0',
-            '@tailwindcss/vite': '^4.0.0',
-        },
-    },
-    null,
-    2,
-);
+// MINIMAL_ROOT_PACKAGE_JSON imported from sandboxInstall
 
 const getRootPackageJsonFromMap = (writtenFiles: Map<string, string>): string | undefined => {
     for (const [k, v] of writtenFiles) {
@@ -423,34 +400,6 @@ let activeMountedThreadId: string | null = null;
 let activeDevProcess: any = null;
 let activeDevServerFingerprint: string | null = null;
 let activeCriticalFingerprint: string | null = null;
-const hashString = (value: string): string => {
-    let hash = 5381;
-    for (let i = 0; i < value.length; i += 1) {
-        hash = ((hash << 5) + hash) ^ value.charCodeAt(i);
-    }
-    return (hash >>> 0).toString(16);
-};
-
-const getDependencyFingerprint = (fileMap: Map<string, string>): string => {
-    const pkg = fileMap.get('package.json') || '';
-    const lock = fileMap.get('package-lock.json') || '';
-    return hashString(`${pkg}\n---\n${lock}`);
-};
-
-const getCriticalConfigFingerprint = (fileMap: Map<string, string>): string => {
-    const packageJson = fileMap.get('package.json') || '';
-    const lockfile = fileMap.get('package-lock.json') || '';
-    const viteConfig = fileMap.get('vite.config.ts') || fileMap.get('vite.config.js') || '';
-    const tsConfig = fileMap.get('tsconfig.json') || '';
-    return hashString(`${packageJson}\n${lockfile}\n${viteConfig}\n${tsConfig}`);
-};
-
-const DEP_FINGERPRINT_MARKER_PATH = '/.boltly/dep-fingerprint';
-const SNAPSHOT_ARCHIVE_PATH = '/.boltly/dependency-snapshot.tgz';
-const SNAPSHOT_TOOLCHAIN_VERSION = 'webcontainer-npm-v1';
-const VITE_REACT_BASE_FINGERPRINT = hashString(`${MINIMAL_ROOT_PACKAGE_JSON}\n---\n`);
-const INSTALL_RETRY_TIMEOUT_MS = 420_000;
-const MAX_INDEXEDDB_SNAPSHOT_BYTES = 120 * 1024 * 1024;
 
 const COMMON_PACKAGE_VERSIONS: Record<string, string> = {
     'framer-motion': '^11.0.0',
@@ -470,260 +419,6 @@ const COMMON_PACKAGE_VERSIONS: Record<string, string> = {
 
 const pinnedVersionForPackage = (name: string): string =>
     COMMON_PACKAGE_VERSIONS[name] ?? '^1.0.0';
-
-const parsePackageJsonDepNames = (content: string): Set<string> => {
-    try {
-        const pkg = JSON.parse(content);
-        return new Set([
-            ...Object.keys(pkg.dependencies || {}),
-            ...Object.keys(pkg.devDependencies || {}),
-        ]);
-    } catch {
-        return new Set();
-    }
-};
-
-const getAddedPackageNames = (basePkgContent: string, currentPkgContent: string): string[] => {
-    const base = parsePackageJsonDepNames(basePkgContent);
-    const current = parsePackageJsonDepNames(currentPkgContent);
-    return [...current].filter((name) => !base.has(name));
-};
-
-type InstallPlan = {
-    kind: 'ci' | 'install' | 'delta';
-    label: string;
-    program: string;
-    args: string[];
-    deltaPackages?: string[];
-};
-
-const buildInstallPlan = (fileMap: Map<string, string>, deltaPackages: string[]): InstallPlan => {
-    if (deltaPackages.length > 0) {
-        return {
-            kind: 'delta',
-            label: `npm install ${deltaPackages.length} new package${deltaPackages.length > 1 ? 's' : ''}`,
-            program: 'npm',
-            args: ['install', ...deltaPackages, '--no-audit', '--no-fund', '--legacy-peer-deps', '--prefer-offline'],
-            deltaPackages,
-        };
-    }
-    const hasLockfile = !!(fileMap.get('package-lock.json') || '').trim();
-    if (hasLockfile) {
-        return {
-            kind: 'ci',
-            label: 'npm ci',
-            program: 'npm',
-            args: ['ci', '--no-audit', '--no-fund', '--legacy-peer-deps', '--prefer-offline'],
-        };
-    }
-    return {
-        kind: 'install',
-        label: 'npm install',
-        program: 'npm',
-        args: ['install', '--no-audit', '--no-fund', '--legacy-peer-deps', '--prefer-offline'],
-    };
-};
-
-const attemptRestoreFingerprintSnapshot = async (
-    wc: any,
-    projectDir: string,
-    fingerprint: string,
-    authToken: string,
-    apiUrl: string,
-): Promise<boolean> => {
-    const indexedSnapshot = await loadDependencySnapshot(fingerprint);
-    if (indexedSnapshot.status === 'hit' && indexedSnapshot.record.toolchainVersion === SNAPSHOT_TOOLCHAIN_VERSION) {
-        const restored = await restoreNodeModulesSnapshot(
-            wc,
-            projectDir,
-            base64ToBytes(indexedSnapshot.record.archiveBase64),
-            indexedSnapshot.record.archiveFormat,
-        );
-        if (restored) return true;
-    }
-    try {
-        const snapshotRes = await fetch(`${apiUrl}/sandbox/snapshots/${encodeURIComponent(fingerprint)}`, {
-            headers: { Authorization: `Bearer ${authToken}` },
-        });
-        if (!snapshotRes.ok) return false;
-        const snapshotBytes = new Uint8Array(await snapshotRes.arrayBuffer());
-        const isZip = snapshotBytes.length > 1 && snapshotBytes[0] === 0x50 && snapshotBytes[1] === 0x4b;
-        const format: 'tar.gz' | 'zip' = isZip ? 'zip' : 'tar.gz';
-        return restoreNodeModulesSnapshot(wc, projectDir, snapshotBytes, format);
-    } catch {
-        return false;
-    }
-};
-
-const readInstalledDependencyFingerprint = async (wc: any): Promise<string | null> => {
-    try {
-        const marker = await wc.fs.readFile(DEP_FINGERPRINT_MARKER_PATH, 'utf-8');
-        const normalized = typeof marker === 'string' ? marker.trim() : '';
-        return normalized || null;
-    } catch {
-        return null;
-    }
-};
-
-const persistInstalledDependencyFingerprint = async (wc: any, fingerprint: string): Promise<void> => {
-    try {
-        await wc.fs.mkdir('/.boltly', { recursive: true });
-        await wc.fs.writeFile(DEP_FINGERPRINT_MARKER_PATH, fingerprint);
-    } catch {
-        // Best effort only; failed marker write should never block sandbox startup.
-    }
-};
-
-const hasInstalledNodeModules = async (wc: any, projectDir: string): Promise<boolean> => {
-    const normalizedProjectDir = projectDir === '/' ? '' : projectDir;
-    const nodeModulesPath = `${normalizedProjectDir}/node_modules`;
-    try {
-        const entries = await wc.fs.readdir(nodeModulesPath || '/node_modules');
-        return Array.isArray(entries) && entries.length > 0;
-    } catch {
-        return false;
-    }
-};
-
-const bytesToBase64 = (input: Uint8Array): string => {
-    let binary = '';
-    const chunkSize = 0x8000;
-    for (let i = 0; i < input.length; i += chunkSize) {
-        const chunk = input.subarray(i, i + chunkSize);
-        binary += String.fromCharCode(...chunk);
-    }
-    return btoa(binary);
-};
-
-const base64ToBytes = (value: string): Uint8Array => {
-    const binary = atob(value);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i += 1) {
-        bytes[i] = binary.charCodeAt(i);
-    }
-    return bytes;
-};
-
-const isTarAvailable = async (wc: any): Promise<boolean> => {
-    try {
-        const proc = await wc.spawn('tar', ['--version'], { env: { FORCE_COLOR: '1' } });
-        const exitCode = await runProcessAndCollectExit(proc, 10_000);
-        return exitCode === 0;
-    } catch {
-        return false;
-    }
-};
-
-const createZipArchiveFromDirectory = async (wc: any, rootDir: string): Promise<Uint8Array | null> => {
-    const zip = new JSZip();
-    const walk = async (absPath: string, relPath: string): Promise<void> => {
-        const entries = await wc.fs.readdir(absPath);
-        for (const entry of entries as string[]) {
-            const childAbs = absPath === '/' ? `/${entry}` : `${absPath}/${entry}`;
-            const childRel = relPath ? `${relPath}/${entry}` : entry;
-            try {
-                const stat = await wc.fs.stat(childAbs);
-                if (stat?.isDirectory?.()) {
-                    zip.folder(childRel);
-                    await walk(childAbs, childRel);
-                } else {
-                    const content = await wc.fs.readFile(childAbs);
-                    zip.file(childRel, content);
-                }
-            } catch {
-                // ignore unreadable entries
-            }
-        }
-    };
-    try {
-        await walk(rootDir === '/' ? '/node_modules' : `${rootDir}/node_modules`, 'node_modules');
-        const bytes = await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
-        return bytes;
-    } catch {
-        return null;
-    }
-};
-
-const createNodeModulesSnapshot = async (
-    wc: any,
-    projectDir: string,
-): Promise<{ bytes: Uint8Array; format: 'tar.gz' | 'zip' } | null> => {
-    const cwd = projectDir || '/';
-    const tarAvailable = await isTarAvailable(wc);
-    if (!tarAvailable) {
-        console.info('[SandboxDecision] tar_unavailable_using_js_fallback', { cwd });
-        const zipBytes = await createZipArchiveFromDirectory(wc, cwd);
-        if (!zipBytes) return null;
-        return { bytes: zipBytes, format: 'zip' };
-    }
-    const proc = await wc.spawn('sh', ['-lc', `tar -czf "${SNAPSHOT_ARCHIVE_PATH}" -C "${cwd}" node_modules`], {
-        env: { FORCE_COLOR: '1' },
-    });
-    const exitCode = await runProcessAndCollectExit(proc, 120_000);
-    if (exitCode !== 0) return null;
-    try {
-        const archive = await wc.fs.readFile(SNAPSHOT_ARCHIVE_PATH);
-        return {
-            bytes: archive instanceof Uint8Array ? archive : new Uint8Array(archive),
-            format: 'tar.gz',
-        };
-    } catch {
-        return null;
-    }
-};
-
-const extractZipArchiveToDirectory = async (wc: any, projectDir: string, archiveBytes: Uint8Array): Promise<boolean> => {
-    try {
-        const zip = await JSZip.loadAsync(archiveBytes);
-        const writes = Object.values(zip.files).map(async (entry) => {
-            const normalized = entry.name.replace(/\\/g, '/').replace(/^\/+/, '');
-            if (!normalized) return;
-            const absPath = projectDir === '/' ? `/${normalized}` : `${projectDir}/${normalized}`;
-            if (entry.dir) {
-                await wc.fs.mkdir(absPath, { recursive: true });
-                return;
-            }
-            const folderPath = absPath.slice(0, absPath.lastIndexOf('/'));
-            if (folderPath) {
-                await wc.fs.mkdir(folderPath, { recursive: true });
-            }
-            const fileBytes = await entry.async('uint8array');
-            await wc.fs.writeFile(absPath, fileBytes);
-        });
-        await Promise.all(writes);
-        return true;
-    } catch {
-        return false;
-    }
-};
-
-const restoreNodeModulesSnapshot = async (
-    wc: any,
-    projectDir: string,
-    archiveBytes: Uint8Array,
-    archiveFormat: 'tar.gz' | 'zip' = 'tar.gz',
-): Promise<boolean> => {
-    const cwd = projectDir || '/';
-    if (archiveFormat === 'zip') {
-        return extractZipArchiveToDirectory(wc, cwd, archiveBytes);
-    }
-    const tarAvailable = await isTarAvailable(wc);
-    if (!tarAvailable) {
-        console.info('[SandboxDecision] tar_unavailable_using_js_fallback', { cwd, mode: 'restore' });
-        return extractZipArchiveToDirectory(wc, cwd, archiveBytes);
-    }
-    try {
-        await wc.fs.mkdir('/.boltly', { recursive: true });
-        await wc.fs.writeFile(SNAPSHOT_ARCHIVE_PATH, archiveBytes);
-        const proc = await wc.spawn('sh', ['-lc', `mkdir -p "${cwd}" && tar -xzf "${SNAPSHOT_ARCHIVE_PATH}" -C "${cwd}"`], {
-            env: { FORCE_COLOR: '1' },
-        });
-        const exitCode = await runProcessAndCollectExit(proc, 120_000);
-        return exitCode === 0;
-    } catch {
-        return false;
-    }
-};
 
 const flattenFileSystem = (items: FileSystemItem[], prefix = ''): { filePath: string; content: string }[] => {
     const out: { filePath: string; content: string }[] = [];
@@ -882,7 +577,6 @@ export const useChat = () => {
         if (!threadId || !isLoaded || !isSignedIn) return;
         const token = await getToken();
         if (!token) return;
-        const meta = threadRuntimeMeta.get(threadId);
         const issueCode = issue?.code || 'auto_recovery';
         const wc = webContainerInstance ?? getWebContainerInstance();
         if (!wc) return;
@@ -984,14 +678,43 @@ export const useChat = () => {
             await ensureRootPackageJsonExists(writtenFiles, wc, setFileSystem);
             await patchMissingDependencies(writtenFiles, wc, setFileSystem);
 
-            const shellQueue = normalizeShellCommandQueue(pendingShellCommands);
-            plannedCommands.push(...shellQueue);
-            if (shellQueue.length === 0 && writtenFiles.size === 0) {
+            const recoveryFileMap = buildFileMap(fileSystem, writtenFiles);
+            await syncProjectFiles(wc, threadId, recoveryFileMap, []);
+
+            if (writtenFiles.size === 0 && pendingShellCommands.length === 0) {
                 throw new Error('Agent returned no file or shell fixes');
             }
 
             let devServerStarted = false;
             let installSucceeded = false;
+
+            const depResult = await ensureProjectDependencies({
+                wc,
+                threadId,
+                fileMap: recoveryFileMap,
+                authToken: token,
+                apiUrl: API_URL,
+                writeShellOutput,
+                onPreviewStatus: (previewStatus, message) => {
+                    setPreviewStatus(previewStatus);
+                    setPreviewStatusMessage(message);
+                },
+                repairRootForNpm: (announce) => repairRootForNpm(wc, announce),
+                appendTerminalEvents: (events) => appendTerminalEvents(threadId, token, events),
+            });
+
+            if (!depResult.ok) {
+                throw new Error(depResult.errorMessage ?? 'Dependency install failed during recovery');
+            }
+
+            projectDir = depResult.projectDir;
+            await syncShellWorkingDirectory(shellWriter, projectDir);
+            installSucceeded = true;
+            activeDevServerFingerprint = depResult.depFingerprint;
+            activeCriticalFingerprint = depResult.criticalFingerprint;
+
+            const shellQueue = filterInstallShellCommands(normalizeShellCommandQueue(pendingShellCommands));
+            plannedCommands.push(...shellQueue);
 
             if (shellQueue.length > 0) {
                 const execResult = await executeShellCommandsInWebContainer({
@@ -1010,7 +733,8 @@ export const useChat = () => {
                     onDevServerStarted: (proc, command, cwd) => {
                         devServerStarted = true;
                         activeDevProcess = proc;
-                        activeDevServerFingerprint = meta?.depFingerprint ?? null;
+                        activeDevServerFingerprint = depResult.depFingerprint;
+                        activeCriticalFingerprint = depResult.criticalFingerprint;
                         status = 'resolved';
                         writeShellOutput('\r\n\x1b[32m✓ Dev server restarted by recovery agent\x1b[0m\r\n');
                         void appendTerminalEvents(threadId, token, [
@@ -1020,7 +744,6 @@ export const useChat = () => {
                 });
                 executedCommands = execResult.executedCommands;
                 devServerStarted = devServerStarted || execResult.devServerStarted;
-                installSucceeded = execResult.installSucceeded;
                 projectDir = execResult.finalCwd;
                 if (execResult.devProcess) {
                     activeDevProcess = execResult.devProcess;
@@ -1040,11 +763,7 @@ export const useChat = () => {
                 !devServerStarted &&
                 RECOVERY_BOOTSTRAP_ISSUE_CODES.has(issueCode)
             ) {
-                const bootstrapCommands: string[] = [];
-                if (!installSucceeded) {
-                    bootstrapCommands.push('npm install --legacy-peer-deps --prefer-offline --no-audit --no-fund');
-                }
-                bootstrapCommands.push('npm run dev');
+                const bootstrapCommands = ['npm run dev'];
                 plannedCommands.push(...bootstrapCommands);
 
                 const bootstrapResult = await executeShellCommandsInWebContainer({
@@ -1053,7 +772,6 @@ export const useChat = () => {
                     initialCwd: projectDir,
                     writeOutput: writeShellOutput,
                     failOnNonZeroExit: true,
-                    beforeNpmInstall: () => repairRootForNpm(wc, true),
                     onCommandComplete: async (command, cwd, exitCode) => {
                         await appendTerminalEvents(threadId, token, [
                             { eventType: 'command', payload: command, cwd },
@@ -1063,7 +781,8 @@ export const useChat = () => {
                     onDevServerStarted: (proc, command, cwd) => {
                         devServerStarted = true;
                         activeDevProcess = proc;
-                        activeDevServerFingerprint = meta?.depFingerprint ?? null;
+                        activeDevServerFingerprint = depResult.depFingerprint;
+                        activeCriticalFingerprint = depResult.criticalFingerprint;
                         writeShellOutput('\r\n\x1b[32m✓ Dev server started after recovery\x1b[0m\r\n');
                         void appendTerminalEvents(threadId, token, [
                             { eventType: 'command', payload: command, cwd },
@@ -1080,7 +799,6 @@ export const useChat = () => {
                     detail = bootstrapResult.detail ?? 'Post-recovery bootstrap failed';
                 } else {
                     status = 'resolved';
-                    installSucceeded = installSucceeded || bootstrapResult.installSucceeded;
                 }
             }
 
@@ -1280,246 +998,20 @@ createRoot(document.getElementById('root')!).render(
         await patchMissingDependencies(fileMap, wc, setFileSystem);
 
         if (abortIfStale('after_dependency_patch')) return;
-        const depFingerprint = getDependencyFingerprint(fileMap);
-        const criticalFingerprint = getCriticalConfigFingerprint(fileMap);
-        const inferredProjectDir = inferProjectDirectory(fileMap);
-        const projectDirResolution = await resolveProjectDirectoryForNpm(wc, fileMap, inferredProjectDir);
-        const projectDir = projectDirResolution.projectDir;
-        await syncShellWorkingDirectory(shellWriter, projectDir);
-        console.info('[SandboxDecision] project_dir_resolved', {
-            threadId,
-            depFingerprint,
-            inferredProjectDir,
-            projectDir,
-            packageJsonPath: projectDirResolution.packageJsonPath,
-            reasonCode: projectDirResolution.reasonCode,
-        });
-        const localInstalledFingerprint = await readInstalledDependencyFingerprint(wc);
-        const nodeModulesPresent = await hasInstalledNodeModules(wc, projectDir);
-        let hasLocalDependencyCache =
-            nodeModulesPresent &&
-            localInstalledFingerprint === depFingerprint;
-        let indexedSnapshotRecord: { archiveBase64: string; archiveFormat: 'tar.gz' | 'zip' } | null = null;
-        const prevMeta = threadRuntimeMeta.get(threadId);
         const incomingFiles = new Set([...fileMap.keys()].map((p) => p.replace(/^\//, '')));
-        let cachedDependencyPlan: any = null;
-        try {
-            const cachedRes = await fetch(`${API_URL}/sandbox/dependencies/${encodeURIComponent(depFingerprint)}`, {
-                headers: {
-                    Authorization: `Bearer ${authToken}`,
-                },
-            });
-            if (cachedRes.ok) {
-                cachedDependencyPlan = await cachedRes.json();
-            }
-        } catch {
-            cachedDependencyPlan = null;
-        }
-        const hasCachedDependencyPlan = !!cachedDependencyPlan;
-        const hasThreadRuntimeHit = !!(
-            prevMeta?.installSucceeded &&
-            prevMeta.depFingerprint === depFingerprint &&
-            prevMeta.criticalFingerprint === criticalFingerprint
-        );
-
-        if (!hasLocalDependencyCache) {
-            const indexedSnapshot = await loadDependencySnapshot(depFingerprint);
-            if (indexedSnapshot.status === 'miss') {
-                console.info('[SandboxDecision] indexeddb_miss', { threadId, depFingerprint });
-            }
-            if (indexedSnapshot.status === 'corrupt') {
-                console.warn('[SandboxDecision] indexeddb_evicted_or_corrupt', { threadId, depFingerprint });
-            }
-            if (indexedSnapshot.status === 'hit' && indexedSnapshot.record.toolchainVersion === SNAPSHOT_TOOLCHAIN_VERSION) {
-                indexedSnapshotRecord = indexedSnapshot.record;
-                const restoredFromIndexedDb = await restoreNodeModulesSnapshot(
-                    wc,
-                    projectDir,
-                    base64ToBytes(indexedSnapshot.record.archiveBase64),
-                    indexedSnapshot.record.archiveFormat,
-                );
-                if (restoredFromIndexedDb) {
-                    await persistInstalledDependencyFingerprint(wc, depFingerprint);
-                    hasLocalDependencyCache = true;
-                    console.info('[SandboxDecision] indexeddb_snapshot_restored', { threadId, depFingerprint });
-                } else {
-                    console.warn('[SandboxDecision] indexeddb_restore_failed', { threadId, depFingerprint });
-                }
-            }
-        }
-
-        if (
-            cachedDependencyPlan?.snapshotState === 'upload_pending' &&
-            indexedSnapshotRecord &&
-            (cachedDependencyPlan?.uploadAttemptCount || 0) < 3
-        ) {
-            const retryAttempt = (cachedDependencyPlan?.uploadAttemptCount || 0) + 1;
-            console.info(`[SandboxDecision] snapshot_upload_retry_attempt_${retryAttempt}`, {
-                threadId,
-                depFingerprint,
-            });
-            const pendingBytes = base64ToBytes(indexedSnapshotRecord.archiveBase64);
-            try {
-                await fetch(
-                    `${API_URL}/sandbox/snapshots/${encodeURIComponent(depFingerprint)}?toolchainVersion=${encodeURIComponent(SNAPSHOT_TOOLCHAIN_VERSION)}`,
-                    {
-                        method: 'PUT',
-                        headers: {
-                            Authorization: `Bearer ${authToken}`,
-                            'Content-Type': 'application/gzip',
-                        },
-                        body: Uint8Array.from(pendingBytes).buffer,
-                    },
-                );
-            } catch {
-                // backend tracks retry budget; local flow continues
-            }
-        }
-
-        const canAttemptRemoteSnapshot = cachedDependencyPlan?.snapshotState !== 'upload_failed';
-        if (!canAttemptRemoteSnapshot && !hasLocalDependencyCache) {
-            console.warn('[SandboxDecision] snapshot_upload_failed', {
-                threadId,
-                depFingerprint,
-                reason: 'upload_failed_state',
-            });
-        }
-
-        if (!hasLocalDependencyCache && canAttemptRemoteSnapshot) {
-            try {
-                const snapshotRes = await fetch(`${API_URL}/sandbox/snapshots/${encodeURIComponent(depFingerprint)}`, {
-                    headers: {
-                        Authorization: `Bearer ${authToken}`,
-                    },
-                });
-                if (snapshotRes.ok) {
-                    const snapshotBytes = new Uint8Array(await snapshotRes.arrayBuffer());
-                    const isZipSnapshot = snapshotBytes.length > 1 && snapshotBytes[0] === 0x50 && snapshotBytes[1] === 0x4b;
-                    const remoteFormat: 'tar.gz' | 'zip' = isZipSnapshot ? 'zip' : 'tar.gz';
-                    const restoredFromRemote = await restoreNodeModulesSnapshot(wc, projectDir, snapshotBytes, remoteFormat);
-                    if (restoredFromRemote) {
-                        await persistInstalledDependencyFingerprint(wc, depFingerprint);
-                        const saveResult = await saveDependencySnapshot({
-                            depFingerprint,
-                            toolchainVersion: SNAPSHOT_TOOLCHAIN_VERSION,
-                            createdAt: Date.now(),
-                            archiveBase64: bytesToBase64(snapshotBytes),
-                            archiveFormat: remoteFormat,
-                        });
-                        if (saveResult === 'quota_exceeded') {
-                            console.warn('[SandboxDecision] indexeddb_quota_exceeded', { threadId, depFingerprint });
-                        }
-                        hasLocalDependencyCache = true;
-                        console.info('[SandboxDecision] snapshot_restored', { threadId, depFingerprint });
-                    } else {
-                        console.warn('[SandboxDecision] remote_snapshot_restore_failed', { threadId, depFingerprint });
-                    }
-                } else if (snapshotRes.status === 404 && hasCachedDependencyPlan) {
-                    console.warn('[SandboxDecision] remote_meta_hit_snapshot_404', { threadId, depFingerprint });
-                }
-            } catch (error) {
-                console.warn('[SandboxDecision] snapshot_restore_failed', {
-                    threadId,
-                    depFingerprint,
-                    error: String(error),
-                });
-            }
-        }
-
-        let deltaPackages: string[] = [];
-        if (!hasLocalDependencyCache) {
-            const baseRestored = await attemptRestoreFingerprintSnapshot(
-                wc,
-                projectDir,
-                VITE_REACT_BASE_FINGERPRINT,
-                authToken,
-                API_URL,
-            );
-            if (baseRestored) {
-                if (depFingerprint === VITE_REACT_BASE_FINGERPRINT) {
-                    await persistInstalledDependencyFingerprint(wc, depFingerprint);
-                    hasLocalDependencyCache = true;
-                    setPreviewStatus('starting');
-                    setPreviewStatusMessage('Restoring cached dependencies…');
-                    console.info('[SandboxDecision] base_snapshot_exact_hit', { threadId, depFingerprint });
-                } else {
-                    deltaPackages = getAddedPackageNames(
-                        MINIMAL_ROOT_PACKAGE_JSON,
-                        fileMap.get('package.json') || '',
-                    );
-                    setPreviewStatus('starting');
-                    setPreviewStatusMessage(
-                        deltaPackages.length > 0
-                            ? `Restoring base stack, then installing ${deltaPackages.length} new package${deltaPackages.length > 1 ? 's' : ''}…`
-                            : 'Restoring base stack cache…',
-                    );
-                    console.info('[SandboxDecision] base_snapshot_restored', { threadId, depFingerprint, deltaPackages });
-                }
-            }
-        } else {
-            setPreviewStatus('starting');
-            setPreviewStatusMessage('Restoring cached dependencies…');
-        }
-
-        if (abortIfStale('after_snapshot_restore_checks')) return;
-
-        // Incremental sync: delete only files known in mounted project but absent now.
         const currentlyMountedFiles = activeMountedThreadId
             ? (mountedFilesByThread.get(activeMountedThreadId) ?? mountedProjectFiles)
             : mountedProjectFiles;
         const filesToDelete = [...currentlyMountedFiles].filter((p) => !incomingFiles.has(p));
-        for (const filePath of filesToDelete) {
-            try { await wc.fs.rm(filePath); } catch { /* ignore missing */ }
-        }
 
-        for (const [filePath, content] of fileMap) {
-            try {
-                const absPath = filePath.startsWith('/') ? filePath.substring(1) : filePath;
-                const dir = absPath.substring(0, absPath.lastIndexOf('/'));
-                if (dir && dir !== '') {
-                    try { await wc.fs.mkdir(dir, { recursive: true }); } catch { /* exists */ }
-                }
-                let shouldWrite = true;
-                try {
-                    const existing = await wc.fs.readFile(absPath, 'utf-8');
-                    shouldWrite = existing !== content;
-                } catch {
-                    shouldWrite = true;
-                }
-                if (shouldWrite) {
-                    await wc.fs.writeFile(absPath, content);
-                }
-            } catch (err) {
-                console.error(`[loadThread] Failed to write ${filePath}:`, err);
-            }
-        }
-
+        if (abortIfStale('before_file_sync')) return;
+        const syncResult = await syncProjectFiles(wc, threadId, fileMap, filesToDelete);
         mountedProjectFiles = incomingFiles;
         mountedFilesByThread.set(threadId, incomingFiles);
         activeMountedThreadId = threadId;
 
-        // Only skip install when dependency cache evidence matches this exact fingerprint.
-        // Mere node_modules presence is insufficient across thread switches.
-        const shouldInstall = !hasLocalDependencyCache;
-        const decisionSource = hasLocalDependencyCache
-            ? 'local_cache_hit'
-            : hasThreadRuntimeHit
-                ? 'thread_meta_hit'
-                : prevMeta?.depFingerprint && prevMeta.depFingerprint !== depFingerprint
-                    ? 'fingerprint_changed'
-                    : 'install_missing_evidence';
-        console.info('[SandboxDecision] install_gate', {
-            threadId,
-            depFingerprint,
-            criticalFingerprint,
-            localInstalledFingerprint,
-            nodeModulesPresent,
-            hasCachedDependencyPlan,
-            hasThreadRuntimeHit,
-            shouldInstall,
-            decisionSource,
-        });
-
+        const depFingerprint = getDependencyFingerprint(fileMap);
+        const criticalFingerprint = getCriticalConfigFingerprint(fileMap);
         const shouldRestartServer =
             !activeDevProcess ||
             activeDevServerFingerprint !== depFingerprint ||
@@ -1527,130 +1019,44 @@ createRoot(document.getElementById('root')!).render(
 
         try {
             if (abortIfStale('before_install_gate')) return;
-            if (shouldInstall) {
-                await repairRootForNpm(wc, true);
-                const installPlan = buildInstallPlan(fileMap, deltaPackages);
-                const installLabel = installPlan.label;
-                setPreviewStatus('starting');
-                setPreviewStatusMessage(
-                    installPlan.kind === 'delta'
-                        ? `Installing ${installPlan.deltaPackages?.length ?? 0} new packages…`
-                        : installPlan.kind === 'ci'
-                            ? 'Installing dependencies from lockfile…'
-                            : 'Installing dependencies…',
-                );
-                writeShellOutput(`\r\n\x1b[36m⬢ ${installLabel}...\x1b[0m\r\n`);
-                let installExit = 0;
-                let attempts = 0;
-                while (attempts < 2) {
-                    attempts += 1;
-                    const timeoutMs = attempts === 1 ? INSTALL_FIRST_ATTEMPT_TIMEOUT_MS : INSTALL_RETRY_TIMEOUT_MS;
-                    const cmdPayload = `${installPlan.program} ${installPlan.args.join(' ')}`;
-                    await appendTerminalEvents(threadId, authToken, [
-                        { eventType: 'command', payload: cmdPayload, cwd: projectDir },
-                    ]);
-                    const installProc = await wc.spawn(
-                        installPlan.program,
-                        installPlan.args,
-                        { env: { FORCE_COLOR: '1' }, cwd: projectDir },
-                    );
-                    console.info('[SandboxDecision] npm_spawn', {
-                        threadId,
-                        command: installLabel,
-                        kind: installPlan.kind,
-                        cwd: projectDir,
-                        packageJsonPath: projectDirResolution.packageJsonPath,
-                    });
-                    installProc.output.pipeTo(new WritableStream({
-                        write(data) { writeShellOutput(data); }
-                    }));
-                    installExit = await runProcessAndCollectExit(installProc, timeoutMs);
-                    await appendTerminalEvents(threadId, authToken, [
-                        { eventType: 'status', payload: `${installLabel} exit ${installExit}`, cwd: projectDir, exitCode: installExit },
-                    ]);
-                    if (installExit === 0) break;
-                    if (attempts < 2) {
-                        writeShellOutput('\r\n\x1b[33m⚠ Install failed once, retrying with extended timeout...\x1b[0m\r\n');
-                        console.warn('[SandboxDecision] install_retry', { threadId, depFingerprint, installExit, attempts });
-                    }
-                }
 
-                if (installExit !== 0) {
-                    const msg = installExit === -1
-                        ? `${installLabel} timed out. Open Terminal and click Fix with agent.`
-                        : `${installLabel} failed (exit ${installExit}). Open Terminal and click Fix with agent.`;
-                    setPreviewStatus('error');
-                    setPreviewStatusMessage(msg);
-                    writeShellOutput(`\r\n\x1b[31m✗ ${msg}\x1b[0m\r\n`);
-                    threadRuntimeMeta.set(threadId, {
-                        depFingerprint,
-                        criticalFingerprint,
-                        projectDir,
-                        lastAppliedSeq: latestSeq,
-                        installSucceeded: false,
-                        lastBootAt: Date.now(),
-                        knownFiles: incomingFiles,
-                        installFailureReason: msg,
-                    });
-                    return;
-                }
-                if (abortIfStale('after_install_success')) return;
-                await persistInstalledDependencyFingerprint(wc, depFingerprint);
-                const snapshotBytes = await createNodeModulesSnapshot(wc, projectDir);
-                if (snapshotBytes) {
-                    const estimatedIndexedDbBytes = Math.ceil(snapshotBytes.bytes.length * 1.37);
-                    if (estimatedIndexedDbBytes > MAX_INDEXEDDB_SNAPSHOT_BYTES) {
-                        console.warn('[SandboxDecision] indexeddb_quota_exceeded', {
-                            threadId,
-                            depFingerprint,
-                            estimatedBytes: estimatedIndexedDbBytes,
-                        });
-                    } else {
-                        const saveResult = await saveDependencySnapshot({
-                            depFingerprint,
-                            toolchainVersion: SNAPSHOT_TOOLCHAIN_VERSION,
-                            createdAt: Date.now(),
-                            archiveBase64: bytesToBase64(snapshotBytes.bytes),
-                            archiveFormat: snapshotBytes.format,
-                        });
-                        if (saveResult === 'quota_exceeded') {
-                            console.warn('[SandboxDecision] indexeddb_quota_exceeded', { threadId, depFingerprint });
-                        } else if (saveResult !== 'ok') {
-                            console.warn('[SandboxDecision] indexeddb_restore_failed', {
-                                threadId,
-                                depFingerprint,
-                                reason: 'indexeddb_save_failed',
-                            });
-                        }
-                    }
-                    const snapshotBody = Uint8Array.from(snapshotBytes.bytes).buffer;
-                    void fetch(
-                        `${API_URL}/sandbox/snapshots/${encodeURIComponent(depFingerprint)}?toolchainVersion=${encodeURIComponent(SNAPSHOT_TOOLCHAIN_VERSION)}`,
-                        {
-                            method: 'PUT',
-                            headers: {
-                                Authorization: `Bearer ${authToken}`,
-                                'Content-Type': 'application/gzip',
-                            },
-                            body: snapshotBody,
-                        },
-                    )
-                        .then(async (res) => {
-                            if (!res.ok) {
-                                console.warn('[SandboxDecision] snapshot_upload_failed', {
-                                    threadId,
-                                    depFingerprint,
-                                    status: res.status,
-                                });
-                            }
-                        })
-                        .catch(() => {
-                            console.warn('[SandboxDecision] snapshot_upload_failed', { threadId, depFingerprint });
-                        });
-                } else {
-                    console.warn('[SandboxDecision] snapshot_create_failed', { threadId, depFingerprint });
-                }
-            } else {
+            const depResult = await ensureProjectDependencies({
+                wc,
+                threadId,
+                fileMap,
+                authToken,
+                apiUrl: API_URL,
+                writeShellOutput,
+                onPreviewStatus: (status, message) => {
+                    setPreviewStatus(status);
+                    setPreviewStatusMessage(message);
+                },
+                repairRootForNpm: (announce) => repairRootForNpm(wc, announce),
+                appendTerminalEvents: (events) => appendTerminalEvents(threadId, authToken, events),
+                abortIfStale: () => abortIfStale('during_install'),
+            });
+
+            const projectDir = depResult.projectDir;
+            await syncShellWorkingDirectory(shellWriter, projectDir);
+
+            if (!depResult.ok) {
+                if (depResult.errorMessage === 'Stale thread switch') return;
+                threadRuntimeMeta.set(threadId, {
+                    depFingerprint: depResult.depFingerprint,
+                    criticalFingerprint: depResult.criticalFingerprint,
+                    projectDir,
+                    lastAppliedSeq: latestSeq,
+                    installSucceeded: false,
+                    lastBootAt: Date.now(),
+                    knownFiles: incomingFiles,
+                    installFailureReason: depResult.errorMessage,
+                });
+                return;
+            }
+
+            if (abortIfStale('after_install')) return;
+
+            if (depResult.cacheHit && !depResult.installed) {
                 setPreviewStatus('starting');
                 setPreviewStatusMessage('Dependencies ready. Starting dev server…');
             }
@@ -1664,7 +1070,7 @@ createRoot(document.getElementById('root')!).render(
                 setPreviewStatusMessage('Starting development server…');
                 writeShellOutput('\r\n\x1b[36m⬢ Starting dev server...\x1b[0m\r\n');
                 const devProc = await wc.spawn('npm', ['run', 'dev'], {
-                    env: { FORCE_COLOR: '1' },
+                    env: WEBCONTAINER_SPAWN_ENV,
                     cwd: projectDir,
                 });
                 await appendTerminalEvents(threadId, authToken, [
@@ -1674,7 +1080,6 @@ createRoot(document.getElementById('root')!).render(
                     threadId,
                     command: 'npm run dev',
                     cwd: projectDir,
-                    packageJsonPath: projectDirResolution.packageJsonPath,
                 });
                 devProc.output.pipeTo(new WritableStream({
                     write(data) { writeShellOutput(data); }
@@ -1714,7 +1119,11 @@ createRoot(document.getElementById('root')!).render(
             console.info('[SandboxPerf] thread_boot_complete', {
                 threadId,
                 elapsedMs: elapsed,
-                installed: shouldInstall,
+                installed: depResult.installed,
+                cacheHit: depResult.cacheHit,
+                restoreMs: depResult.restoreMs,
+                installMs: depResult.installMs,
+                fileSyncMs: syncResult.ms,
                 restartedServer: shouldRestartServer,
             });
         } catch (err) {
@@ -1722,10 +1131,11 @@ createRoot(document.getElementById('root')!).render(
             setPreviewStatus('error');
             setPreviewStatusMessage(`Install error: ${String(err)}`);
             writeShellOutput(`\r\n\x1b[31m✗ Install error: ${err}\x1b[0m\r\n`);
+            const errProjectDir = inferProjectDirectory(fileMap);
             threadRuntimeMeta.set(threadId, {
                 depFingerprint,
                 criticalFingerprint,
-                projectDir,
+                projectDir: errProjectDir,
                 lastAppliedSeq: latestSeq,
                 installSucceeded: false,
                 lastBootAt: Date.now(),
@@ -1738,7 +1148,7 @@ createRoot(document.getElementById('root')!).render(
                     threadId,
                     depFingerprint,
                     criticalFingerprint,
-                    projectDir,
+                    projectDir: errProjectDir,
                     lastAppliedSeq: latestSeq,
                     installSucceeded: false,
                     lastBootAt: Date.now(),
@@ -1755,12 +1165,14 @@ createRoot(document.getElementById('root')!).render(
     }, [API_URL, appendTerminalEvents, setFileSystem, setPreviewStatus, setPreviewStatusMessage, setSandboxRuntimeMetadata, shellWriter]);
 
     type SendMessageResult = { ok: true } | { ok: false; error: string };
+    type SendMessageOptions = { mode?: ChatMode };
 
     const sendMessage = async (
         content: string,
         attachments: ChatAttachmentPayload[] = [],
         figmaLinks: FigmaLinkPayload[] = [],
         stitchContext: StitchContextPayload | null = null,
+        options?: SendMessageOptions,
     ): Promise<SendMessageResult> => {
         if (!content.trim()) {
             return { ok: false, error: 'Enter a prompt describing what you want to build.' };
@@ -1772,7 +1184,12 @@ createRoot(document.getElementById('root')!).render(
             return { ok: false, error: 'Sign in to start building.' };
         }
 
-        console.log('[useChat] sendMessage called:', { content: content.substring(0, 50), model: selectedModel });
+        const effectiveMode = options?.mode ?? chatMode;
+        if (options?.mode) {
+            setChatMode(options.mode);
+        }
+
+        console.log('[useChat] sendMessage called:', { content: content.substring(0, 50), model: selectedModel, mode: effectiveMode });
 
         const stitchSuffix = stitchContext ? '\n[Stitch context attached]' : '';
         const figmaSuffix = figmaLinks.length > 0
@@ -1784,9 +1201,10 @@ createRoot(document.getElementById('root')!).render(
             id: Date.now().toString(),
             role: 'user' as const,
             content: attachments.length > 0
-                ? `[Mode: ${chatMode === 'plan' ? 'Plan' : 'Build'}]\n${content}\n\n[Attached ${attachments.length} file${attachments.length > 1 ? 's' : ''}]${figmaSuffix}${stitchSuffix}`
-                : `[Mode: ${chatMode === 'plan' ? 'Plan' : 'Build'}]\n${content}${figmaSuffix || stitchSuffix ? `\n\n${figmaSuffix}${stitchSuffix}` : ''}`,
+                ? `[Mode: ${effectiveMode === 'plan' ? 'Plan' : 'Build'}]\n${content}\n\n[Attached ${attachments.length} file${attachments.length > 1 ? 's' : ''}]${figmaSuffix}${stitchSuffix}`
+                : `[Mode: ${effectiveMode === 'plan' ? 'Plan' : 'Build'}]\n${content}${figmaSuffix || stitchSuffix ? `\n\n${figmaSuffix}${stitchSuffix}` : ''}`,
             timestamp: Date.now(),
+            conversationMode: effectiveMode,
         };
         setMessages((prev) => [...prev, userMessage]);
         setIsLoading(true);
@@ -1808,7 +1226,7 @@ createRoot(document.getElementById('root')!).render(
                     message: content,
                     threadId: currentThreadId,
                     model: selectedModel,
-                    mode: chatMode,
+                    mode: effectiveMode,
                     attachments,
                     figmaLinks,
                     stitchContext: stitchContext || undefined,
@@ -1845,8 +1263,9 @@ createRoot(document.getElementById('root')!).render(
                 {
                     id: assistantMessageId,
                     role: 'assistant',
-                    content: '', // Start empty, shows spinner
+                    content: '',
                     timestamp: Date.now(),
+                    conversationMode: effectiveMode,
                 },
             ]);
 
@@ -1864,7 +1283,7 @@ createRoot(document.getElementById('root')!).render(
                 const { done, value } = await reader.read();
                 if (done) break;
 
-                if (!didNavigateForStream && value && value.byteLength > 0) {
+                if (!didNavigateForStream && value && value.byteLength > 0 && effectiveMode === 'build') {
                     didNavigateForStream = true;
                     navigate('/builder');
                 }
@@ -1879,6 +1298,7 @@ createRoot(document.getElementById('root')!).render(
                 const wc = webContainerInstance ?? getWebContainerInstance();
 
                 for (const action of actions) {
+                    if (effectiveMode !== 'build') continue;
                     if (action.type === 'file' && action.filePath) {
                         const path = action.filePath;
                         const fileContent = action.content;
@@ -1900,9 +1320,6 @@ createRoot(document.getElementById('root')!).render(
                         openEditorTab({ path: path.replace(/^\//, ''), name: fileName, content: fileContent });
                     }
                     if (action.type === 'shell') {
-                        // Queue shell commands — don't execute during stream reading
-                        // because `await proc.exit` would block the reader and cause
-                        // subsequent actions to be missed.
                         pendingShellCommands.push(action.content.trim());
                     }
                 }
@@ -1910,7 +1327,7 @@ createRoot(document.getElementById('root')!).render(
                 setMessages((prev) =>
                     prev.map((msg) =>
                         msg.id === assistantMessageId
-                            ? { ...msg, content: stripBoltTags(accumulatedContent) }
+                            ? { ...msg, content: stripBoltTags(accumulatedContent), conversationMode: effectiveMode }
                             : msg
                     )
                 );
@@ -1921,6 +1338,7 @@ createRoot(document.getElementById('root')!).render(
             // Flush any remaining buffered actions from the parser
             const remaining = parser.parse('');
             for (const action of remaining) {
+                if (effectiveMode !== 'build') continue;
                 if (action.type === 'file' && action.filePath) {
                     const path = action.filePath;
                     const fileContent = action.content;
@@ -1940,46 +1358,137 @@ createRoot(document.getElementById('root')!).render(
 
             await fsWriteChain.current;
 
-            // ── Phase 1.5: Ensure root package.json, patch deps, then run shell ──
-            const wcForNpm = webContainerInstance ?? getWebContainerInstance();
-            await ensureRootPackageJsonExists(writtenFiles, wcForNpm, setFileSystem);
-            await patchMissingDependencies(writtenFiles, wcForNpm, setFileSystem);
+            if (effectiveMode === 'build') {
+                const wcForNpm = webContainerInstance ?? getWebContainerInstance();
+                await ensureRootPackageJsonExists(writtenFiles, wcForNpm, setFileSystem);
+                await patchMissingDependencies(writtenFiles, wcForNpm, setFileSystem);
 
-            // ── Phase 2: Execute queued shell commands sequentially ──
-            const wc = wcForNpm;
-            const shellQueue = normalizeShellCommandQueue(pendingShellCommands);
-            if (wc && shellQueue.length > 0) {
-                setPreviewStatus('starting');
-                setPreviewStatusMessage('Running install/start commands inside the sandbox...');
-                await executeShellCommandsInWebContainer({
-                    wc,
-                    commands: shellQueue,
-                    initialCwd: inferProjectDirectory(writtenFiles),
-                    writeOutput: writeShellOutput,
-                    beforeNpmInstall: () => repairRootForNpm(wc, true),
-                    onDevServerStarted: (proc) => {
-                        activeDevProcess = proc;
-                    },
-                    onTimeout: (command, timeoutMs) => {
+                const wc = wcForNpm;
+                const buildThreadId = newThreadId ?? currentThreadId ?? localStorage.getItem('currentThreadId') ?? '';
+                const installFileMap = new Map<string, string>();
+                for (const [k, v] of writtenFiles) {
+                    installFileMap.set(normalizeWrittenPath(k), v);
+                }
+
+                if (wc && installFileMap.size > 0 && buildThreadId && token) {
+                    setPreviewStatus('starting');
+                    setPreviewStatusMessage('Ensuring dependencies…');
+
+                    const depResult = await ensureProjectDependencies({
+                        wc,
+                        threadId: buildThreadId,
+                        fileMap: installFileMap,
+                        authToken: token,
+                        apiUrl: API_URL,
+                        writeShellOutput,
+                        onPreviewStatus: (previewStatus, message) => {
+                            setPreviewStatus(previewStatus);
+                            setPreviewStatusMessage(message);
+                        },
+                        repairRootForNpm: (announce) => repairRootForNpm(wc, announce),
+                    });
+
+                    if (!depResult.ok) {
                         setPreviewStatus('error');
-                        setPreviewStatusMessage(`Command timed out: ${command}`);
-                        writeShellOutput(
-                            `\r\n\x1b[33m⚠ Command timed out after ${timeoutMs / 1000}s: ${command}\x1b[0m\r\n`,
-                        );
-                    },
-                    onNonZeroExit: (command, exitCode) => {
-                        setPreviewStatus('error');
-                        setPreviewStatusMessage(`Command failed (${exitCode}): ${command}`);
-                        writeShellOutput(`\r\n\x1b[33m⚠ Command exited with code ${exitCode}: ${command}\x1b[0m\r\n`);
-                    },
-                    onCommandError: (command, err) => {
-                        console.error(`[Bolt] spawn failed for "${command}":`, err);
-                        setPreviewStatus('error');
-                        setPreviewStatusMessage(`Failed to run command: ${command}`);
-                        writeShellOutput(`\r\n\x1b[31m✗ Failed: ${command} — ${err}\x1b[0m\r\n`);
-                    },
-                });
+                        setPreviewStatusMessage(depResult.errorMessage ?? 'Dependency install failed');
+                    } else {
+                        activeDevServerFingerprint = depResult.depFingerprint;
+                        activeCriticalFingerprint = depResult.criticalFingerprint;
+                        await syncShellWorkingDirectory(shellWriter, depResult.projectDir);
+
+                        const shellQueue = filterInstallShellCommands(normalizeShellCommandQueue(pendingShellCommands));
+                        const hasDevCommand = shellQueue.some((c) => /npm\s+run\s+dev\b/i.test(c));
+
+                        if (shellQueue.length > 0) {
+                            setPreviewStatus('starting');
+                            setPreviewStatusMessage('Running start commands inside the sandbox…');
+                            await executeShellCommandsInWebContainer({
+                                wc,
+                                commands: shellQueue,
+                                initialCwd: depResult.projectDir,
+                                writeOutput: writeShellOutput,
+                                beforeNpmInstall: () => repairRootForNpm(wc, true),
+                                onDevServerStarted: (proc) => {
+                                    activeDevProcess = proc;
+                                    activeDevServerFingerprint = depResult.depFingerprint;
+                                    activeCriticalFingerprint = depResult.criticalFingerprint;
+                                },
+                                onTimeout: (command, timeoutMs) => {
+                                    setPreviewStatus('error');
+                                    setPreviewStatusMessage(`Command timed out: ${command}`);
+                                    writeShellOutput(
+                                        `\r\n\x1b[33m⚠ Command timed out after ${timeoutMs / 1000}s: ${command}\x1b[0m\r\n`,
+                                    );
+                                },
+                                onNonZeroExit: (command, exitCode) => {
+                                    setPreviewStatus('error');
+                                    setPreviewStatusMessage(`Command failed (${exitCode}): ${command}`);
+                                    writeShellOutput(`\r\n\x1b[33m⚠ Command exited with code ${exitCode}: ${command}\x1b[0m\r\n`);
+                                },
+                                onCommandError: (command, err) => {
+                                    console.error(`[Bolt] spawn failed for "${command}":`, err);
+                                    setPreviewStatus('error');
+                                    setPreviewStatusMessage(`Failed to run command: ${command}`);
+                                    writeShellOutput(`\r\n\x1b[31m✗ Failed: ${command} — ${err}\x1b[0m\r\n`);
+                                },
+                            });
+                        } else if (!hasDevCommand && !activeDevProcess) {
+                            setPreviewStatus('starting');
+                            setPreviewStatusMessage('Starting development server…');
+                            writeShellOutput('\r\n\x1b[36m⬢ Starting dev server...\x1b[0m\r\n');
+                            const devProc = await wc.spawn('npm', ['run', 'dev'], {
+                                env: WEBCONTAINER_SPAWN_ENV,
+                                cwd: depResult.projectDir,
+                            });
+                            devProc.output.pipeTo(new WritableStream({
+                                write(data) { writeShellOutput(data); },
+                            }));
+                            activeDevProcess = devProc;
+                        }
+                    }
+                } else if (wc) {
+                    const shellQueue = filterInstallShellCommands(normalizeShellCommandQueue(pendingShellCommands));
+                    if (shellQueue.length > 0) {
+                        setPreviewStatus('starting');
+                        setPreviewStatusMessage('Running commands inside the sandbox…');
+                        await executeShellCommandsInWebContainer({
+                            wc,
+                            commands: shellQueue,
+                            initialCwd: inferProjectDirectory(writtenFiles),
+                            writeOutput: writeShellOutput,
+                            beforeNpmInstall: () => repairRootForNpm(wc, true),
+                            onDevServerStarted: (proc) => {
+                                activeDevProcess = proc;
+                            },
+                            onTimeout: (command, _timeoutMs) => {
+                                setPreviewStatus('error');
+                                setPreviewStatusMessage(`Command timed out: ${command}`);
+                            },
+                            onNonZeroExit: (command, exitCode) => {
+                                setPreviewStatus('error');
+                                setPreviewStatusMessage(`Command failed (${exitCode}): ${command}`);
+                            },
+                            onCommandError: (command, err) => {
+                                console.error(`[Bolt] spawn failed for "${command}":`, err);
+                                setPreviewStatus('error');
+                                setPreviewStatusMessage(`Failed to run command: ${command}`);
+                            },
+                        });
+                    }
+                }
             }
+
+            setMessages((prev) =>
+                prev.map((msg) =>
+                    msg.id === assistantMessageId
+                        ? {
+                            ...msg,
+                            content: stripBoltTags(accumulatedContent),
+                            conversationMode: effectiveMode,
+                        }
+                        : msg,
+                ),
+            );
 
             return { ok: true };
         } catch (error) {
@@ -2099,36 +1608,10 @@ createRoot(document.getElementById('root')!).render(
 
         const wc = webContainerInstance ?? getWebContainerInstance();
         if (wc) {
-            for (const deletedPathRaw of deletedPaths) {
-                const deletedPath = String(deletedPathRaw || '').replace(/^\//, '');
-                if (!deletedPath) continue;
-                try {
-                    await wc.fs.rm(`/${deletedPath}`);
-                } catch {
-                    // ignore non-existing files
-                }
-            }
-            for (const [filePath, content] of fileMap) {
-                const absPath = `/${filePath}`;
-                const dir = absPath.substring(0, absPath.lastIndexOf('/'));
-                if (dir && dir !== '/') {
-                    try {
-                        await wc.fs.mkdir(dir, { recursive: true });
-                    } catch {
-                        // ignore existing folder
-                    }
-                }
-                let shouldWrite = true;
-                try {
-                    const existing = await wc.fs.readFile(absPath, 'utf-8');
-                    shouldWrite = existing !== content;
-                } catch {
-                    shouldWrite = true;
-                }
-                if (shouldWrite) {
-                    await wc.fs.writeFile(absPath, content);
-                }
-            }
+            const deletedNormalized = deletedPaths
+                .map((p: string) => String(p || '').replace(/^\//, ''))
+                .filter(Boolean);
+            await syncProjectFiles(wc, threadId, fileMap, deletedNormalized);
         }
 
         const incomingFiles = new Set([...fileMap.keys()]);
@@ -2287,6 +1770,9 @@ createRoot(document.getElementById('root')!).render(
                 role: m.role,
                 content: m.role === 'assistant' ? stripBoltTags(m.content) : m.content,
                 timestamp: new Date(m.createdAt).getTime(),
+                conversationMode: m.conversationMode === 'plan' || m.conversationMode === 'build'
+                    ? m.conversationMode
+                    : undefined,
             }));
             const latestModeMessage = [...rawMessages]
                 .reverse()
@@ -2407,9 +1893,52 @@ createRoot(document.getElementById('root')!).render(
         return res.json();
     }, [isLoaded, isSignedIn, getToken]);
 
+    type PlanAction = 'build' | 'change' | 'comment';
+
+    const executePlanAction = useCallback(async (
+        action: PlanAction,
+        feedback = '',
+    ): Promise<SendMessageResult> => {
+        if (action === 'build') {
+            return sendMessage(
+                'Implement the approved plan above exactly. Follow the saved plan context — create all listed files, install dependencies, and start the dev server.',
+                [],
+                [],
+                null,
+                { mode: 'build' },
+            );
+        }
+        if (action === 'change') {
+            if (!feedback.trim()) {
+                return { ok: false, error: 'Describe what to change in the plan.' };
+            }
+            return sendMessage(
+                `Revise the implementation plan with these changes:\n\n${feedback.trim()}\n\nReturn the full updated plan using the same structured sections.`,
+                [],
+                [],
+                null,
+                { mode: 'plan' },
+            );
+        }
+        if (action === 'comment') {
+            if (!feedback.trim()) {
+                return { ok: false, error: 'Enter your comments first.' };
+            }
+            return sendMessage(
+                `Incorporate the following feedback into the plan (add notes or adjust sections as needed):\n\n${feedback.trim()}\n\nReturn the full updated plan using the same structured sections.`,
+                [],
+                [],
+                null,
+                { mode: 'plan' },
+            );
+        }
+        return { ok: false, error: 'Unknown plan action.' };
+    }, [sendMessage]);
+
     return {
         messages,
         sendMessage,
+        executePlanAction,
         fetchThreads,
         fetchThreadVersions,
         restoreThreadToSeq,

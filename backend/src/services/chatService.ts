@@ -113,11 +113,29 @@ export const normalizeMode = (raw: string | null | undefined): ConversationMode 
 );
 
 const PLAN_MODE_PROMPT = `
-You are in PLAN MODE.
-- Provide an implementation plan, architecture decisions, trade-offs, and validation strategy.
-- Do not emit <boltArtifact> or <boltAction> tags.
-- Do not output file diffs or shell commands.
-- Keep the plan actionable and ordered.
+You are in PLAN MODE — deep planning only. Do not write code or run commands.
+
+Produce a thorough, structured implementation plan using this markdown outline (include every section):
+
+## Executive summary
+## Goals & constraints
+## Architecture overview
+## File & folder structure
+## Component breakdown
+## Data model & state
+## UI/UX notes
+## Dependencies & tooling
+## Implementation steps
+## Validation & testing
+## Risks & trade-offs
+## Open questions
+
+Rules:
+- Be specific: name files, components, routes, hooks, and key state/props.
+- Implementation steps must be numbered and ordered for a developer to follow.
+- Do NOT emit <boltArtifact> or <boltAction> tags.
+- Do NOT include full file contents, diffs, or shell commands.
+- Keep each section substantive — avoid one-line placeholders.
 `.trim();
 
 const BUILD_MODE_PROMPT = `

@@ -471,7 +471,9 @@ export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default' }) => 
                             <textarea
                                 ref={textareaRef}
                                 className={`${textareaClass} flex-1`}
-                                placeholder="Describe your app idea..."
+                                placeholder={chatMode === 'plan'
+                                    ? 'Describe what you want to build — get a detailed plan first…'
+                                    : 'Describe your app idea…'}
                                 value={inputValue}
                                 onChange={(e) => {
                                     setInputValue(e.target.value);
@@ -534,7 +536,9 @@ export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default' }) => 
                     <textarea
                         ref={textareaRef}
                         className={textareaClass}
-                        placeholder="Describe your app idea..."
+                        placeholder={chatMode === 'plan'
+                            ? 'Describe what you want to build — get a detailed plan first…'
+                            : 'Describe your app idea…'}
                         value={inputValue}
                         onChange={(e) => {
                             setInputValue(e.target.value);

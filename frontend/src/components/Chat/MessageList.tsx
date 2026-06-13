@@ -1,8 +1,10 @@
 
-import React, { useEffect, useRef, useState, useCallback, memo } from 'react';
-import { Check, Copy, FileCode, ChevronDown, ChevronRight, Sparkles } from 'lucide-react';
+import React, { useEffect, useRef, useState, useCallback, memo, useMemo } from 'react';
+import { Check, Copy, FileCode, ChevronDown, ChevronRight, Sparkles, ClipboardList } from 'lucide-react';
 import { useAtomValue } from 'jotai';
 import { messagesAtom } from '../../store/atoms';
+import { PlanMessageActions } from './PlanMessageActions';
+import { useChat } from '../../hooks/useChat';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
@@ -10,7 +12,18 @@ import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
 
 export const MessageList: React.FC = () => {
     const messages = useAtomValue(messagesAtom);
+    const { isLoading } = useChat();
     const bottomRef = useRef<HTMLDivElement>(null);
+
+    const latestPlanMessageId = useMemo(() => {
+        for (let i = messages.length - 1; i >= 0; i -= 1) {
+            const msg = messages[i];
+            if (msg.role === 'assistant' && msg.conversationMode === 'plan' && msg.content.trim()) {
+                return msg.id;
+            }
+        }
+        return null;
+    }, [messages]);
 
     useEffect(() => {
         if (bottomRef.current) {
@@ -46,7 +59,11 @@ export const MessageList: React.FC = () => {
                         }`}
                     >
                         {msg.role === 'assistant' ? (
-                            <AssistantMessage content={msg.content} />
+                            <AssistantMessage
+                                content={msg.content}
+                                conversationMode={msg.conversationMode}
+                                showPlanActions={msg.id === latestPlanMessageId && !isLoading}
+                            />
                         ) : (
                             msg.content
                         )}
@@ -144,7 +161,11 @@ const langDisplayName: Record<string, string> = {
 };
 
 // Renders assistant messages with proper markdown
-const AssistantMessage: React.FC<{ content: string }> = memo(({ content }) => {
+const AssistantMessage: React.FC<{
+    content: string;
+    conversationMode?: 'plan' | 'build';
+    showPlanActions?: boolean;
+}> = memo(({ content, conversationMode, showPlanActions = false }) => {
     if (!content) {
         return (
             <div className="flex items-center gap-2 text-zinc-500">
@@ -160,8 +181,19 @@ const AssistantMessage: React.FC<{ content: string }> = memo(({ content }) => {
         ? content.replace(/^Generated \d+ files?:\n(?:[-•*]\s*(?:Creating\s+)?[\w/.\-]+\n?)+/, '').trim()
         : content;
 
+    const isPlanMessage = conversationMode === 'plan';
+
     return (
         <div className="chat-markdown">
+            {isPlanMessage && (
+                <div className="mb-3 flex items-center gap-2 rounded-lg border border-violet-500/30 bg-violet-950/25 px-3 py-2">
+                    <ClipboardList className="w-4 h-4 text-violet-400 shrink-0" />
+                    <div>
+                        <p className="text-xs font-semibold text-violet-200">Implementation plan</p>
+                        <p className="text-[11px] text-violet-300/70">Review below, then build or refine.</p>
+                    </div>
+                </div>
+            )}
             {hasFileSummary && <FileActionsSummary content={content} />}
             {narrativeContent && (
                 <ReactMarkdown
@@ -287,6 +319,7 @@ const AssistantMessage: React.FC<{ content: string }> = memo(({ content }) => {
                     {narrativeContent}
                 </ReactMarkdown>
             )}
+            {showPlanActions && isPlanMessage && <PlanMessageActions />}
         </div>
     );
 });

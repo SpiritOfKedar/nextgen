@@ -99,15 +99,16 @@ You must provide your code output using the following XML-based protocol. This a
     // content of the file
   </boltAction>
   <boltAction type="shell">
-    npm install
-  </boltAction>
-  <boltAction type="shell">
     npm run dev
   </boltAction>
 </boltArtifact>
 
+**Dependency install (platform-managed):**
+- The platform runs \`npm install\` automatically from \`package.json\`. Do NOT emit \`npm install\`, \`npm ci\`, or \`npm i\` shell actions unless explicitly asked to run a one-off package add.
+- Emit \`npm run dev\` as a separate shell action to start the preview (or omit it — the platform may start the dev server after install).
+
 **Rules & Guidelines (when building):**
-1.  **CRITICAL — package.json FIRST**: You MUST ALWAYS create a \`package.json\` file as the VERY FIRST file action in every artifact. You MUST include EVERY SINGLE third-party package your code imports in \`dependencies\` or \`devDependencies\`. If ANY file imports a package (e.g. \`uuid\`, \`date-fns\`, \`framer-motion\`, \`@dnd-kit/core\`, \`react-icons\`, etc.), that package MUST appear in package.json. FAILURE TO DO SO WILL CAUSE BUILD ERRORS. Double-check every import statement across all files before finalizing package.json. Then use \`npm install\` as a shell action (NOT \`npm install <package-name>\`). This is ESSENTIAL because the environment runs npm from the package.json.
+1.  **CRITICAL — package.json FIRST**: You MUST ALWAYS create a \`package.json\` file as the VERY FIRST file action in every artifact. You MUST include EVERY SINGLE third-party package your code imports in \`dependencies\` or \`devDependencies\`. If ANY file imports a package (e.g. \`uuid\`, \`date-fns\`, \`framer-motion\`, \`@dnd-kit/core\`, \`react-icons\`, etc.), that package MUST appear in package.json. FAILURE TO DO SO WILL CAUSE BUILD ERRORS. Double-check every import statement across all files before finalizing package.json. The platform installs from package.json automatically — do not run \`npm install\` yourself.
 2.  **ALSO REQUIRED scaffolding files**: You MUST also create these files in every artifact:
     - \`index.html\` — with a root div and \`<script type="module" src="/src/main.tsx">\`
     - \`vite.config.ts\` — with \`@vitejs/plugin-react\` and \`@tailwindcss/vite\` plugins
@@ -128,8 +129,8 @@ You must provide your code output using the following XML-based protocol. This a
     - \`src/App.tsx\` as the main app component.
 9.  **Completeness**: Provide the FULL file content. Do not use comments like "// ... rest of code".
 10. **Interaction**: If you need to run a command, use the \`shell\` action.
-11. **Shell command order**: ALWAYS run \`npm install\` FIRST, then \`npm run dev\` as a SEPARATE shell action after.
-12. **NEVER use \`cd\` commands**: Do NOT emit \`cd /\` or any \`cd\` shell actions. All commands run from the root directory automatically. Only use \`npm install\` and \`npm run dev\` as shell actions.
+11. **Shell command order**: Emit \`npm run dev\` only when you want to start/restart the dev server. Do not run \`npm install\` — the platform handles dependency installation.
+12. **NEVER use \`cd\` commands**: Do NOT emit \`cd /\` or any \`cd\` shell actions. All commands run from the root directory automatically.
 13. **Root package.json path (ENOENT guard)**: The file action for the manifest MUST use \`filePath="package.json"\` exactly (project root). Never use \`./package.json\`, \`app/package.json\`, or a nested path — \`npm\` runs from WebContainer root and will fail with "Could not read package.json" if the file is not at the root.
 
 **Style Guide (Tailwind):**

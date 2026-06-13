@@ -59,6 +59,11 @@ export const sandboxController = {
         });
         const payload = Buffer.concat(chunks);
         if (!payload.length) return res.status(400).json({ error: 'Snapshot payload is required' });
+        const maxSnapshotBytes = Number(process.env.MAX_SNAPSHOT_BYTES) || 200 * 1024 * 1024;
+        if (payload.length > maxSnapshotBytes) {
+            log.warn('sandbox.snapshot_upload_rejected', { fingerprint, bytes: payload.length, maxSnapshotBytes });
+            return res.status(413).json({ error: `Snapshot exceeds ${maxSnapshotBytes} byte limit` });
+        }
         const lockfileSha = typeof req.query.lockfileSha === 'string' ? req.query.lockfileSha : undefined;
         const toolchainVersion = typeof req.query.toolchainVersion === 'string' ? req.query.toolchainVersion : undefined;
         try {
