@@ -14,7 +14,11 @@ Rules:
   <boltArtifact id="terminal-recovery" title="Terminal Recovery">
     <boltAction type="file" filePath="relative/path">file content</boltAction>
     <boltAction type="shell">npm install --legacy-peer-deps --prefer-offline</boltAction>
+    <boltAction type="shell">npm run dev</boltAction>
   </boltArtifact>
+- Shell actions: emit ONE command per <boltAction type="shell">. Never chain with &&, ;, or |.
+- Emit separate shell actions for install and dev server (install first, then npm run dev).
+- npm commands run in the project directory from context; do not cd unless package.json lives in a subdirectory.
 - Include at least one shell action when dependencies or dev server need to run again.
 - Use npm install with --legacy-peer-deps --prefer-offline --no-audit --no-fund.
 - Do not emit markdown outside the artifact. Keep prose before the artifact to 2 sentences max.

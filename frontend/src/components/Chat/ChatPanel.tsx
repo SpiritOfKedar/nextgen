@@ -9,7 +9,7 @@ import { UserButton, useAuth } from '@clerk/clerk-react';
 import { useSetAtom, useAtom, useAtomValue } from 'jotai';
 import { messagesAtom, currentThreadIdAtom, threadSwitchStateAtom } from '../../store/atoms';
 import { useNavigate } from 'react-router-dom';
-import { fileSystemAtom, activeFileAtom } from '../../store/fileSystem';
+import { fileSystemAtom, clearEditorTabsAtom } from '../../store/fileSystem';
 import { previewStatusAtom, previewStatusMessageAtom, webContainerAtom, serverUrlAtom } from '../../store/webContainer';
 import { useChat } from '../../hooks/useChat';
 
@@ -20,7 +20,7 @@ export const ChatPanel: React.FC = () => {
     const [messages, setMessages] = useAtom(messagesAtom);
     const [currentThreadId, setCurrentThreadId] = useAtom(currentThreadIdAtom);
     const setFileSystem = useSetAtom(fileSystemAtom);
-    const setActiveFile = useSetAtom(activeFileAtom);
+    const clearEditorTabs = useSetAtom(clearEditorTabsAtom);
     const setServerUrl = useSetAtom(serverUrlAtom);
     const setPreviewStatus = useSetAtom(previewStatusAtom);
     const setPreviewStatusMessage = useSetAtom(previewStatusMessageAtom);
@@ -64,7 +64,7 @@ export const ChatPanel: React.FC = () => {
         setMessages([]);
         setCurrentThreadId(null);
         setFileSystem([]);
-        setActiveFile(null);
+        clearEditorTabs();
         setServerUrl(null);
         setPreviewStatus('idle');
         setPreviewStatusMessage('Start a new prompt to generate and run a project.');

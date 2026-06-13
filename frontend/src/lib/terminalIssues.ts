@@ -10,6 +10,13 @@ type PatternRule = {
 
 const PATTERNS: PatternRule[] = [
   {
+    code: 'invalid_shell_chain',
+    regex: /EINVALIDTAGNAME|Invalid tag name ["']&&["']/i,
+    confidence: 0.96,
+    message: 'Shell command was chained incorrectly; recovery will split and rerun commands.',
+    suggestedCommands: ['npm install --legacy-peer-deps --prefer-offline', 'npm run dev'],
+  },
+  {
     code: 'cwd_package_json_missing',
     regex: /ENOENT[\s\S]*package\.json|Could not read package\.json/i,
     confidence: 0.98,

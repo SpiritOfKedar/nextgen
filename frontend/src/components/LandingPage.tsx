@@ -10,14 +10,14 @@ import { StatementSections } from './Landing/StatementSections';
 import { AgentSection } from './Landing/AgentSection';
 import { useSetAtom } from 'jotai';
 import { messagesAtom, currentThreadIdAtom, threadSwitchStateAtom } from '../store/atoms';
-import { fileSystemAtom, activeFileAtom } from '../store/fileSystem';
+import { fileSystemAtom, clearEditorTabsAtom } from '../store/fileSystem';
 import { previewStatusAtom, previewStatusMessageAtom, serverUrlAtom } from '../store/webContainer';
 
 export const LandingPage: React.FC = () => {
     const setMessages = useSetAtom(messagesAtom);
     const setCurrentThreadId = useSetAtom(currentThreadIdAtom);
     const setFileSystem = useSetAtom(fileSystemAtom);
-    const setActiveFile = useSetAtom(activeFileAtom);
+    const clearEditorTabs = useSetAtom(clearEditorTabsAtom);
     const setServerUrl = useSetAtom(serverUrlAtom);
     const setPreviewStatus = useSetAtom(previewStatusAtom);
     const setPreviewStatusMessage = useSetAtom(previewStatusMessageAtom);
@@ -33,7 +33,7 @@ export const LandingPage: React.FC = () => {
         setMessages([]);
         setCurrentThreadId(null);
         setFileSystem([]);
-        setActiveFile(null);
+        clearEditorTabs();
         setServerUrl(null);
         setPreviewStatus('idle');
         setPreviewStatusMessage('Start a new prompt to generate and run a project.');

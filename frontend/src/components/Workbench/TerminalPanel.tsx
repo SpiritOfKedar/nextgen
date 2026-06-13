@@ -224,8 +224,11 @@ export const TerminalPanel: React.FC = () => {
             )}
             <div className="h-full w-full" ref={terminalRef} />
             {latestAudit && (
-                <div className="absolute left-3 bottom-3 rounded border border-zinc-800 bg-zinc-900/80 px-2 py-1 text-[11px] text-zinc-400">
+                <div className="absolute left-3 bottom-3 max-w-[70%] rounded border border-zinc-800 bg-zinc-900/80 px-2 py-1 text-[11px] text-zinc-400">
                     last recovery: {latestAudit.status}
+                    {latestAudit.status === 'failed' && latestAudit.detail ? (
+                        <span className="ml-1 text-zinc-500">— {latestAudit.detail}</span>
+                    ) : null}
                 </div>
             )}
             {currentThreadId && (

@@ -1,43 +1,117 @@
 
-import React from 'react';
-import { useAtom, useAtomValue } from 'jotai';
+import React, { useMemo } from 'react';
+import { useAtom, useAtomValue, useSetAtom } from 'jotai';
+import { ChevronRight, ChevronsDownUp, ChevronsUpDown } from 'lucide-react';
 import {
-    File,
-    Folder,
-    ChevronRight,
-    ChevronDown,
-} from 'lucide-react';
-import { fileSystemAtom, activeFileAtom } from '../../store/fileSystem';
-import type { FileSystemItem, FolderNode } from '../../store/fileSystem';
+    fileSystemAtom,
+    activeEditorTabPathAtom,
+    editorTabsAtom,
+    openEditorTabAtom,
+    type FileSystemItem,
+    type FolderNode,
+} from '../../store/fileSystem';
+
+const INDENT = 14;
+
+const countFiles = (nodes: FileSystemItem[]): number => {
+    let count = 0;
+    for (const node of nodes) {
+        if (node.type === 'file') count += 1;
+        else count += countFiles(node.children);
+    }
+    return count;
+};
+
+const collapseAll = (nodes: FileSystemItem[]): FileSystemItem[] =>
+    nodes.map((node) =>
+        node.type === 'folder'
+            ? { ...node, isOpen: false, children: collapseAll(node.children) }
+            : node,
+    );
+
+const expandAll = (nodes: FileSystemItem[]): FileSystemItem[] =>
+    nodes.map((node) =>
+        node.type === 'folder'
+            ? { ...node, isOpen: true, children: expandAll(node.children) }
+            : node,
+    );
 
 export const FileTree: React.FC = () => {
     const fileSystem = useAtomValue(fileSystemAtom);
+    const fileCount = useMemo(() => countFiles(fileSystem), [fileSystem]);
+    const [, setFileSystem] = useAtom(fileSystemAtom);
 
     return (
-        <div className="h-full flex flex-col">
-            <div className="h-10 border-b border-zinc-800 flex items-center px-3 shrink-0">
-                <span className="text-xs font-bold text-zinc-400 tracking-wider">FILES</span>
+        <div className="flex h-full flex-col bg-[#0c0c0e]">
+            <div className="flex shrink-0 items-center justify-between border-b border-zinc-800/60 px-3 py-2">
+                <div className="min-w-0">
+                    <p className="text-[10px] font-medium uppercase tracking-[0.14em] text-zinc-500">
+                        Explorer
+                    </p>
+                    <p className="truncate text-[11px] text-zinc-600">
+                        {fileCount === 0 ? 'No files' : `${fileCount} file${fileCount === 1 ? '' : 's'}`}
+                    </p>
+                </div>
+                {fileSystem.length > 0 && (
+                    <div className="flex items-center gap-0.5">
+                        <button
+                            type="button"
+                            onClick={() => setFileSystem(expandAll(fileSystem))}
+                            className="rounded p-1 text-zinc-600 hover:bg-zinc-800/60 hover:text-zinc-400"
+                            title="Expand all"
+                            aria-label="Expand all folders"
+                        >
+                            <ChevronsUpDown className="h-3 w-3" />
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => setFileSystem(collapseAll(fileSystem))}
+                            className="rounded p-1 text-zinc-600 hover:bg-zinc-800/60 hover:text-zinc-400"
+                            title="Collapse all"
+                            aria-label="Collapse all folders"
+                        >
+                            <ChevronsDownUp className="h-3 w-3" />
+                        </button>
+                    </div>
+                )}
             </div>
-            <div className="flex-1 overflow-y-auto p-2 space-y-0.5 custom-scrollbar">
-                {fileSystem.map((item, index) => (
-                    <FileTreeNode key={index} item={item} depth={0} parentPath="" />
-                ))}
+
+            <div className="flex-1 overflow-y-auto overflow-x-hidden py-1.5 custom-scrollbar">
+                {fileSystem.length === 0 ? (
+                    <p className="px-3 py-4 text-[11px] leading-relaxed text-zinc-600">
+                        Files will appear here as the agent builds your project.
+                    </p>
+                ) : (
+                    fileSystem.map((item, index) => (
+                        <FileTreeNode key={index} item={item} depth={0} parentPath="" />
+                    ))
+                )}
             </div>
         </div>
     );
 };
 
-const FileTreeNode: React.FC<{ item: FileSystemItem, depth: number, parentPath: string }> = ({ item, depth, parentPath }) => {
+const FileTreeNode: React.FC<{ item: FileSystemItem; depth: number; parentPath: string }> = ({
+    item,
+    depth,
+    parentPath,
+}) => {
     const [fileSystem, setFileSystem] = useAtom(fileSystemAtom);
-    const [activeFile, setActiveFile] = useAtom(activeFileAtom);
+    const openTabs = useAtomValue(editorTabsAtom);
+    const activePath = useAtomValue(activeEditorTabPathAtom);
+    const openTab = useSetAtom(openEditorTabAtom);
 
     const currentPath = parentPath ? `${parentPath}/${item.name}` : item.name;
+    const isFolder = item.type === 'folder';
+    const isOpen = isFolder ? (item as FolderNode).isOpen : false;
+    const isActive = !isFolder && activePath === currentPath;
+    const isOpenInEditor = !isFolder && openTabs.some((tab) => tab.path === currentPath);
+    const paddingLeft = depth * INDENT + 10;
 
     const toggleFolder = () => {
-        if (item.type !== 'folder') return;
-
-        const toggleItem = (nodes: FileSystemItem[]): FileSystemItem[] => {
-            return nodes.map(node => {
+        if (!isFolder) return;
+        const toggleItem = (nodes: FileSystemItem[]): FileSystemItem[] =>
+            nodes.map((node) => {
                 if (node === item) {
                     return { ...node, isOpen: !node.isOpen } as FolderNode;
                 }
@@ -46,43 +120,66 @@ const FileTreeNode: React.FC<{ item: FileSystemItem, depth: number, parentPath: 
                 }
                 return node;
             });
-        };
-
         setFileSystem(toggleItem(fileSystem));
     };
 
-    const handleFileClick = () => {
-        if (item.type === 'file') {
-            setActiveFile({ path: currentPath, name: item.name, content: item.content });
+    const handleClick = () => {
+        if (isFolder) {
+            toggleFolder();
+            return;
         }
+        openTab({
+            path: currentPath,
+            name: item.name,
+            content: item.content,
+            focus: true,
+        });
     };
 
-    const isFolder = item.type === 'folder';
-    const isOpen = (item as FolderNode).isOpen;
-    const isActive = activeFile?.path === currentPath;
-
     return (
-        <div className="select-none">
-            <div
-                onClick={isFolder ? toggleFolder : handleFileClick}
-                className={`flex items-center gap-1.5 px-2 py-1.5 rounded-md text-sm cursor-pointer transition-colors ${isActive ? 'bg-zinc-800 text-white' : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50'
-                    }`}
-                style={{ paddingLeft: `${depth * 12 + 8}px` }}
+        <div className="relative select-none">
+            {depth > 0 && (
+                <span
+                    className="pointer-events-none absolute bottom-0 top-0 w-px bg-zinc-800/70"
+                    style={{ left: paddingLeft - INDENT / 2 - 4 }}
+                    aria-hidden
+                />
+            )}
+
+            <button
+                type="button"
+                onClick={handleClick}
+                className={`
+                    group relative flex w-full min-w-0 items-center gap-1.5 pr-2 text-left
+                    h-[26px] text-[12px] transition-colors
+                    ${isActive
+                        ? 'bg-zinc-800/95 text-zinc-100'
+                        : 'text-zinc-500 hover:bg-zinc-800/50 hover:text-zinc-300'
+                    }
+                    ${isFolder && isOpen ? 'text-zinc-300' : ''}
+                `}
+                style={{ paddingLeft }}
             >
-                {isFolder && (
-                    <span className="text-zinc-500">
-                        {isOpen ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
-                    </span>
+                {isActive && (
+                    <span className="absolute left-0 top-0 h-full w-[2px] bg-blue-500" aria-hidden />
                 )}
 
                 {isFolder ? (
-                    <Folder className={`w-4 h-4 ${isActive ? 'text-blue-400' : 'text-zinc-500'}`} />
+                    <ChevronRight
+                        className={`h-3 w-3 shrink-0 text-zinc-600 transition-transform duration-150 ${isOpen ? 'rotate-90 text-zinc-500' : ''}`}
+                    />
                 ) : (
-                    <FileIcon name={item.name} />
+                    <FileTypeDot name={item.name} />
                 )}
 
-                <span className="truncate">{item.name}</span>
-            </div>
+                <span className={`truncate ${isFolder ? 'font-medium' : 'font-normal'}`}>
+                    {item.name}
+                </span>
+
+                {isOpenInEditor && !isActive && (
+                    <span className="ml-auto h-1.5 w-1.5 shrink-0 rounded-full bg-zinc-500/80" title="Open in editor" />
+                )}
+            </button>
 
             {isFolder && isOpen && (item as FolderNode).children && (
                 <div>
@@ -95,38 +192,24 @@ const FileTreeNode: React.FC<{ item: FileSystemItem, depth: number, parentPath: 
     );
 };
 
-const FileIcon = ({ name }: { name: string }) => {
-    const extension = name.includes('.') ? name.split('.').pop()?.toLowerCase() : '';
-    const lowerName = name.toLowerCase();
-
-    if (extension === 'jsx' || extension === 'tsx') {
-        return (
-            <span className="inline-flex items-center justify-center w-4 h-4 text-cyan-400">
-                <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="1.5">
-                    <circle cx="12" cy="12" r="1.6" fill="currentColor" />
-                    <ellipse cx="12" cy="12" rx="8.5" ry="3.6" />
-                    <ellipse cx="12" cy="12" rx="8.5" ry="3.6" transform="rotate(60 12 12)" />
-                    <ellipse cx="12" cy="12" rx="8.5" ry="3.6" transform="rotate(120 12 12)" />
-                </svg>
-            </span>
-        );
-    }
-
-    if (lowerName === 'package.json') return <FileGlyph label="npm" accent="bg-emerald-400" />;
-    if (lowerName.includes('config') || lowerName === 'tsconfig.json') return <FileGlyph label="cfg" accent="bg-zinc-400" />;
-    if (extension === 'ts') return <FileGlyph label="ts" accent="bg-blue-400" />;
-    if (extension === 'js') return <FileGlyph label="js" accent="bg-yellow-300" />;
-    if (extension === 'css') return <FileGlyph label="css" accent="bg-sky-300" />;
-    if (extension === 'html') return <FileGlyph label="html" accent="bg-orange-300" />;
-    if (extension === 'json') return <FileGlyph label="{}" accent="bg-amber-300" />;
-    if (extension === 'md') return <FileGlyph label="md" accent="bg-zinc-300" />;
-
-    return <File className="w-4 h-4 text-zinc-500" />;
+const FileTypeDot: React.FC<{ name: string }> = ({ name }) => {
+    const ext = name.includes('.') ? name.split('.').pop()?.toLowerCase() : '';
+    const color = getExtensionColor(ext, name.toLowerCase());
+    return (
+        <span
+            className={`inline-block h-[6px] w-[6px] shrink-0 rounded-full ${color}`}
+            aria-hidden
+        />
+    );
 };
 
-const FileGlyph = ({ label, accent }: { label: string; accent: string }) => (
-    <span className="relative inline-flex w-4 h-4 items-center justify-center rounded-sm border border-zinc-700 bg-zinc-900 text-[7px] font-semibold uppercase text-zinc-200 leading-none">
-        <span className={`absolute left-0 top-0 h-full w-[2px] rounded-l-sm ${accent}`} />
-        {label}
-    </span>
-);
+const getExtensionColor = (ext: string | undefined, lowerName: string): string => {
+    if (lowerName === 'package.json') return 'bg-emerald-500/70';
+    if (ext === 'tsx' || ext === 'ts') return 'bg-blue-400/80';
+    if (ext === 'jsx' || ext === 'js') return 'bg-amber-400/70';
+    if (ext === 'css') return 'bg-sky-400/70';
+    if (ext === 'html') return 'bg-orange-400/70';
+    if (ext === 'json') return 'bg-yellow-500/60';
+    if (ext === 'md') return 'bg-zinc-500/70';
+    return 'bg-zinc-600/60';
+};

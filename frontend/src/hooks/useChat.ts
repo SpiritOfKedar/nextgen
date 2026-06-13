@@ -16,7 +16,7 @@ import {
     type TerminalIssue,
 } from '../store/webContainer';
 import { getWebContainerInstance } from './useWebContainer';
-import { fileSystemAtom, activeFileAtom } from '../store/fileSystem';
+import { fileSystemAtom, openEditorTabAtom, clearEditorTabsAtom } from '../store/fileSystem';
 import type { FileSystemItem, FileNode, FolderNode, ActiveFile } from '../store/fileSystem';
 import { useAuth } from '@clerk/clerk-react';
 import { useNavigate } from 'react-router-dom';
@@ -25,6 +25,17 @@ import type { BoltAction } from '../lib/boltProtocol';
 import { loadDependencySnapshot, saveDependencySnapshot } from '../lib/sandboxSnapshotCache';
 import JSZip from 'jszip';
 import { detectTerminalIssue } from '../lib/terminalIssues';
+import {
+    executeShellCommandsInWebContainer,
+    inferProjectDirectory,
+    INSTALL_FIRST_ATTEMPT_TIMEOUT_MS,
+    normalizeShellCommandQueue,
+    normalizeWrittenPath,
+    resolveProjectDirectoryForNpm,
+    resetSyncedShellCwd,
+    runProcessAndCollectExit,
+    syncShellWorkingDirectory,
+} from '../lib/webContainerShell';
 import type { WebContainer } from '@webcontainer/api';
 
 /** Serialize WebContainer fs writes so the chat stream reader never stalls on slow I/O (fixes dropped Claude streams). */
@@ -218,8 +229,6 @@ const MINIMAL_ROOT_PACKAGE_JSON = JSON.stringify(
     2,
 );
 
-const normalizeWrittenPath = (p: string) => p.replace(/^\//, '').replace(/\\/g, '/');
-
 const getRootPackageJsonFromMap = (writtenFiles: Map<string, string>): string | undefined => {
     for (const [k, v] of writtenFiles) {
         if (normalizeWrittenPath(k) === 'package.json') return v;
@@ -326,143 +335,6 @@ async function ensureRootPackageJsonExists(
     );
 }
 
-/** Dedupe commands and run `npm install` before `npm run dev` even if the model emitted them out of order. */
-const normalizeShellCommandQueue = (commands: string[]): string[] => {
-    const trimmed = commands.map((c) => c.trim()).filter(Boolean);
-    const seen = new Set<string>();
-    const unique: string[] = [];
-    for (const c of trimmed) {
-        const key = c.replace(/\s+/g, ' ');
-        if (seen.has(key)) continue;
-        seen.add(key);
-        unique.push(c);
-    }
-    const isNpmInstall = (c: string) => /^npm\s+install\b/i.test(c);
-    const isNpmDev = (c: string) => /^npm\s+run\s+dev\b/i.test(c);
-    const installs = unique.filter(isNpmInstall);
-    const devs = unique.filter(isNpmDev);
-    const rest = unique.filter((c) => !isNpmInstall(c) && !isNpmDev(c));
-    return [...installs, ...devs, ...rest];
-};
-
-const normalizeWebContainerPath = (path: string): string => {
-    const normalized = path.replace(/\\/g, '/').trim();
-    if (!normalized) return '/';
-    const parts = normalized.split('/').filter(Boolean);
-    return `/${parts.join('/')}`;
-};
-
-const resolveWorkingDirectory = (currentDir: string, targetPath: string): string => {
-    const cleaned = targetPath.trim().replace(/^["']|["']$/g, '');
-    if (!cleaned || cleaned === '.') return currentDir;
-    if (cleaned === '/') return '/';
-    if (cleaned === '..') {
-        const parts = currentDir.split('/').filter(Boolean);
-        return parts.length <= 1 ? '/' : `/${parts.slice(0, -1).join('/')}`;
-    }
-    if (cleaned.startsWith('/')) {
-        return normalizeWebContainerPath(cleaned);
-    }
-    const base = currentDir === '/' ? '' : currentDir;
-    return normalizeWebContainerPath(`${base}/${cleaned}`);
-};
-
-const splitCdAndCommand = (command: string): { nextDir: string | null; remainder: string | null } => {
-    const trimmed = command.trim();
-    const chained = trimmed.match(/^cd\s+(.+?)\s*&&\s*(.+)$/i);
-    if (chained) {
-        return {
-            nextDir: chained[1].trim(),
-            remainder: chained[2].trim(),
-        };
-    }
-    const onlyCd = trimmed.match(/^cd\s+(.+)$/i);
-    if (onlyCd) {
-        return {
-            nextDir: onlyCd[1].trim(),
-            remainder: null,
-        };
-    }
-    return { nextDir: null, remainder: trimmed };
-};
-
-const inferProjectDirectory = (writtenFiles: Map<string, string>): string => {
-    if (writtenFiles.has('package.json')) return '/';
-    for (const key of writtenFiles.keys()) {
-        const normalized = normalizeWrittenPath(key);
-        if (!normalized.endsWith('/package.json')) continue;
-        const dir = normalized.slice(0, -'/package.json'.length);
-        if (!dir || dir === 'node_modules') continue;
-        return normalizeWebContainerPath(dir);
-    }
-    return '/';
-};
-
-const hasValidPackageJsonInDir = async (wc: any, dir: string): Promise<boolean> => {
-    const normalizedDir = normalizeWebContainerPath(dir);
-    const packagePath = normalizedDir === '/' ? '/package.json' : `${normalizedDir}/package.json`;
-    try {
-        const raw = await wc.fs.readFile(packagePath, 'utf-8');
-        if (!raw?.trim()) return false;
-        JSON.parse(raw);
-        return true;
-    } catch {
-        return false;
-    }
-};
-
-const resolveProjectDirectoryForNpm = async (
-    wc: any,
-    fileMap: Map<string, string>,
-    inferredDir: string,
-): Promise<{ projectDir: string; packageJsonPath: string | null; reasonCode: string }> => {
-    const candidates: string[] = [];
-    const pushCandidate = (dir: string) => {
-        const normalized = normalizeWebContainerPath(dir);
-        if (!candidates.includes(normalized)) candidates.push(normalized);
-    };
-    pushCandidate(inferredDir);
-    pushCandidate('/');
-    for (const key of fileMap.keys()) {
-        const normalized = normalizeWrittenPath(key);
-        if (!normalized.endsWith('/package.json')) continue;
-        const dir = normalized.slice(0, -'/package.json'.length);
-        if (!dir || dir === 'node_modules') continue;
-        pushCandidate(dir);
-    }
-
-    for (const candidate of candidates) {
-        const exists = await hasValidPackageJsonInDir(wc, candidate);
-        if (!exists) continue;
-        return {
-            projectDir: candidate,
-            packageJsonPath: candidate === '/' ? '/package.json' : `${candidate}/package.json`,
-            reasonCode: candidate === normalizeWebContainerPath(inferredDir) ? 'inferred_project_dir' : 'fallback_probe_dir',
-        };
-    }
-
-    return {
-        projectDir: normalizeWebContainerPath(inferredDir),
-        packageJsonPath: null,
-        reasonCode: 'package_json_missing_all_candidates',
-    };
-};
-
-const syncShellWorkingDirectory = async (
-    shellWriter: WritableStreamDefaultWriter<string> | null,
-    projectDir: string,
-): Promise<void> => {
-    if (!shellWriter) return;
-    const normalizedDir = normalizeWebContainerPath(projectDir);
-    if (lastSyncedShellCwd === normalizedDir) return;
-    try {
-        await shellWriter.write(`cd "${normalizedDir}"\n`);
-        lastSyncedShellCwd = normalizedDir;
-    } catch {
-        // best effort only
-    }
-};
-
 /**
  * Scan all written source files for import statements that reference packages
  * NOT listed in package.json. If found, patch package.json with the missing
@@ -551,8 +423,6 @@ let activeMountedThreadId: string | null = null;
 let activeDevProcess: any = null;
 let activeDevServerFingerprint: string | null = null;
 let activeCriticalFingerprint: string | null = null;
-let lastSyncedShellCwd: string | null = null;
-
 const hashString = (value: string): string => {
     let hash = 5381;
     for (let i = 0; i < value.length; i += 1) {
@@ -579,7 +449,6 @@ const DEP_FINGERPRINT_MARKER_PATH = '/.boltly/dep-fingerprint';
 const SNAPSHOT_ARCHIVE_PATH = '/.boltly/dependency-snapshot.tgz';
 const SNAPSHOT_TOOLCHAIN_VERSION = 'webcontainer-npm-v1';
 const VITE_REACT_BASE_FINGERPRINT = hashString(`${MINIMAL_ROOT_PACKAGE_JSON}\n---\n`);
-const INSTALL_FIRST_ATTEMPT_TIMEOUT_MS = 120_000;
 const INSTALL_RETRY_TIMEOUT_MS = 420_000;
 const MAX_INDEXEDDB_SNAPSHOT_BYTES = 120 * 1024 * 1024;
 
@@ -735,11 +604,6 @@ const base64ToBytes = (value: string): Uint8Array => {
     return bytes;
 };
 
-const runProcessAndCollectExit = async (proc: any, timeoutMs: number): Promise<number> => {
-    const timeout = new Promise<number>((resolve) => setTimeout(() => resolve(-1), timeoutMs));
-    return Promise.race([proc.exit, timeout]);
-};
-
 const isTarAvailable = async (wc: any): Promise<boolean> => {
     try {
         const proc = await wc.spawn('tar', ['--version'], { env: { FORCE_COLOR: '1' } });
@@ -890,6 +754,32 @@ const selectRecoveryFiles = (files: { filePath: string; content: string }[]): { 
     return [...picked.values()];
 };
 
+const buildFileMap = (
+    tree: FileSystemItem[],
+    writtenFiles: Map<string, string> = new Map(),
+): Map<string, string> => {
+    const map = new Map<string, string>();
+    for (const f of flattenFileSystem(tree)) {
+        map.set(f.filePath, f.content);
+    }
+    for (const [k, v] of writtenFiles) {
+        map.set(normalizeWrittenPath(k), v);
+    }
+    return map;
+};
+
+const RECOVERY_BOOTSTRAP_ISSUE_CODES = new Set([
+    'cwd_package_json_missing',
+    'install_failed',
+    'dev_server_failed',
+    'vite_missing_binary',
+    'module_resolution_failed',
+    'peer_dependency_conflict',
+    'vite_plugin_missing',
+    'wrong_working_directory',
+    'invalid_shell_chain',
+]);
+
 export const useChat = () => {
     const { getToken, isLoaded, isSignedIn } = useAuth();
     const [messages, setMessages] = useAtom(messagesAtom);
@@ -902,7 +792,8 @@ export const useChat = () => {
     const webContainerInstance = useAtomValue(webContainerAtom);
     const shellWriter = useAtomValue(shellInputWriterAtom);
     const setFileSystem = useSetAtom(fileSystemAtom);
-    const setActiveFile = useSetAtom(activeFileAtom);
+    const openEditorTab = useSetAtom(openEditorTabAtom);
+    const clearEditorTabs = useSetAtom(clearEditorTabsAtom);
     const setServerUrl = useSetAtom(serverUrlAtom);
     const setPreviewStatus = useSetAtom(previewStatusAtom);
     const setPreviewStatusMessage = useSetAtom(previewStatusMessageAtom);
@@ -992,10 +883,17 @@ export const useChat = () => {
         const token = await getToken();
         if (!token) return;
         const meta = threadRuntimeMeta.get(threadId);
-        const cwd = meta?.projectDir || '/';
         const issueCode = issue?.code || 'auto_recovery';
         const wc = webContainerInstance ?? getWebContainerInstance();
         if (!wc) return;
+
+        const initialFileMap = buildFileMap(fileSystem);
+        let projectDir = (await resolveProjectDirectoryForNpm(
+            wc,
+            initialFileMap,
+            inferProjectDirectory(initialFileMap),
+        )).projectDir;
+        await syncShellWorkingDirectory(shellWriter, projectDir);
 
         setTerminalStatusByThread((prev) => ({ ...prev, [threadId]: 'running' }));
         writeShellOutput('\r\n\x1b[36m⬢ Agent analyzing terminal output…\x1b[0m\r\n');
@@ -1004,7 +902,7 @@ export const useChat = () => {
 
         const recoveryFiles = selectRecoveryFiles(flattenFileSystem(fileSystem));
         const plannedCommands: string[] = [];
-        const executedCommands: string[] = [];
+        let executedCommands: string[] = [];
         let status: 'resolved' | 'failed' = 'failed';
         let detail = '';
 
@@ -1020,8 +918,7 @@ export const useChat = () => {
                     issueCode,
                     issueMessage: issue?.message,
                     suggestedCommands: issue?.suggestedCommands ?? [],
-                    projectDir: cwd,
-                    model: selectedModel,
+                    projectDir,
                     files: recoveryFiles,
                 }),
             });
@@ -1053,7 +950,7 @@ export const useChat = () => {
                         writtenFiles.set(path.replace(/^\//, ''), fileContent);
                         setFileSystem((prev) => upsertFile(prev, path, fileContent));
                         const fileName = path.split('/').pop()!;
-                        setActiveFile({ path: path.replace(/^\//, ''), name: fileName, content: fileContent });
+                        openEditorTab({ path: path.replace(/^\//, ''), name: fileName, content: fileContent });
                     }
                     if (action.type === 'shell') {
                         pendingShellCommands.push(action.content.trim());
@@ -1077,52 +974,129 @@ export const useChat = () => {
 
             await fsWriteChain.current;
 
+            const fileMap = buildFileMap(fileSystem, writtenFiles);
+            projectDir = (await resolveProjectDirectoryForNpm(
+                wc,
+                fileMap,
+                inferProjectDirectory(writtenFiles.size > 0 ? writtenFiles : fileMap),
+            )).projectDir;
+            await syncShellWorkingDirectory(shellWriter, projectDir);
+            await ensureRootPackageJsonExists(writtenFiles, wc, setFileSystem);
+            await patchMissingDependencies(writtenFiles, wc, setFileSystem);
+
             const shellQueue = normalizeShellCommandQueue(pendingShellCommands);
+            plannedCommands.push(...shellQueue);
             if (shellQueue.length === 0 && writtenFiles.size === 0) {
                 throw new Error('Agent returned no file or shell fixes');
             }
 
-            for (const command of shellQueue) {
-                plannedCommands.push(command);
-                executedCommands.push(command);
-                try {
-                    const tokens = command.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) || [command];
-                    const program = tokens[0] ?? command;
-                    const args = tokens.slice(1).map((a) => a.replace(/^["']|["']$/g, ''));
-                    const proc = await wc.spawn(program, args, { cwd, env: { FORCE_COLOR: '1' } });
-                    proc.output.pipeTo(new WritableStream({ write(data) { writeShellOutput(data); } }));
-                    const isLongRunning = /^npm\s+run\s+dev\b/i.test(command);
-                    let exitCode = 0;
-                    if (isLongRunning) {
+            let devServerStarted = false;
+            let installSucceeded = false;
+
+            if (shellQueue.length > 0) {
+                const execResult = await executeShellCommandsInWebContainer({
+                    wc,
+                    commands: shellQueue,
+                    initialCwd: projectDir,
+                    writeOutput: writeShellOutput,
+                    failOnNonZeroExit: true,
+                    beforeNpmInstall: () => repairRootForNpm(wc, true),
+                    onCommandComplete: async (command, cwd, exitCode) => {
+                        await appendTerminalEvents(threadId, token, [
+                            { eventType: 'command', payload: command, cwd },
+                            { eventType: 'status', payload: `exit:${exitCode}`, cwd, exitCode },
+                        ]);
+                    },
+                    onDevServerStarted: (proc, command, cwd) => {
+                        devServerStarted = true;
                         activeDevProcess = proc;
                         activeDevServerFingerprint = meta?.depFingerprint ?? null;
                         status = 'resolved';
                         writeShellOutput('\r\n\x1b[32m✓ Dev server restarted by recovery agent\x1b[0m\r\n');
-                        break;
-                    }
-                    const timeoutMs = /^npm\s+(install|i|ci)\b/i.test(command)
-                        ? INSTALL_FIRST_ATTEMPT_TIMEOUT_MS
-                        : 120_000;
-                    exitCode = await runProcessAndCollectExit(proc, timeoutMs);
-                    await appendTerminalEvents(threadId, token, [
-                        { eventType: 'command', payload: command, cwd },
-                        { eventType: 'status', payload: `exit:${exitCode}`, cwd, exitCode },
-                    ]);
-                    if (exitCode !== 0) {
-                        detail = `${command} failed with exit ${exitCode}`;
-                        status = 'failed';
-                        break;
-                    }
-                    status = 'resolved';
-                } catch (error) {
-                    detail = error instanceof Error ? error.message : String(error);
+                        void appendTerminalEvents(threadId, token, [
+                            { eventType: 'command', payload: command, cwd },
+                        ]);
+                    },
+                });
+                executedCommands = execResult.executedCommands;
+                devServerStarted = devServerStarted || execResult.devServerStarted;
+                installSucceeded = execResult.installSucceeded;
+                projectDir = execResult.finalCwd;
+                if (execResult.devProcess) {
+                    activeDevProcess = execResult.devProcess;
+                }
+                if (execResult.status === 'failed') {
                     status = 'failed';
-                    break;
+                    detail = execResult.detail ?? 'Shell command failed during recovery';
+                } else {
+                    status = 'resolved';
+                }
+            } else {
+                status = 'resolved';
+            }
+
+            if (
+                status === 'resolved' &&
+                !devServerStarted &&
+                RECOVERY_BOOTSTRAP_ISSUE_CODES.has(issueCode)
+            ) {
+                const bootstrapCommands: string[] = [];
+                if (!installSucceeded) {
+                    bootstrapCommands.push('npm install --legacy-peer-deps --prefer-offline --no-audit --no-fund');
+                }
+                bootstrapCommands.push('npm run dev');
+                plannedCommands.push(...bootstrapCommands);
+
+                const bootstrapResult = await executeShellCommandsInWebContainer({
+                    wc,
+                    commands: bootstrapCommands,
+                    initialCwd: projectDir,
+                    writeOutput: writeShellOutput,
+                    failOnNonZeroExit: true,
+                    beforeNpmInstall: () => repairRootForNpm(wc, true),
+                    onCommandComplete: async (command, cwd, exitCode) => {
+                        await appendTerminalEvents(threadId, token, [
+                            { eventType: 'command', payload: command, cwd },
+                            { eventType: 'status', payload: `exit:${exitCode}`, cwd, exitCode },
+                        ]);
+                    },
+                    onDevServerStarted: (proc, command, cwd) => {
+                        devServerStarted = true;
+                        activeDevProcess = proc;
+                        activeDevServerFingerprint = meta?.depFingerprint ?? null;
+                        writeShellOutput('\r\n\x1b[32m✓ Dev server started after recovery\x1b[0m\r\n');
+                        void appendTerminalEvents(threadId, token, [
+                            { eventType: 'command', payload: command, cwd },
+                        ]);
+                    },
+                });
+                executedCommands.push(...bootstrapResult.executedCommands);
+                projectDir = bootstrapResult.finalCwd;
+                if (bootstrapResult.devProcess) {
+                    activeDevProcess = bootstrapResult.devProcess;
+                }
+                if (bootstrapResult.status === 'failed') {
+                    status = 'failed';
+                    detail = bootstrapResult.detail ?? 'Post-recovery bootstrap failed';
+                } else {
+                    status = 'resolved';
+                    installSucceeded = installSucceeded || bootstrapResult.installSucceeded;
                 }
             }
 
-            if (status === 'resolved' && writtenFiles.size > 0 && shellQueue.every((c) => !/^npm\s+run\s+dev\b/i.test(c))) {
+            if (status === 'resolved' && writtenFiles.size > 0 && !devServerStarted) {
                 writeShellOutput('\r\n\x1b[32m✓ Agent applied file fixes\x1b[0m\r\n');
+            }
+
+            if (status === 'resolved') {
+                const prevMeta = threadRuntimeMeta.get(threadId);
+                if (prevMeta) {
+                    threadRuntimeMeta.set(threadId, {
+                        ...prevMeta,
+                        projectDir,
+                        installSucceeded: installSucceeded || prevMeta.installSucceeded,
+                    });
+                }
             }
         } catch (error) {
             detail = error instanceof Error ? error.message : String(error);
@@ -1166,13 +1140,13 @@ export const useChat = () => {
         isLoaded,
         isSignedIn,
         refreshTerminalSession,
-        selectedModel,
-        setActiveFile,
+        openEditorTab,
         setFileSystem,
         setPreviewStatus,
         setPreviewStatusMessage,
         setTerminalIssueByThread,
         setTerminalStatusByThread,
+        shellWriter,
         webContainerInstance,
     ]);
 
@@ -1923,7 +1897,7 @@ createRoot(document.getElementById('root')!).render(
 
                         // Set as active file in editor
                         const fileName = path.split('/').pop()!;
-                        setActiveFile({ path: path.replace(/^\//, ''), name: fileName, content: fileContent });
+                        openEditorTab({ path: path.replace(/^\//, ''), name: fileName, content: fileContent });
                     }
                     if (action.type === 'shell') {
                         // Queue shell commands — don't execute during stream reading
@@ -1957,7 +1931,7 @@ createRoot(document.getElementById('root')!).render(
                     writtenFiles.set(path.replace(/^\//, ''), fileContent);
                     setFileSystem((prev) => upsertFile(prev, path, fileContent));
                     const fileName = path.split('/').pop()!;
-                    setActiveFile({ path: path.replace(/^\//, ''), name: fileName, content: fileContent });
+                    openEditorTab({ path: path.replace(/^\//, ''), name: fileName, content: fileContent });
                 }
                 if (action.type === 'shell') {
                     pendingShellCommands.push(action.content.trim());
@@ -1972,84 +1946,39 @@ createRoot(document.getElementById('root')!).render(
             await patchMissingDependencies(writtenFiles, wcForNpm, setFileSystem);
 
             // ── Phase 2: Execute queued shell commands sequentially ──
-            // Use the shared jsh shell so the terminal shows the output and
-            // PATH resolution works (fixes ENOENT for npm/npx).
             const wc = wcForNpm;
             const shellQueue = normalizeShellCommandQueue(pendingShellCommands);
             if (wc && shellQueue.length > 0) {
                 setPreviewStatus('starting');
                 setPreviewStatusMessage('Running install/start commands inside the sandbox...');
-                let commandCwd = inferProjectDirectory(writtenFiles);
-                for (const command of shellQueue) {
-                    try {
-                        // Skip useless/dangerous commands
-                        if (!command || /^\s*$/.test(command)) continue;            // empty
-                        if (/^\s*(echo|pwd|ls|cat)\s/.test(command)) continue;       // informational only
-
-                        const { nextDir, remainder } = splitCdAndCommand(command);
-                        if (nextDir) {
-                            commandCwd = resolveWorkingDirectory(commandCwd, nextDir);
-                            writeShellOutput(`\r\n\x1b[2mcd ${commandCwd}\x1b[0m\r\n`);
-                            if (!remainder) continue;
-                        }
-                        if (!remainder || /^\s*$/.test(remainder)) continue;
-
-                        writeShellOutput(`\r\n\x1b[36m❯ [${commandCwd}] ${remainder}\x1b[0m\r\n`);
-
-                        // Append --legacy-peer-deps for npm install
-                        let adjustedCommand = remainder;
-                        if (/^npm\s+(install|i)\b/i.test(remainder.trim()) && !remainder.includes('--legacy-peer-deps')) {
-                            adjustedCommand += ' --legacy-peer-deps';
-                        }
-
-                        // For long-running commands like "npm run dev", fire and forget
-                        const isLongRunning = /\b(dev|start|serve|watch)\b/.test(remainder);
-
-                        if (/^npm\s+(install|i)\b/i.test(adjustedCommand.trim())) {
-                            await repairRootForNpm(wc, true);
-                        }
-
-                        // Spawn the command directly (better process control than piping to jsh)
-                        const parts = adjustedCommand.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) || [adjustedCommand];
-                        const program = parts[0];
-                        const args = parts.slice(1).map((a: string) => a.replace(/^["']|["']$/g, ''));
-
-                        const proc = await wc.spawn(program, args, {
-                            env: { FORCE_COLOR: '1' },
-                            cwd: commandCwd,
-                        });
-                        proc.output.pipeTo(new WritableStream({
-                            write(data) { writeShellOutput(data); }
-                        }));
-
-                        if (!isLongRunning) {
-                            const exitPromise = proc.exit;
-                            // npm install in WebContainer often exceeds 2m (cold cache + registry I/O).
-                            const installTimeoutMs =
-                                /^npm\s+(install|i)\b/i.test(remainder.trim()) ? 300_000 : 120_000;
-                            const timeoutPromise = new Promise<number>((resolve) =>
-                                setTimeout(() => resolve(-1), installTimeoutMs),
-                            );
-                            const exitCode = await Promise.race([exitPromise, timeoutPromise]);
-                            if (exitCode === -1) {
-                                setPreviewStatus('error');
-                                setPreviewStatusMessage(`Command timed out: ${remainder}`);
-                                writeShellOutput(
-                                    `\r\n\x1b[33m⚠ Command timed out after ${installTimeoutMs / 1000}s: ${remainder}\x1b[0m\r\n`,
-                                );
-                            } else if (exitCode !== 0) {
-                                setPreviewStatus('error');
-                                setPreviewStatusMessage(`Command failed (${exitCode}): ${remainder}`);
-                                writeShellOutput(`\r\n\x1b[33m⚠ Command exited with code ${exitCode}: ${remainder}\x1b[0m\r\n`);
-                            }
-                        }
-                    } catch (err) {
+                await executeShellCommandsInWebContainer({
+                    wc,
+                    commands: shellQueue,
+                    initialCwd: inferProjectDirectory(writtenFiles),
+                    writeOutput: writeShellOutput,
+                    beforeNpmInstall: () => repairRootForNpm(wc, true),
+                    onDevServerStarted: (proc) => {
+                        activeDevProcess = proc;
+                    },
+                    onTimeout: (command, timeoutMs) => {
+                        setPreviewStatus('error');
+                        setPreviewStatusMessage(`Command timed out: ${command}`);
+                        writeShellOutput(
+                            `\r\n\x1b[33m⚠ Command timed out after ${timeoutMs / 1000}s: ${command}\x1b[0m\r\n`,
+                        );
+                    },
+                    onNonZeroExit: (command, exitCode) => {
+                        setPreviewStatus('error');
+                        setPreviewStatusMessage(`Command failed (${exitCode}): ${command}`);
+                        writeShellOutput(`\r\n\x1b[33m⚠ Command exited with code ${exitCode}: ${command}\x1b[0m\r\n`);
+                    },
+                    onCommandError: (command, err) => {
                         console.error(`[Bolt] spawn failed for "${command}":`, err);
                         setPreviewStatus('error');
                         setPreviewStatusMessage(`Failed to run command: ${command}`);
                         writeShellOutput(`\r\n\x1b[31m✗ Failed: ${command} — ${err}\x1b[0m\r\n`);
-                    }
-                }
+                    },
+                });
             }
 
             return { ok: true };
@@ -2164,7 +2093,9 @@ createRoot(document.getElementById('root')!).render(
         }
 
         setFileSystem(restoredFileSystem);
-        setActiveFile(activeFileCandidate);
+        if (activeFileCandidate) {
+            openEditorTab(activeFileCandidate);
+        }
 
         const wc = webContainerInstance ?? getWebContainerInstance();
         if (wc) {
@@ -2218,10 +2149,10 @@ createRoot(document.getElementById('root')!).render(
             deletedCount: deletedPaths.length,
             noOp: isNoOp,
         };
-    }, [API_URL, getToken, isLoaded, isSignedIn, setActiveFile, setFileSystem, startThreadSandboxInBackground, webContainerInstance]);
+    }, [API_URL, getToken, isLoaded, isSignedIn, openEditorTab, setFileSystem, startThreadSandboxInBackground, webContainerInstance]);
 
     const loadThread = useCallback(async (threadId: string) => {
-        lastSyncedShellCwd = null;
+        resetSyncedShellCwd();
         if (!threadId || typeof threadId !== 'string') {
             setThreadSwitchState({
                 status: 'error',
@@ -2384,9 +2315,10 @@ createRoot(document.getElementById('root')!).render(
 
             // Set last file as active in editor
             if (lastFile) {
-                setActiveFile(lastFile);
+                clearEditorTabs();
+                openEditorTab(lastFile);
             } else {
-                setActiveFile(null);
+                clearEditorTabs();
             }
             if (!isStale()) {
                 setThreadSwitchState({
@@ -2418,7 +2350,7 @@ createRoot(document.getElementById('root')!).render(
             }
             throw error;
         }
-    }, [getToken, isLoaded, isSignedIn, navigate, refreshTerminalSession, setThreadSwitchState, setServerUrl, setPreviewStatus, setPreviewStatusMessage, webContainerInstance, setMessages, setCurrentThreadId, setFileSystem, setActiveFile, setChatMode, startThreadSandboxInBackground]);
+    }, [getToken, isLoaded, isSignedIn, navigate, refreshTerminalSession, setThreadSwitchState, setServerUrl, setPreviewStatus, setPreviewStatusMessage, webContainerInstance, setMessages, setCurrentThreadId, setFileSystem, openEditorTab, clearEditorTabs, setChatMode, startThreadSandboxInBackground]);
 
     const getCollaborators = useCallback(async (threadId: string) => {
         if (!isLoaded || !isSignedIn) return [];

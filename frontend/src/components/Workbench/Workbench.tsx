@@ -169,7 +169,7 @@ const TabButton: React.FC<TabButtonProps> = ({ active, onClick, icon, label }) =
 const CodeView = () => (
     <div className="h-full flex">
         {/* File Tree */}
-        <div className="hidden md:flex md:w-44 lg:w-52 border-r border-zinc-800 bg-zinc-950/50 flex-col">
+        <div className="hidden md:flex md:w-52 lg:w-60 border-r border-zinc-800/80 bg-[#0c0c0e] flex-col shrink-0">
             <FileTree />
         </div>
 
