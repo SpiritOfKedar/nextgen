@@ -23,6 +23,8 @@ router.get('/chat/history', authMiddleware, chatController.getHistory);
 // @ts-ignore
 router.get('/chat/:threadId', authMiddleware, chatController.getThread);
 // @ts-ignore
+router.delete('/chat/:threadId', authMiddleware, chatController.deleteThread);
+// @ts-ignore
 router.get('/chat/:threadId/files', authMiddleware, chatController.getThreadFiles);
 // @ts-ignore
 router.get('/chat/:threadId/files/delta', authMiddleware, chatController.getThreadFilesDelta);

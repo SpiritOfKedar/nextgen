@@ -195,5 +195,25 @@ export const chatController = {
             }
             res.status(500).json({ error: 'Failed to restore thread version' });
         }
-    }
+    },
+
+    async deleteThread(req: Request, res: Response) {
+        try {
+            if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+            const { threadId } = req.params;
+            await chatService.deleteThread(threadId as string, req.user.id);
+            res.status(204).send();
+        } catch (error) {
+            log.error('chat.thread_delete_failed', {
+                requestId: req.requestId,
+                internalUserId: req.user?.id,
+                threadId: req.params.threadId,
+                ...errorFields(error),
+            });
+            if (error instanceof ThreadAccessError) {
+                return res.status(404).json({ error: error.message });
+            }
+            res.status(500).json({ error: 'Failed to delete thread' });
+        }
+    },
 };

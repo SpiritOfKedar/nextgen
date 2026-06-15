@@ -1,13 +1,8 @@
 import React from 'react';
+import { Link } from 'react-router-dom';
 import { Twitter, Disc, Linkedin } from 'lucide-react';
 import logo from '../assets/nextgen-logo.png';
-
-const COLUMNS: { heading: string; links: string[] }[] = [
-    { heading: 'Product', links: ['Chat-to-Build', 'Live Preview', 'Plan & Build', 'Version History'] },
-    { heading: 'Platform', links: ['Sandbox', 'Multi-Model AI', 'Figma Import', 'Collaboration'] },
-    { heading: 'Resources', links: ['Documentation', 'Changelog', 'Community', 'Support'] },
-    { heading: 'Company', links: ['About', 'Careers', 'Legal', 'Privacy'] },
-];
+import { FOOTER_COLUMNS } from '../data/features';
 
 export const Footer: React.FC = () => {
     return (
@@ -22,13 +17,27 @@ export const Footer: React.FC = () => {
                             <a href="#" aria-label="Twitter" className="hover:text-white transition-colors"><Twitter className="w-4 h-4" /></a>
                         </div>
                     </div>
-                    {COLUMNS.map((col) => (
+                    {FOOTER_COLUMNS.map((col) => (
                         <div key={col.heading}>
                             <h4 className="font-mono text-[10px] tracking-[0.2em] uppercase text-zinc-600 mb-4">{col.heading}</h4>
                             <ul className="space-y-2.5">
                                 {col.links.map((link) => (
-                                    <li key={link}>
-                                        <a href="#" className="text-sm text-zinc-400 hover:text-white transition-colors">{link}</a>
+                                    <li key={link.label}>
+                                        {link.href.startsWith('/') ? (
+                                            <Link
+                                                to={link.href}
+                                                className="text-sm text-zinc-400 hover:text-white transition-colors"
+                                            >
+                                                {link.label}
+                                            </Link>
+                                        ) : (
+                                            <a
+                                                href={link.href}
+                                                className="text-sm text-zinc-400 hover:text-white transition-colors"
+                                            >
+                                                {link.label}
+                                            </a>
+                                        )}
                                     </li>
                                 ))}
                             </ul>

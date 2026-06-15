@@ -1,10 +1,12 @@
 
 import React, { useEffect, useRef, useState, useCallback, memo, useMemo } from 'react';
-import { Check, Copy, FileCode, ChevronDown, ChevronRight, Sparkles, ClipboardList } from 'lucide-react';
+import { Check, Copy, FileCode, ChevronDown, ChevronRight, ClipboardList } from 'lucide-react';
 import { useAtomValue } from 'jotai';
-import { messagesAtom } from '../../store/atoms';
+import { messagesAtom, selectedModelAtom } from '../../store/atoms';
 import { PlanMessageActions } from './PlanMessageActions';
 import { useChat } from '../../hooks/useChat';
+import { ProviderLogo } from './ProviderLogo';
+import { getProviderForModel } from '../../lib/models';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
@@ -12,6 +14,7 @@ import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
 
 export const MessageList: React.FC = () => {
     const messages = useAtomValue(messagesAtom);
+    const selectedModel = useAtomValue(selectedModelAtom);
     const { isLoading } = useChat();
     const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -47,8 +50,11 @@ export const MessageList: React.FC = () => {
                     className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
                 >
                     {msg.role === 'assistant' && (
-                        <div className="w-7 h-7 rounded-full bg-linear-to-br from-blue-500 to-violet-600 flex items-center justify-center mr-3 mt-0.5 shrink-0">
-                            <Sparkles className="w-3.5 h-3.5 text-white" />
+                        <div className="w-7 h-7 rounded-full flex items-center justify-center mr-3 mt-0.5 shrink-0 overflow-hidden">
+                            <ProviderLogo
+                                provider={getProviderForModel(msg.model ?? selectedModel)}
+                                size="md"
+                            />
                         </div>
                     )}
                     <div

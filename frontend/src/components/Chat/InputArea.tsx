@@ -5,14 +5,17 @@ import { SignInButton, useAuth } from '@clerk/clerk-react';
 import { useChat } from '../../hooks/useChat';
 import { ModelSelector } from './ModelSelector';
 import { FigmaPanel } from './FigmaPanel';
-import { StitchPanel, type StitchContextPayload } from './StitchPanel';
+import { StitchPanel } from './StitchPanel';
 import { useAtom, useAtomValue, useSetAtom } from 'jotai';
 import { chatModeAtom, threadsAtom, threadSwitchStateAtom, currentThreadIdAtom, messagesAtom } from '../../store/atoms';
+import { manualFigmaLinksAtom, stitchContextAtom } from '../../store/mcpAttachments';
+import { useThreadClickHandlers } from '../../hooks/useThreadClickHandlers';
 
 const FIGMA_URL_REGEX = /https:\/\/(?:www\.)?figma\.com\/(?:design|file|proto|board)\/[^\s"'<>]+/gi;
 
 interface InputAreaProps {
     variant?: 'default' | 'mac';
+    compact?: boolean;
 }
 
 const MacTrafficLights: React.FC = () => (
@@ -37,16 +40,17 @@ const formatRelativeDate = (dateStr: string) => {
     return date.toLocaleDateString();
 };
 
-export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default' }) => {
+export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default', compact = false }) => {
     const isMac = variant === 'mac';
+    const isCompact = compact && !isMac;
     const { isSignedIn, isLoaded } = useAuth();
     const [inputValue, setInputValue] = useState('');
     const [attachedFiles, setAttachedFiles] = useState<File[]>([]);
     const [showFigmaPanel, setShowFigmaPanel] = useState(false);
     const [showStitchPanel, setShowStitchPanel] = useState(false);
-    const [manualFigmaLinks, setManualFigmaLinks] = useState<string[]>([]);
-    const [stitchContext, setStitchContext] = useState<StitchContextPayload | null>(null);
-    const { sendMessage, isLoading, fetchThreads, loadThread } = useChat();
+    const [manualFigmaLinks, setManualFigmaLinks] = useAtom(manualFigmaLinksAtom);
+    const [stitchContext, setStitchContext] = useAtom(stitchContextAtom);
+    const { sendMessage, isLoading, fetchThreads, loadThread, deleteThread } = useChat();
     const [chatMode, setChatMode] = useAtom(chatModeAtom);
     const threads = useAtomValue(threadsAtom);
     const threadSwitchState = useAtomValue(threadSwitchStateAtom);
@@ -200,8 +204,9 @@ export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default' }) => 
     useEffect(() => {
         if (isMac || !textareaRef.current) return;
         textareaRef.current.style.height = 'auto';
-        textareaRef.current.style.height = Math.min(textareaRef.current.scrollHeight, 400) + 'px';
-    }, [inputValue, isMac]);
+        const maxHeight = isCompact ? 160 : 400;
+        textareaRef.current.style.height = Math.min(textareaRef.current.scrollHeight, maxHeight) + 'px';
+    }, [inputValue, isMac, isCompact]);
 
     const handleOpenThread = async (threadId: string) => {
         setHistoryError(null);
@@ -211,6 +216,19 @@ export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default' }) => 
             setHistoryError(e instanceof Error ? e.message : 'Could not open this project');
         }
     };
+
+    const handleDeleteThread = async (threadId: string) => {
+        setHistoryError(null);
+        const result = await deleteThread(threadId);
+        if (!result.ok) {
+            setHistoryError(result.error ?? 'Could not delete this project');
+        }
+    };
+
+    const { handleClick: handleThreadClick, handleDoubleClick: handleThreadDoubleClick } = useThreadClickHandlers({
+        onOpen: (threadId) => void handleOpenThread(threadId),
+        onDelete: handleDeleteThread,
+    });
 
     const handleNewProject = () => {
         setMessages([]);
@@ -318,7 +336,9 @@ export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default' }) => 
 
     const shellClass = isMac
         ? 'relative flex flex-col w-full overflow-hidden rounded-xl border border-zinc-700/50 bg-[#1c1c1e] shadow-[0_24px_64px_-16px_rgba(0,0,0,0.75)]'
-        : `
+        : isCompact
+            ? 'relative flex flex-col w-full overflow-hidden rounded-lg border border-zinc-800 bg-zinc-900'
+            : `
             relative flex flex-col w-full 
             bg-zinc-900/85 backdrop-blur-xl 
             border rounded-xl border-zinc-800/70 shadow-sm
@@ -328,15 +348,21 @@ export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default' }) => 
 
     const textareaClass = isMac
         ? 'w-full h-full min-h-[200px] py-4 px-5 bg-[#141416] text-zinc-100 placeholder-zinc-600 resize-none focus:outline-none text-[15px] leading-relaxed scrollbar-hide font-sans'
-        : 'w-full py-3 px-4 bg-transparent text-zinc-100 placeholder-zinc-500/80 resize-none focus:outline-none text-base leading-relaxed min-h-[68px] max-h-[320px] scrollbar-hide';
+        : isCompact
+            ? 'w-full py-2.5 px-3 bg-transparent text-zinc-100 placeholder-zinc-500 resize-none focus:outline-none text-sm leading-relaxed min-h-[44px] max-h-[160px] scrollbar-hide'
+            : 'w-full py-3 px-4 bg-transparent text-zinc-100 placeholder-zinc-500/80 resize-none focus:outline-none text-base leading-relaxed min-h-[68px] max-h-[320px] scrollbar-hide';
 
     const toolbarClass = isMac
         ? 'grid w-full min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 px-3 py-2 bg-[#232326] border-t border-black/50'
-        : 'grid w-full min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 px-2.5 py-1.5 bg-zinc-900/65 border-t border-zinc-800/70';
+        : isCompact
+            ? 'flex w-full min-w-0 flex-wrap items-center gap-2 px-2 py-1.5 border-t border-zinc-800 bg-zinc-950/80'
+            : 'grid w-full min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 px-2.5 py-1.5 bg-zinc-900/65 border-t border-zinc-800/70';
 
     const iconBtnClass = isMac
         ? 'inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-zinc-400 hover:text-zinc-200 hover:bg-white/5 transition-colors'
-        : 'inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-zinc-700/80 bg-zinc-900 text-zinc-300 hover:text-zinc-100 hover:bg-zinc-800/70 transition-colors';
+        : isCompact
+            ? 'inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 transition-colors'
+            : 'inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-zinc-700/80 bg-zinc-900 text-zinc-300 hover:text-zinc-100 hover:bg-zinc-800/70 transition-colors';
 
     const figmaBtnActive = isMac
         ? 'text-purple-300 bg-purple-500/10'
@@ -356,15 +382,21 @@ export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default' }) => 
 
     const modeToggleClass = isMac
         ? 'inline-flex rounded-md bg-black/30 p-0.5 text-[10px] font-semibold uppercase tracking-wide'
-        : 'inline-flex rounded-md border border-zinc-700/80 bg-zinc-900 p-0.5 text-[10px] font-semibold uppercase tracking-wide';
+        : isCompact
+            ? 'inline-flex rounded-md bg-zinc-800/80 p-0.5 text-[10px] font-medium uppercase tracking-wide'
+            : 'inline-flex rounded-md border border-zinc-700/80 bg-zinc-900 p-0.5 text-[10px] font-semibold uppercase tracking-wide';
 
     const sendBtnEnabled = isMac
         ? 'bg-white text-zinc-900 hover:bg-zinc-200'
-        : 'border-blue-500/70 bg-blue-600/90 text-white hover:bg-blue-600 hover:border-blue-400/80';
+        : isCompact
+            ? 'bg-zinc-100 text-zinc-900 hover:bg-white'
+            : 'border-blue-500/70 bg-blue-600/90 text-white hover:bg-blue-600 hover:border-blue-400/80';
 
     const sendBtnDisabled = isMac
         ? 'bg-zinc-800 text-zinc-600 cursor-not-allowed'
-        : 'cursor-not-allowed border-zinc-700 bg-zinc-800 text-zinc-500';
+        : isCompact
+            ? 'bg-zinc-800 text-zinc-600 cursor-not-allowed'
+            : 'cursor-not-allowed border-zinc-700 bg-zinc-800 text-zinc-500';
 
     const windowTitle = isMac
         ? (currentThreadId
@@ -373,12 +405,12 @@ export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default' }) => 
         : '';
 
     return (
-        <div className={`w-full mx-auto px-3 sm:px-4 ${isMac ? 'max-w-5xl' : 'max-w-4xl'}`}>
+        <div className={`w-full ${isMac ? 'mx-auto max-w-5xl px-3 sm:px-4' : isCompact ? '' : 'mx-auto max-w-4xl px-3 sm:px-4'}`}>
             <motion.div
                 className={`${shellClass} ${isMac ? 'h-[min(480px,70vh)] max-h-[70vh]' : ''}`}
-                initial={{ y: 20, opacity: 0 }}
-                animate={{ y: 0, opacity: 1 }}
-                transition={{ delay: 0.1, duration: 0.4 }}
+                initial={isCompact ? false : { y: 20, opacity: 0 }}
+                animate={isCompact ? undefined : { y: 0, opacity: 1 }}
+                transition={isCompact ? undefined : { delay: 0.1, duration: 0.4 }}
             >
                 {isMac && (
                     <div className="flex items-center h-11 px-4 bg-[#2b2b2d] border-b border-black/50 shrink-0">
@@ -435,8 +467,10 @@ export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default' }) => 
                                             <button
                                                 key={thread._id}
                                                 type="button"
-                                                onClick={() => void handleOpenThread(thread._id)}
+                                                onClick={() => handleThreadClick(thread._id)}
+                                                onDoubleClick={(e) => handleThreadDoubleClick(e, thread._id)}
                                                 disabled={threadSwitchState.status === 'loading'}
+                                                title="Double-click to delete"
                                                 className={`w-full flex items-start gap-2 px-3 py-2.5 text-left transition-colors ${
                                                     isActive
                                                         ? 'bg-white/10 text-white'
@@ -666,64 +700,72 @@ export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default' }) => 
                             <Paperclip className="w-3.5 h-3.5" />
                         </button>
 
-                        <button
-                            ref={figmaButtonRef}
-                            type="button"
-                            onClick={() => setShowFigmaPanel((v) => !v)}
-                            className={`${iconBtnClass} ${
-                                showFigmaPanel || figmaLinks.length > 0 ? figmaBtnActive : figmaBtnIdle
-                            }`}
-                            title="Figma MCP"
-                            aria-label="Figma MCP"
-                            id="figma-mcp-button"
-                        >
-                            <Figma className="w-3.5 h-3.5" />
-                        </button>
+                        {isMac && (
+                            <>
+                                <button
+                                    ref={figmaButtonRef}
+                                    type="button"
+                                    onClick={() => setShowFigmaPanel((v) => !v)}
+                                    className={`${iconBtnClass} ${
+                                        showFigmaPanel || figmaLinks.length > 0 ? figmaBtnActive : figmaBtnIdle
+                                    }`}
+                                    title="Figma MCP"
+                                    aria-label="Figma MCP"
+                                    id="figma-mcp-button"
+                                >
+                                    <Figma className="w-3.5 h-3.5" />
+                                </button>
 
-                        <FigmaPanel
-                            anchorRef={figmaButtonRef}
-                            isOpen={showFigmaPanel}
-                            onClose={() => setShowFigmaPanel(false)}
-                            figmaLinks={figmaLinks}
-                            onAddLink={handleAddFigmaLink}
-                            onRemoveLink={handleRemoveFigmaLink}
-                            manualFigmaLinks={manualFigmaLinks}
-                        />
+                                <FigmaPanel
+                                    anchorRef={figmaButtonRef}
+                                    isOpen={showFigmaPanel}
+                                    onClose={() => setShowFigmaPanel(false)}
+                                    figmaLinks={figmaLinks}
+                                    onAddLink={handleAddFigmaLink}
+                                    onRemoveLink={handleRemoveFigmaLink}
+                                    manualFigmaLinks={manualFigmaLinks}
+                                />
 
-                        <button
-                            ref={stitchButtonRef}
-                            type="button"
-                            onClick={() => setShowStitchPanel((v) => !v)}
-                            className={`${iconBtnClass} ${
-                                showStitchPanel || stitchContext ? stitchBtnActive : stitchBtnIdle
-                            }`}
-                            title="Google Stitch MCP"
-                            aria-label="Google Stitch MCP"
-                            id="stitch-mcp-button"
-                        >
-                            <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="currentColor" aria-hidden>
-                                <path d="M12 2L2 7l10 5 10-5-10-5zm0 7.5L4.5 6.75 12 10.5l7.5-3.75L12 9.5zm-8 3.25L12 17.5l8-4.75v2.5L12 20l-8-4.75v-2.5z" />
-                            </svg>
-                        </button>
+                                <button
+                                    ref={stitchButtonRef}
+                                    type="button"
+                                    onClick={() => setShowStitchPanel((v) => !v)}
+                                    className={`${iconBtnClass} ${
+                                        showStitchPanel || stitchContext ? stitchBtnActive : stitchBtnIdle
+                                    }`}
+                                    title="Google Stitch MCP"
+                                    aria-label="Google Stitch MCP"
+                                    id="stitch-mcp-button"
+                                >
+                                    <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="currentColor" aria-hidden>
+                                        <path d="M12 2L2 7l10 5 10-5-10-5zm0 7.5L4.5 6.75 12 10.5l7.5-3.75L12 9.5zm-8 3.25L12 17.5l8-4.75v2.5L12 20l-8-4.75v-2.5z" />
+                                    </svg>
+                                </button>
 
-                        <StitchPanel
-                            anchorRef={stitchButtonRef}
-                            isOpen={showStitchPanel}
-                            onClose={() => setShowStitchPanel(false)}
-                            stitchContext={stitchContext}
-                            onStitchContextChange={setStitchContext}
-                        />
+                                <StitchPanel
+                                    anchorRef={stitchButtonRef}
+                                    isOpen={showStitchPanel}
+                                    onClose={() => setShowStitchPanel(false)}
+                                    stitchContext={stitchContext}
+                                    onStitchContextChange={setStitchContext}
+                                />
+                            </>
+                        )}
                     </div>
 
-                    <div className="min-w-0 w-full flex justify-start overflow-hidden">
-                        <div className="flex min-w-0 items-center gap-2 overflow-hidden">
+                    <div className={isCompact ? 'flex flex-1 min-w-0 items-center gap-1.5 overflow-hidden' : 'min-w-0 w-full flex justify-start overflow-hidden'}>
+                        <div className="flex min-w-0 items-center gap-1.5 overflow-hidden">
                             <div className={modeToggleClass}>
                                 <button
                                     type="button"
                                     onClick={() => setChatMode('plan')}
                                     className={`rounded px-2 py-1 transition-colors ${
                                         chatMode === 'plan'
-                                            ? isMac ? 'bg-zinc-600 text-white' : 'bg-blue-600/90 text-white'
+                                            ? isMac
+                                                ? 'bg-zinc-600 text-white'
+                                                : isCompact
+                                                    ? 'bg-zinc-600 text-white'
+                                                    : 'bg-blue-600/90 text-white'
                                             : 'text-zinc-500 hover:text-zinc-300'
                                     }`}
                                     aria-label="Switch to plan mode"
@@ -735,7 +777,11 @@ export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default' }) => 
                                     onClick={() => setChatMode('build')}
                                     className={`rounded px-2 py-1 transition-colors ${
                                         chatMode === 'build'
-                                            ? isMac ? 'bg-zinc-600 text-white' : 'bg-blue-600/90 text-white'
+                                            ? isMac
+                                                ? 'bg-zinc-600 text-white'
+                                                : isCompact
+                                                    ? 'bg-zinc-600 text-white'
+                                                    : 'bg-blue-600/90 text-white'
                                             : 'text-zinc-500 hover:text-zinc-300'
                                     }`}
                                     aria-label="Switch to build mode"
@@ -743,7 +789,7 @@ export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default' }) => 
                                     Build
                                 </button>
                             </div>
-                            <ModelSelector side="top" />
+                            <ModelSelector side="top" compact={isCompact} />
                         </div>
                     </div>
 
@@ -754,9 +800,10 @@ export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default' }) => 
                             inline-flex shrink-0 items-center justify-center gap-1 h-7 px-3
                             text-[10px] font-semibold uppercase tracking-wide
                             rounded-md transition-colors duration-150
+                            ${isCompact ? 'ml-auto' : ''}
                             ${(!inputValue.trim() && attachedFiles.length === 0) || isLoading
                                 ? sendBtnDisabled
-                                : `${sendBtnEnabled} ${isMac ? '' : 'border'}`}
+                                : `${sendBtnEnabled} ${isMac || isCompact ? '' : 'border'}`}
                         `}
                         disabled={(!inputValue.trim() && attachedFiles.length === 0) || isLoading}
                     >
@@ -784,7 +831,7 @@ export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default' }) => 
                 )}
             </motion.div>
 
-            {!isMac && (
+            {!isMac && !isCompact && (
                 <div className="text-center mt-4">
                     <p className="text-[10px] uppercase tracking-widest text-zinc-600 font-medium">
                         Shift + Return for new line

@@ -4,8 +4,10 @@ const assert = require('node:assert/strict');
 const {
     normalizeMode,
     resolveModelForMode,
+    resolveAutoModel,
     buildEnhancedSystemPrompt,
     normalizePlanContext,
+    AUTO_MODEL_ID,
 } = require('../dist/services/chatService');
 
 test('normalizeMode falls back to build for invalid mode', () => {
@@ -17,6 +19,21 @@ test('normalizeMode falls back to build for invalid mode', () => {
 test('resolveModelForMode preserves requested model', () => {
     assert.equal(resolveModelForMode('gpt-4o-mini', 'build'), 'gpt-4o-mini');
     assert.equal(resolveModelForMode('gemini-2.5-flash', 'plan'), 'gemini-2.5-flash');
+});
+
+test('resolveAutoModel picks model by context', () => {
+    assert.equal(resolveAutoModel({ mode: 'plan' }), 'gemini-2.5-flash');
+    assert.equal(resolveAutoModel({ mode: 'build' }), 'gpt-4o-mini');
+    assert.equal(resolveAutoModel({ mode: 'build', hasFigma: true }), 'gemini-3-pro');
+    assert.equal(resolveAutoModel({ mode: 'build', messageLength: 3000 }), 'claude-sonnet-4.5');
+});
+
+test('resolveModelForMode resolves auto', () => {
+    assert.equal(resolveModelForMode(AUTO_MODEL_ID, 'plan'), 'gemini-2.5-flash');
+    assert.equal(
+        resolveModelForMode(AUTO_MODEL_ID, 'build', { hasAttachments: true }),
+        'gemini-3-pro',
+    );
 });
 
 test('buildEnhancedSystemPrompt injects plan context only in build mode', () => {

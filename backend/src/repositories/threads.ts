@@ -71,3 +71,16 @@ export const touch = async (
         [threadId, meta?.lastMode ?? null, shouldMarkPlanUpdate],
     );
 };
+
+export const deleteForOwner = async (
+    threadId: string,
+    userId: string,
+    tx?: Tx,
+): Promise<boolean> => {
+    await ensureSchema();
+    const result = await q(tx).query(
+        `DELETE FROM public.threads WHERE id = $1 AND user_id = $2`,
+        [threadId, userId],
+    );
+    return (result.rowCount ?? 0) > 0;
+};

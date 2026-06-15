@@ -42,7 +42,7 @@ export const MainLayout: React.FC = () => {
             {/* Desktop: split view with resizable panels */}
             <div className="hidden md:block h-full">
                 <Group orientation="horizontal" className="group h-full w-full">
-                    <Panel defaultSize="40" minSize="20" maxSize="65" className="flex min-w-0 flex-col">
+                    <Panel defaultSize="40" minSize="20" maxSize="65" className="flex min-h-0 min-w-0 flex-col">
                         <ChatPanel />
                     </Panel>
 

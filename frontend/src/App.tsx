@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import { useAuth } from '@clerk/clerk-react';
 import { LandingPage } from './components/LandingPage';
 import { MainLayout } from './components/Layout/MainLayout';
+import { FeaturePageRoute } from './pages/FeaturePageRoute';
 import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { AnimatePresence, motion } from 'framer-motion';
 
@@ -46,6 +47,20 @@ function App() {
               transition={{ duration: 0.4 }}
             >
               <LandingPage />
+            </motion.div>
+          }
+        />
+        <Route
+          path="/features/:slug"
+          element={
+            <motion.div
+              key="feature"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.4 }}
+            >
+              <FeaturePageRoute />
             </motion.div>
           }
         />

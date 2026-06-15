@@ -148,7 +148,31 @@ You are in BUILD MODE.
 const MAX_PLAN_CONTEXT_CHARS = 12_000;
 const PLAN_CONTEXT_MIN_CHARS = 80;
 
-export const resolveModelForMode = (requestedModel: string, mode: ConversationMode): string => {
+export const AUTO_MODEL_ID = 'auto';
+
+export type AutoModelContext = {
+    mode: ConversationMode;
+    hasAttachments?: boolean;
+    hasFigma?: boolean;
+    hasStitch?: boolean;
+    messageLength?: number;
+};
+
+export const resolveAutoModel = (ctx: AutoModelContext): string => {
+    if (ctx.mode === 'plan') return 'gemini-2.5-flash';
+    if (ctx.hasFigma || ctx.hasStitch || ctx.hasAttachments) return 'gemini-3-pro';
+    if ((ctx.messageLength ?? 0) > 2000) return 'claude-sonnet-4.5';
+    return 'gpt-4o-mini';
+};
+
+export const resolveModelForMode = (
+    requestedModel: string,
+    mode: ConversationMode,
+    autoCtx?: AutoModelContext,
+): string => {
+    if (requestedModel === AUTO_MODEL_ID) {
+        return resolveAutoModel({ mode, ...autoCtx });
+    }
     if (mode === 'plan' && !requestedModel?.trim()) return 'gemini-2.5-flash';
     return requestedModel;
 };
@@ -425,8 +449,16 @@ export class ChatService {
         logContext: ChatLogContext = {},
     ): Promise<{ stream: AsyncGenerator<string>; threadId: string }> {
         const conversationMode = normalizeMode(modeParam);
-        const effectiveModel = resolveModelForMode(model, conversationMode);
         const attachments = sanitizeAttachments(rawAttachments);
+        const hasFigma = Array.isArray(rawFigmaLinks) && rawFigmaLinks.length > 0;
+        const hasStitch = !!(rawStitchContext?.projectId || rawStitchContext?.prompt || rawStitchContext?.screenId);
+        const effectiveModel = resolveModelForMode(model, conversationMode, {
+            mode: conversationMode,
+            hasAttachments: attachments.length > 0,
+            hasFigma,
+            hasStitch,
+            messageLength: messageContent.length,
+        });
         // 1. Resolve / create thread (outside the per-thread lock since a brand
         //    new thread can't have concurrent traffic yet).
         let threadId = threadIdParam;
@@ -894,7 +926,10 @@ export class ChatService {
         userContent: string,
         model = 'gemini-2.5-flash',
     ): Promise<AsyncGenerator<string>> {
-        const effectiveModel = resolveModelForMode(model, 'build');
+        const effectiveModel = resolveModelForMode(model, 'build', {
+            mode: 'build',
+            messageLength: userContent.length,
+        });
         const modelConfig = getModelConfig(effectiveModel);
         const messages = [{ role: 'user', content: userContent }];
         if (!modelConfig) {
@@ -925,6 +960,16 @@ export class ChatService {
     async getUserThreads(userId: string) {
         const rows = await threadsRepo.listForUser(userId);
         return rows.map(this.mapThread);
+    }
+
+    async deleteThread(threadId: string, userId: string): Promise<void> {
+        const thread = await threadsRepo.findByIdForUser(threadId, userId);
+        if (!thread) throw new ThreadAccessError();
+        if (thread.user_id !== userId) {
+            throw new ThreadAccessError('Only the project owner can delete this thread');
+        }
+        const deleted = await threadsRepo.deleteForOwner(threadId, userId);
+        if (!deleted) throw new ThreadAccessError();
     }
 
     async getThreadMessages(threadId: string, userId: string) {

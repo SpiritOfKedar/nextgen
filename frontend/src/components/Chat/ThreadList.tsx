@@ -1,9 +1,10 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { MessageSquare, Clock, ArrowLeft, Loader2, RefreshCw } from 'lucide-react';
+import { MessageSquare, Clock, Loader2, RefreshCw } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { useAtomValue } from 'jotai';
 import { threadsAtom, currentThreadIdAtom, threadSwitchStateAtom } from '../../store/atoms';
 import { useChat } from '../../hooks/useChat';
+import { useThreadClickHandlers } from '../../hooks/useThreadClickHandlers';
 
 interface ThreadListProps {
     isOpen: boolean;
@@ -27,12 +28,13 @@ const formatRelativeDate = (dateStr: string) => {
 };
 
 export const ThreadList: React.FC<ThreadListProps> = ({ isOpen, onClose }) => {
-    const { fetchThreads, loadThread } = useChat();
+    const { fetchThreads, loadThread, deleteThread } = useChat();
     const threads = useAtomValue(threadsAtom);
     const currentThreadId = useAtomValue(currentThreadIdAtom);
     const threadSwitchState = useAtomValue(threadSwitchStateAtom);
     const [isLoading, setIsLoading] = useState(false);
     const [hasError, setHasError] = useState(false);
+    const [deleteError, setDeleteError] = useState<string | null>(null);
 
     const doFetch = useCallback(async () => {
         setIsLoading(true);
@@ -52,6 +54,29 @@ export const ThreadList: React.FC<ThreadListProps> = ({ isOpen, onClose }) => {
         }
     }, [isOpen, doFetch]);
 
+    const handleOpenThread = useCallback(async (threadId: string) => {
+        setDeleteError(null);
+        try {
+            await loadThread(threadId);
+            onClose();
+        } catch (err) {
+            console.error('[ThreadList] loadThread failed:', threadId, err);
+        }
+    }, [loadThread, onClose]);
+
+    const handleDeleteThread = useCallback(async (threadId: string) => {
+        setDeleteError(null);
+        const result = await deleteThread(threadId);
+        if (!result.ok) {
+            setDeleteError(result.error ?? 'Could not delete thread');
+        }
+    }, [deleteThread]);
+
+    const { handleClick: handleThreadClick, handleDoubleClick: handleThreadDoubleClick } = useThreadClickHandlers({
+        onOpen: (threadId) => void handleOpenThread(threadId),
+        onDelete: handleDeleteThread,
+    });
+
     return (
         <motion.div
             initial={{ x: -SIDEBAR_WIDTH, opacity: 0 }}
@@ -66,21 +91,13 @@ export const ThreadList: React.FC<ThreadListProps> = ({ isOpen, onClose }) => {
                 <h2 className="text-sm font-semibold text-zinc-200 flex items-center gap-2">
                     <Clock className="w-4 h-4" /> History
                 </h2>
-                <div className="flex items-center gap-1">
-                    <button
-                        onClick={doFetch}
-                        className="p-1 hover:bg-zinc-800 rounded-md text-zinc-400 hover:text-white transition-colors"
-                        title="Refresh"
-                    >
-                        <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} />
-                    </button>
-                    <button
-                        onClick={onClose}
-                        className="p-1 hover:bg-zinc-800 rounded-md text-zinc-400 hover:text-white transition-colors"
-                    >
-                        <ArrowLeft className="w-4 h-4" />
-                    </button>
-                </div>
+                <button
+                    onClick={doFetch}
+                    className="p-1 hover:bg-zinc-800 rounded-md text-zinc-400 hover:text-white transition-colors"
+                    title="Refresh"
+                >
+                    <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} />
+                </button>
             </div>
 
             <div className="flex-1 overflow-y-auto p-2 space-y-1 custom-scrollbar">
@@ -105,14 +122,10 @@ export const ThreadList: React.FC<ThreadListProps> = ({ isOpen, onClose }) => {
                     threads.map((thread) => (
                         <button
                             key={thread._id}
-                            onClick={() => {
-                                void loadThread(thread._id)
-                                    .then(() => onClose())
-                                    .catch((err) =>
-                                        console.error('[ThreadList] loadThread failed:', thread._id, err),
-                                    );
-                            }}
+                            onClick={() => handleThreadClick(thread._id)}
+                            onDoubleClick={(e) => handleThreadDoubleClick(e, thread._id)}
                             disabled={threadSwitchState.status === 'loading'}
+                            title="Double-click to delete"
                             className={`w-full text-left p-3 rounded-lg text-sm transition-all group ${currentThreadId === thread._id
                                 ? 'bg-zinc-800/50 text-white border border-zinc-700/50'
                                 : 'text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200 border border-transparent'
@@ -136,13 +149,20 @@ export const ThreadList: React.FC<ThreadListProps> = ({ isOpen, onClose }) => {
                     ))
                 )}
             </div>
-            {threadSwitchState.status === 'error' && threadSwitchState.errorMessage && (
-                <div className="p-3 border-t border-zinc-800">
-                    <p className="rounded-md border border-red-500/40 bg-red-950/40 px-2.5 py-2 text-xs text-red-200">
-                        {threadSwitchState.errorMessage}
-                    </p>
+            {(threadSwitchState.status === 'error' && threadSwitchState.errorMessage) || deleteError ? (
+                <div className="p-3 border-t border-zinc-800 space-y-2">
+                    {threadSwitchState.status === 'error' && threadSwitchState.errorMessage && (
+                        <p className="rounded-md border border-red-500/40 bg-red-950/40 px-2.5 py-2 text-xs text-red-200">
+                            {threadSwitchState.errorMessage}
+                        </p>
+                    )}
+                    {deleteError && (
+                        <p className="rounded-md border border-red-500/40 bg-red-950/40 px-2.5 py-2 text-xs text-red-200">
+                            {deleteError}
+                        </p>
+                    )}
                 </div>
-            )}
+            ) : null}
         </motion.div>
     );
 };

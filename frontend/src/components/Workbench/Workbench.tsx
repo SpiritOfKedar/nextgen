@@ -13,6 +13,7 @@ import { currentThreadIdAtom } from '../../store/atoms';
 import { webContainerAtom } from '../../store/webContainer';
 import { VersionHistoryModal } from './VersionHistoryModal';
 import { PushToGitHubModal } from './PushToGitHubModal';
+import { McpWorkbenchButtons } from './McpWorkbenchButtons';
 import { downloadProjectFromWebContainer } from '../../lib/projectDownload';
 
 interface TabButtonProps {
@@ -99,6 +100,8 @@ export const Workbench: React.FC = () => {
                 </div>
 
                 <div className="absolute right-3 top-1/2 -translate-y-1/2 flex items-center gap-1.5">
+                    <McpWorkbenchButtons />
+                    <div className="mx-0.5 h-4 w-px bg-zinc-800" aria-hidden />
                     <button
                         type="button"
                         onClick={() => setShowGitHubModal(true)}

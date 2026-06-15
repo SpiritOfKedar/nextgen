@@ -5,139 +5,13 @@ import { twMerge } from 'tailwind-merge';
 import { Check, ChevronUp } from 'lucide-react';
 import { useAtom } from 'jotai';
 import { selectedModelAtom } from '../../store/atoms';
+import { MODELS } from '../../lib/models';
+import { ProviderLogo } from './ProviderLogo';
 
-interface ModelOption {
-    id: string;
-    label: string;
-    description: string;
-    provider: 'openai' | 'anthropic' | 'google';
-}
-
-const MODELS: ModelOption[] = [
-    {
-        id: 'gemini-2.5-flash',
-        label: 'Gemini 2.5 Flash',
-        description: 'Fast & Cheap',
-        provider: 'google',
-    },
-    {
-        id: 'gpt-4o-mini',
-        label: 'GPT-4o Mini',
-        description: 'Fast & Cheap',
-        provider: 'openai',
-    },
-    {
-        id: 'gpt-5.2',
-        label: 'ChatGPT 5.2',
-        description: 'Reasoning',
-        provider: 'openai',
-    },
-    {
-        id: 'gemini-3-pro',
-        label: 'Gemini 3 Pro',
-        description: 'Multimodal',
-        provider: 'google',
-    },
-    {
-        id: 'claude-opus-4.5',
-        label: 'Claude Opus 4.5',
-        description: 'High Intelligence',
-        provider: 'anthropic',
-    },
-    {
-        id: 'claude-opus-4.6',
-        label: 'Claude Opus 4.6',
-        description: 'Experimental',
-        provider: 'anthropic',
-    },
-    {
-        id: 'claude-sonnet-4.5',
-        label: 'Claude Sonnet 4.5',
-        description: 'Balanced',
-        provider: 'anthropic',
-    },
-    {
-        id: 'claude-haiku-4.5',
-        label: 'Claude Haiku 4.5',
-        description: 'Fast',
-        provider: 'anthropic',
-    }
-];
-
-const CLAUDE_LOGO_SRC = '/claude-logo.png';
-
-const AnthropicLogo = () => (
-    <img
-        src={CLAUDE_LOGO_SRC}
-        alt="Claude"
-        className="w-4 h-4 shrink-0 rounded-sm object-cover"
-    />
-);
-
-const GEMINI_LOGO_SRC = '/gemini-logo.png';
-
-const GeminiLogoFallback = () => (
-    <svg viewBox="0 0 24 24" className="w-4 h-4 shrink-0">
-        <defs>
-            <linearGradient id="geminiGradientFallback" x1="0%" y1="0%" x2="100%" y2="100%">
-                <stop offset="0%" stopColor="#1D9BF0" />
-                <stop offset="100%" stopColor="#A78BFA" />
-            </linearGradient>
-        </defs>
-        <path
-            d="M12 2 C12.9 8.6, 15.4 11.1, 22 12 C15.4 12.9, 12.9 15.4, 12 22 C11.1 15.4, 8.6 12.9, 2 12 C8.6 11.1, 11.1 8.6, 12 2 Z"
-            fill="url(#geminiGradientFallback)"
-        />
-    </svg>
-);
-
-const GeminiLogo = () => {
-    const [failed, setFailed] = useState(false);
-    if (failed) return <GeminiLogoFallback />;
-    return (
-        <span className="inline-flex h-4 w-4 shrink-0 items-center justify-center overflow-hidden rounded-full border border-zinc-700/60 bg-zinc-950">
-            <img
-                src={GEMINI_LOGO_SRC}
-                alt="Gemini"
-                className="h-full w-full scale-[1.9] object-cover"
-                onError={() => setFailed(true)}
-            />
-        </span>
-    );
-};
-
-const OPENAI_LOGO_SRC = '/openai-logo.png';
-
-const OpenAILogoFallback = () => (
-    <svg viewBox="0 0 24 24" className="w-4 h-4 shrink-0 text-zinc-100" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M12 3.2c1.8 0 3.3 1.5 3.3 3.3v1.2l1-.6c1.6-.9 3.7-.4 4.6 1.2.9 1.6.4 3.7-1.2 4.6l-1 .6 1 .6c1.6.9 2.1 3 1.2 4.6-.9 1.6-3 2.1-4.6 1.2l-1-.6v1.2c0 1.8-1.5 3.3-3.3 3.3s-3.3-1.5-3.3-3.3v-1.2l-1 .6c-1.6.9-3.7.4-4.6-1.2-.9-1.6-.4-3.7 1.2-4.6l1-.6-1-.6c-1.6-.9-2.1-3-1.2-4.6.9-1.6 3-2.1 4.6-1.2l1 .6V6.5c0-1.8 1.5-3.3 3.3-3.3z" />
-    </svg>
-);
-
-const OpenAILogo = () => {
-    const [failed, setFailed] = useState(false);
-    if (failed) return <OpenAILogoFallback />;
-    return (
-        <span className="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-sm bg-zinc-100/95 p-[1px]">
-            <img
-                src={OPENAI_LOGO_SRC}
-                alt="OpenAI"
-                className="h-full w-full object-contain"
-                onError={() => setFailed(true)}
-            />
-        </span>
-    );
-};
-
-const ProviderLogo = ({ provider }: { provider: ModelOption['provider'] }) => {
-    if (provider === 'google') return <GeminiLogo />;
-    if (provider === 'anthropic') return <AnthropicLogo />;
-    return <OpenAILogo />;
-};
-
-export const ModelSelector: React.FC<{ side?: 'top' | 'bottom'; className?: string }> = ({
+export const ModelSelector: React.FC<{ side?: 'top' | 'bottom'; className?: string; compact?: boolean }> = ({
     side = 'top',
     className = '',
+    compact = false,
 }) => {
     const [selectedModelId, setSelectedModelId] = useAtom(selectedModelAtom);
     const [isOpen, setIsOpen] = useState(false);
@@ -152,7 +26,6 @@ export const ModelSelector: React.FC<{ side?: 'top' | 'bottom'; className?: stri
         const rect = buttonRef.current.getBoundingClientRect();
         const dropdownWidth = 260;
 
-        // Clamp horizontal position so dropdown doesn't overflow viewport
         let left = rect.right - dropdownWidth;
         if (left < 8) left = 8;
         if (left + dropdownWidth > window.innerWidth - 8) {
@@ -166,7 +39,6 @@ export const ModelSelector: React.FC<{ side?: 'top' | 'bottom'; className?: stri
         }
     }, [side]);
 
-    // Recalculate position on open, scroll, resize
     useEffect(() => {
         if (!isOpen) return;
         updatePosition();
@@ -180,7 +52,6 @@ export const ModelSelector: React.FC<{ side?: 'top' | 'bottom'; className?: stri
         };
     }, [isOpen, updatePosition]);
 
-    // Close on click outside
     useEffect(() => {
         if (!isOpen) return;
         const handleClickOutside = (e: MouseEvent) => {
@@ -196,7 +67,6 @@ export const ModelSelector: React.FC<{ side?: 'top' | 'bottom'; className?: stri
         return () => document.removeEventListener('mousedown', handleClickOutside);
     }, [isOpen]);
 
-    // Close on Escape
     useEffect(() => {
         if (!isOpen) return;
         const handleEsc = (e: KeyboardEvent) => {
@@ -305,17 +175,15 @@ export const ModelSelector: React.FC<{ side?: 'top' | 'bottom'; className?: stri
                 ref={buttonRef}
                 onClick={() => setIsOpen(!isOpen)}
                 className={twMerge(
-                    'inline-flex h-8 min-w-0 w-full max-w-[12.5rem] items-center gap-1.5 px-2',
-                    'text-[11px] font-medium text-zinc-200',
-                    'bg-zinc-900 hover:bg-zinc-800/80',
-                    'border border-zinc-700/80 hover:border-zinc-600',
-                    'rounded-md transition-colors duration-150',
+                    compact
+                        ? 'inline-flex h-7 min-w-0 max-w-[5.5rem] items-center gap-1 px-1.5 text-[10px] font-medium text-zinc-300 bg-zinc-800/80 hover:bg-zinc-800 border border-zinc-700/60 rounded-md transition-colors'
+                        : 'inline-flex h-8 min-w-0 w-full max-w-[12.5rem] items-center gap-1.5 px-2 text-[11px] font-medium text-zinc-200 bg-zinc-900 hover:bg-zinc-800/80 border border-zinc-700/80 hover:border-zinc-600 rounded-md transition-colors duration-150',
                     isOpen ? 'bg-zinc-800 border-zinc-600 text-zinc-100' : null,
                     className,
                 )}
             >
                 <ProviderLogo provider={selectedModel.provider} />
-                <span className="min-w-0 flex-1 truncate text-left">{selectedModel.label}</span>
+                <span className="min-w-0 flex-1 truncate text-left">{compact ? selectedModel.label.split(' ')[0] : selectedModel.label}</span>
                 <ChevronUp className={`w-2.5 h-2.5 shrink-0 text-zinc-500 transition-transform duration-200 ${isOpen ? '' : 'rotate-180'}`} />
             </button>
 

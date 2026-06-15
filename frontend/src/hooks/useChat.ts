@@ -1118,6 +1118,7 @@ createRoot(document.getElementById('root')!).render(
                     content: '',
                     timestamp: Date.now(),
                     conversationMode: effectiveMode,
+                    model: selectedModel,
                 },
             ]);
 
@@ -1353,6 +1354,7 @@ createRoot(document.getElementById('root')!).render(
                     role: 'assistant',
                     content: `⚠️ **Error:** ${errorMsg}\n\nPlease try again. If the problem persists, check that the backend server is running and the API keys are configured.`,
                     timestamp: Date.now(),
+                    model: selectedModel,
                 },
             ]);
             return { ok: false, error: errorMsg };
@@ -1379,6 +1381,55 @@ createRoot(document.getElementById('root')!).render(
         const data = await res.json();
         setThreads(data);
     }, [getToken, isLoaded, isSignedIn, setThreads]);
+
+    const deleteThread = useCallback(async (threadId: string): Promise<{ ok: true } | { ok: false; error: string }> => {
+        if (!isLoaded || !isSignedIn) {
+            return { ok: false, error: 'You need to be signed in to delete projects.' };
+        }
+        const token = await getToken();
+        if (!token) {
+            return { ok: false, error: 'Could not get auth token. Try signing in again.' };
+        }
+        const res = await fetch(`${API_URL}/chat/${encodeURIComponent(threadId)}`, {
+            method: 'DELETE',
+            headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!res.ok) {
+            const errBody = await res.text().catch(() => '');
+            return {
+                ok: false,
+                error: `Failed to delete project (${res.status}): ${errBody || res.statusText}`.trim(),
+            };
+        }
+        setThreads((prev) => prev.filter((t) => t._id !== threadId));
+        if (currentThreadId === threadId) {
+            setMessages([]);
+            setCurrentThreadId(null);
+            setFileSystem([]);
+            clearEditorTabs();
+            setServerUrl(null);
+            setPreviewStatus('idle');
+            setPreviewStatusMessage('Start a new prompt to generate and run a project.');
+            setThreadSwitchState({ status: 'idle', targetThreadId: null, errorMessage: null });
+            localStorage.removeItem('currentThreadId');
+        }
+        return { ok: true };
+    }, [
+        API_URL,
+        clearEditorTabs,
+        currentThreadId,
+        getToken,
+        isLoaded,
+        isSignedIn,
+        setCurrentThreadId,
+        setFileSystem,
+        setMessages,
+        setPreviewStatus,
+        setPreviewStatusMessage,
+        setServerUrl,
+        setThreadSwitchState,
+        setThreads,
+    ]);
 
     const fetchThreadVersions = useCallback(async (threadId: string): Promise<ThreadVersionItem[]> => {
         if (!threadId) throw new Error('threadId is required');
@@ -1625,6 +1676,7 @@ createRoot(document.getElementById('root')!).render(
                 conversationMode: m.conversationMode === 'plan' || m.conversationMode === 'build'
                     ? m.conversationMode
                     : undefined,
+                model: m.model ?? undefined,
             }));
             const latestModeMessage = [...rawMessages]
                 .reverse()
@@ -1792,6 +1844,7 @@ createRoot(document.getElementById('root')!).render(
         sendMessage,
         executePlanAction,
         fetchThreads,
+        deleteThread,
         fetchThreadVersions,
         restoreThreadToSeq,
         loadThread,
