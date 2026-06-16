@@ -3,6 +3,7 @@ import { useAuth } from '@clerk/clerk-react';
 import { LandingPage } from './components/LandingPage';
 import { MainLayout } from './components/Layout/MainLayout';
 import { FeaturePageRoute } from './pages/FeaturePageRoute';
+import { HostedPreview } from './pages/HostedPreview';
 import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { AnimatePresence, motion } from 'framer-motion';
 
@@ -78,6 +79,7 @@ function App() {
             </motion.div>
           }
         />
+        <Route path="/preview/:threadId" element={<HostedPreview />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </AnimatePresence>

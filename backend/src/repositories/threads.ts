@@ -19,6 +19,18 @@ export const create = async (
     return result.rows[0];
 };
 
+export const findById = async (
+    threadId: string,
+    tx?: Tx,
+): Promise<ThreadRow | null> => {
+    await ensureSchema();
+    const result = await q(tx).query<ThreadRow>(
+        `SELECT * FROM public.threads WHERE id = $1`,
+        [threadId],
+    );
+    return result.rows[0] ?? null;
+};
+
 export const findByIdForUser = async (
     threadId: string,
     userId: string,
