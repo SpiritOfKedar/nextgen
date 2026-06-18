@@ -418,7 +418,7 @@ Current test target includes chat mode policy validation.
 - Subsequent runs should improve via local and remote snapshot reuse.
 
 ## Thread restore seems stale/incomplete
-- Check `/chat/:threadId/files/delta` behavior and fallback to full snapshot path.
+- Incremental reload uses `/chat/:threadId/files/delta` when a per-thread file snapshot exists in memory; otherwise it falls back to the full `/files` snapshot.
 - Verify thread/file writes were finalized (not interrupted stream only).
 
 ---

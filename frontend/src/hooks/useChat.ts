@@ -399,7 +399,53 @@ type ThreadRuntimeMetadata = {
 };
 
 const threadRuntimeMeta = new Map<string, ThreadRuntimeMetadata>();
+/** Last known full file contents per thread — required to apply incremental deltas. */
+const threadFileSnapshots = new Map<string, Map<string, string>>();
 const lastRestoredTargetSeqByThread = new Map<string, number>();
+
+const THREAD_SEQ_STORAGE_PREFIX = 'boltly:threadSeq:';
+
+const normalizeThreadFilePath = (path: string): string => path.replace(/^\//, '');
+
+const readPersistedThreadSeq = (threadId: string): number | undefined => {
+    try {
+        const raw = sessionStorage.getItem(`${THREAD_SEQ_STORAGE_PREFIX}${threadId}`);
+        if (!raw) return undefined;
+        const seq = Number(raw);
+        return Number.isFinite(seq) && seq > 0 ? seq : undefined;
+    } catch {
+        return undefined;
+    }
+};
+
+const persistThreadSeq = (threadId: string, seq: number): void => {
+    if (!Number.isFinite(seq) || seq <= 0) return;
+    try {
+        sessionStorage.setItem(`${THREAD_SEQ_STORAGE_PREFIX}${threadId}`, String(seq));
+    } catch {
+        /* ignore quota / private mode */
+    }
+};
+
+const mergeFileDelta = (
+    base: Map<string, string>,
+    files: { filePath: string; content: string }[],
+    deletedPaths: string[],
+): Map<string, string> => {
+    const merged = new Map(base);
+    for (const f of files) {
+        const path = normalizeThreadFilePath(f.filePath);
+        if (path) merged.set(path, f.content);
+    }
+    for (const p of deletedPaths) {
+        const path = normalizeThreadFilePath(p);
+        if (path) merged.delete(path);
+    }
+    return merged;
+};
+
+const fileMapToThreadFiles = (fileMap: Map<string, string>): { filePath: string; content: string }[] =>
+    [...fileMap.entries()].map(([filePath, content]) => ({ filePath, content }));
 let mountedProjectFiles = new Set<string>();
 const mountedFilesByThread = new Map<string, Set<string>>();
 let activeMountedThreadId: string | null = null;
@@ -726,6 +772,7 @@ export const useChat = () => {
         latestSeq: number,
         authToken: string,
         switchSeq: number,
+        explicitFilesToDelete: string[] = [],
     ) => {
         if (!wc || fileMap.size === 0) return;
         const startedAt = performance.now();
@@ -856,10 +903,14 @@ createRoot(document.getElementById('root')!).render(
         const currentlyMountedFiles = activeMountedThreadId
             ? (mountedFilesByThread.get(activeMountedThreadId) ?? mountedProjectFiles)
             : mountedProjectFiles;
-        const filesToDelete = [...currentlyMountedFiles].filter((p) => !incomingFiles.has(p));
+        const filesToDelete = [
+            ...[...currentlyMountedFiles].filter((p) => !incomingFiles.has(p)),
+            ...explicitFilesToDelete.map((p) => p.replace(/^\//, '')).filter(Boolean),
+        ];
+        const uniqueFilesToDelete = [...new Set(filesToDelete)];
 
         if (abortIfStale('before_file_sync')) return;
-        const syncResult = await syncProjectFiles(wc, threadId, fileMap, filesToDelete);
+        const syncResult = await syncProjectFiles(wc, threadId, fileMap, uniqueFilesToDelete);
         mountedProjectFiles = incomingFiles;
         mountedFilesByThread.set(threadId, incomingFiles);
         activeMountedThreadId = threadId;
@@ -1566,6 +1617,10 @@ createRoot(document.getElementById('root')!).render(
             openEditorTab(activeFileCandidate);
         }
 
+        const snapshot = new Map(fileMap);
+        threadFileSnapshots.set(threadId, snapshot);
+        persistThreadSeq(threadId, restoredToSeq);
+
         const wc = webContainerInstance ?? getWebContainerInstance();
         if (wc) {
             const deletedNormalized = deletedPaths
@@ -1633,10 +1688,17 @@ createRoot(document.getElementById('root')!).render(
             setPreviewStatusMessage('Loading thread files and preparing preview environment...');
 
             const previousMeta = threadRuntimeMeta.get(threadId);
-            const previousSeq = previousMeta?.lastAppliedSeq;
+            const cachedSnapshot = threadFileSnapshots.get(threadId);
+            const previousSeq = previousMeta?.lastAppliedSeq ?? readPersistedThreadSeq(threadId);
+            const canUseDelta = !!(
+                previousSeq
+                && previousSeq > 0
+                && cachedSnapshot
+                && cachedSnapshot.size > 0
+            );
 
-            // Fetch messages and thread files in parallel (delta when possible)
-            const deltaUrl = previousSeq && previousSeq > 0
+            // Fetch messages and thread files in parallel (delta when we have a local snapshot)
+            const deltaUrl = canUseDelta
                 ? `${API_URL}/chat/${id}/files/delta?sinceSeq=${previousSeq}`
                 : null;
             const [messagesRes, filesRes] = await Promise.all([
@@ -1662,26 +1724,53 @@ createRoot(document.getElementById('root')!).render(
             }
             if (isStale()) return;
 
-            const rawMessages = await messagesRes.json();
+            const [rawMessages, filesPayload] = await Promise.all([
+                messagesRes.json(),
+                filesRes.json(),
+            ]);
             const latestSeq = rawMessages.reduce((max: number, m: any) => {
                 const seq = Number(m.seq ?? 0);
                 return Number.isFinite(seq) ? Math.max(max, seq) : max;
             }, 0);
-            const filesPayload = await filesRes.json();
-            let threadFiles: { filePath: string; content: string }[] = Array.isArray(filesPayload)
-                ? filesPayload
-                : (filesPayload.files || []);
-            if (!Array.isArray(filesPayload) && filesPayload?.isDelta) {
-                const fullFilesRes = await fetch(`${API_URL}/chat/${id}/files`, {
-                    headers: { Authorization: `Bearer ${token}` }
-                });
-                if (!fullFilesRes.ok) {
-                    const errBody = await fullFilesRes.text().catch(() => '');
-                    throw new Error(
-                        `Could not load full thread files (${fullFilesRes.status}): ${errBody || fullFilesRes.statusText}`.trim(),
-                    );
+
+            let threadFiles: { filePath: string; content: string }[] = [];
+            let deletedPaths: string[] = [];
+            let effectiveLatestSeq = latestSeq;
+
+            const isDeltaPayload = !Array.isArray(filesPayload) && filesPayload?.isDelta === true;
+            if (isDeltaPayload) {
+                const deltaFiles = Array.isArray(filesPayload.files) ? filesPayload.files : [];
+                deletedPaths = Array.isArray(filesPayload.deletedPaths) ? filesPayload.deletedPaths : [];
+                effectiveLatestSeq = Number(filesPayload.lastSeq ?? latestSeq) || latestSeq;
+
+                const baseSnapshot = threadFileSnapshots.get(threadId);
+                if (!baseSnapshot || baseSnapshot.size === 0) {
+                    const fullFilesRes = await fetch(`${API_URL}/chat/${id}/files`, {
+                        headers: { Authorization: `Bearer ${token}` }
+                    });
+                    if (!fullFilesRes.ok) {
+                        const errBody = await fullFilesRes.text().catch(() => '');
+                        throw new Error(
+                            `Could not load full thread files (${fullFilesRes.status}): ${errBody || fullFilesRes.statusText}`.trim(),
+                        );
+                    }
+                    threadFiles = await fullFilesRes.json();
+                } else {
+                    const merged = mergeFileDelta(baseSnapshot, deltaFiles, deletedPaths);
+                    threadFileSnapshots.set(threadId, merged);
+                    threadFiles = fileMapToThreadFiles(merged);
+                    console.info('[SandboxPerf] thread_files_delta_applied', {
+                        threadId,
+                        sinceSeq: previousSeq,
+                        upserts: deltaFiles.length,
+                        deletions: deletedPaths.length,
+                        totalFiles: merged.size,
+                    });
                 }
-                threadFiles = await fullFilesRes.json();
+            } else {
+                threadFiles = Array.isArray(filesPayload)
+                    ? filesPayload
+                    : (filesPayload.files || []);
             }
 
             // Get the WebContainer instance — prefer atom, fallback to module singleton
@@ -1725,6 +1814,12 @@ createRoot(document.getElementById('root')!).render(
 
             if (isStale()) return;
 
+            // Persist snapshot + seq from resolved file state (full load, merged delta, or fallback).
+            if (threadFiles.length > 0 || isDeltaPayload) {
+                threadFileSnapshots.set(threadId, new Map(fileMap));
+            }
+            persistThreadSeq(threadId, effectiveLatestSeq);
+
             const formattedMessages = rawMessages.map((m: any) => ({
                 id: m._id,
                 role: m.role,
@@ -1749,7 +1844,15 @@ createRoot(document.getElementById('root')!).render(
             if (wc && fileMap.size > 0) {
                 // Make thread switching responsive: restore UI immediately,
                 // then prepare/install sandbox in background.
-                void startThreadSandboxInBackground(wc, threadId, new Map(fileMap), latestSeq, token, switchSeq);
+                void startThreadSandboxInBackground(
+                    wc,
+                    threadId,
+                    new Map(fileMap),
+                    effectiveLatestSeq,
+                    token,
+                    switchSeq,
+                    isDeltaPayload ? deletedPaths : [],
+                );
             }
             if (isStale()) return;
 
@@ -1777,7 +1880,8 @@ createRoot(document.getElementById('root')!).render(
                 console.info('[SandboxPerf] thread_visible', {
                     threadId,
                     elapsedMs: elapsed,
-                    latestSeq,
+                    latestSeq: effectiveLatestSeq,
+                    usedDelta: isDeltaPayload,
                 });
             }
         } catch (error) {

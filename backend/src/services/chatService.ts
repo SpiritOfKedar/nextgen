@@ -1084,8 +1084,7 @@ export class ChatService {
             content: blobs.get(c.blob_sha256) ?? '',
         }));
 
-        const messages = await messagesRepo.listForThread(threadId);
-        const lastSeq = messages.reduce((max, m) => Math.max(max, Number(m.seq) || 0), 0);
+        const lastSeq = await messagesRepo.maxSeqForThread(threadId);
 
         return {
             isDelta: true,

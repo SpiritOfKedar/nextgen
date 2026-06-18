@@ -86,6 +86,18 @@ export const markAborted = async (id: string, error: string | null, tx?: Tx): Pr
     );
 };
 
+/** Highest per-thread message seq (0 when the thread has no messages). */
+export const maxSeqForThread = async (threadId: string, tx?: Tx): Promise<number> => {
+    const result = await q(tx).query<{ max: number | null }>(
+        `SELECT MAX(seq)::int AS max
+         FROM public.messages
+         WHERE thread_id = $1`,
+        [threadId],
+    );
+    const max = result.rows[0]?.max;
+    return max != null && Number.isFinite(max) ? max : 0;
+};
+
 export const listForThread = async (threadId: string, tx?: Tx): Promise<MessageRow[]> => {
     await ensureSchema();
     const result = await q(tx).query<MessageRow>(
