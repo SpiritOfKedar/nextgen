@@ -1,6 +1,6 @@
 
 import React, { useState } from 'react';
-import { Terminal, Code, Play, History, Download, Github } from 'lucide-react';
+import { Terminal, Code, Play, History, Download, Github, ExternalLink } from 'lucide-react';
 import { EditorPanel } from './EditorPanel';
 import { TerminalPanel } from './TerminalPanel';
 import { FileTree } from './FileTree';
@@ -28,6 +28,7 @@ export const Workbench: React.FC = () => {
     const [isVersionModalOpen, setIsVersionModalOpen] = useState(false);
     const [showGitHubModal, setShowGitHubModal] = useState(false);
     const [isDownloading, setIsDownloading] = useState(false);
+    const [copiedPreviewUrl, setCopiedPreviewUrl] = useState(false);
     const { isLoading, error } = useWebContainer(); // Init WebContainer on mount
     const currentThreadId = useAtomValue(currentThreadIdAtom);
     const webContainer = useAtomValue(webContainerAtom);
@@ -112,6 +113,30 @@ export const Workbench: React.FC = () => {
                     >
                         <Github className="h-3.5 w-3.5" />
                     </button>
+                    <div className="relative">
+                        <button
+                            type="button"
+                            onClick={() => {
+                                if (!currentThreadId) return;
+                                const url = `${window.location.origin}/preview/${currentThreadId}`;
+                                navigator.clipboard.writeText(url).then(() => {
+                                    setCopiedPreviewUrl(true);
+                                    setTimeout(() => setCopiedPreviewUrl(false), 2000);
+                                });
+                            }}
+                            disabled={!currentThreadId}
+                            className="inline-flex h-7 w-7 items-center justify-center rounded-md text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors disabled:cursor-not-allowed disabled:opacity-40"
+                            title={currentThreadId ? 'Copy hosted preview URL' : 'Start a thread to get a preview URL'}
+                            aria-label="Copy preview URL"
+                        >
+                            <ExternalLink className="h-3.5 w-3.5" />
+                        </button>
+                        {copiedPreviewUrl && (
+                            <div className="absolute -bottom-8 left-1/2 -translate-x-1/2 whitespace-nowrap rounded bg-zinc-800 px-2 py-1 text-[10px] text-emerald-400 shadow-lg border border-zinc-700 z-50">
+                                Preview URL copied!
+                            </div>
+                        )}
+                    </div>
                     <button
                         type="button"
                         onClick={handleDownload}

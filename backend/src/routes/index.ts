@@ -6,9 +6,14 @@ import { figmaController } from '../controllers/figmaController';
 import { stitchController } from '../controllers/stitchController';
 import { githubController } from '../controllers/githubController';
 import * as collaboratorsController from '../controllers/collaboratorsController';
+import { previewController } from '../controllers/previewController';
 import { authMiddleware } from '../middlewares/authMiddleware';
 
 const router = Router();
+
+// Public endpoints (no auth required)
+// @ts-ignore
+router.get('/preview/:threadId', previewController.getPreview);
 
 // Sync user to MongoDB on login
 // @ts-ignore
