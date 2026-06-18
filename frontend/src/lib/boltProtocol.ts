@@ -1,8 +1,10 @@
-export type BoltActionType = 'file' | 'shell';
+export type BoltActionType = 'file' | 'shell' | 'supabase-migration';
 
 export interface BoltAction {
     type: BoltActionType;
     filePath?: string;
+    /** Present on supabase-migration actions: the ordered migration id. */
+    id?: string;
     content: string;
 }
 
@@ -49,9 +51,11 @@ export class BoltParser {
                         const [fullMatch, attrs] = match;
                         const typeMatch = attrs.match(/type="([^"]+)"/);
                         const filePathMatch = attrs.match(/filePath="([^"]+)"/);
+                        const idMatch = attrs.match(/id="([^"]+)"/);
                         this.currentAction = {
                             type: (typeMatch?.[1] || 'file') as BoltActionType,
                             filePath: filePathMatch?.[1],
+                            id: idMatch?.[1],
                             content: ''
                         };
                         this.buffer = this.buffer.substring(match.index! + fullMatch.length);

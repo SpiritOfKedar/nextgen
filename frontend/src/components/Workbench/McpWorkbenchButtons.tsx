@@ -1,9 +1,10 @@
 import React, { useState, useRef } from 'react';
-import { Figma } from 'lucide-react';
+import { Figma, Database } from 'lucide-react';
 import { useAtom } from 'jotai';
 import { manualFigmaLinksAtom, stitchContextAtom } from '../../store/mcpAttachments';
 import { FigmaPanel } from '../Chat/FigmaPanel';
 import { StitchPanel } from '../Chat/StitchPanel';
+import { SupabasePanel } from '../Chat/SupabasePanel';
 
 const StitchIcon = () => (
     <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="currentColor" aria-hidden>
@@ -16,8 +17,10 @@ export const McpWorkbenchButtons: React.FC = () => {
     const [stitchContext, setStitchContext] = useAtom(stitchContextAtom);
     const [showFigmaPanel, setShowFigmaPanel] = useState(false);
     const [showStitchPanel, setShowStitchPanel] = useState(false);
+    const [showSupabasePanel, setShowSupabasePanel] = useState(false);
     const figmaRef = useRef<HTMLButtonElement>(null);
     const stitchRef = useRef<HTMLButtonElement>(null);
+    const supabaseRef = useRef<HTMLButtonElement>(null);
 
     const handleAddFigmaLink = (url: string) => {
         setManualFigmaLinks((prev) => {
@@ -58,6 +61,7 @@ export const McpWorkbenchButtons: React.FC = () => {
                 type="button"
                 onClick={() => {
                     setShowFigmaPanel(false);
+                    setShowSupabasePanel(false);
                     setShowStitchPanel((v) => !v);
                 }}
                 className={iconBtnClass(showStitchPanel || !!stitchContext)}
@@ -65,6 +69,21 @@ export const McpWorkbenchButtons: React.FC = () => {
                 aria-label="Google Stitch MCP"
             >
                 <StitchIcon />
+            </button>
+
+            <button
+                ref={supabaseRef}
+                type="button"
+                onClick={() => {
+                    setShowFigmaPanel(false);
+                    setShowStitchPanel(false);
+                    setShowSupabasePanel((v) => !v);
+                }}
+                className={iconBtnClass(showSupabasePanel)}
+                title="Supabase backend"
+                aria-label="Supabase backend"
+            >
+                <Database className="h-3.5 w-3.5" />
             </button>
 
             <FigmaPanel
@@ -83,6 +102,12 @@ export const McpWorkbenchButtons: React.FC = () => {
                 onClose={() => setShowStitchPanel(false)}
                 stitchContext={stitchContext}
                 onStitchContextChange={setStitchContext}
+            />
+
+            <SupabasePanel
+                anchorRef={supabaseRef}
+                isOpen={showSupabasePanel}
+                onClose={() => setShowSupabasePanel(false)}
             />
         </>
     );

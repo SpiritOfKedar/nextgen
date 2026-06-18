@@ -5,6 +5,7 @@ import { terminalController } from '../controllers/terminalController';
 import { figmaController } from '../controllers/figmaController';
 import { stitchController } from '../controllers/stitchController';
 import { githubController } from '../controllers/githubController';
+import { supabaseController } from '../controllers/supabaseController';
 import * as collaboratorsController from '../controllers/collaboratorsController';
 import { previewController } from '../controllers/previewController';
 import { authMiddleware } from '../middlewares/authMiddleware';
@@ -78,6 +79,20 @@ router.delete('/github/disconnect', authMiddleware, githubController.disconnect)
 router.get('/github/link/:threadId', authMiddleware, githubController.getThreadLink);
 // @ts-ignore
 router.post('/github/push', authMiddleware, githubController.push);
+
+// Supabase backend integration endpoints
+// @ts-ignore
+router.get('/supabase/status', authMiddleware, supabaseController.getStatus);
+// @ts-ignore
+router.post('/supabase/connect', authMiddleware, supabaseController.connect);
+// @ts-ignore
+router.delete('/supabase/disconnect', authMiddleware, supabaseController.disconnect);
+// @ts-ignore
+router.get('/supabase/env', authMiddleware, supabaseController.getEnv);
+// @ts-ignore
+router.get('/supabase/schema', authMiddleware, supabaseController.getSchema);
+// @ts-ignore
+router.post('/supabase/migrations/apply', authMiddleware, supabaseController.applyMigrations);
 
 // Sandbox cache/snapshot architecture endpoints
 // @ts-ignore

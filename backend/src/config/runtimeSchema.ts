@@ -73,6 +73,31 @@ export const ensureRuntimeSchema = async (pool: Pool): Promise<void> => {
     `);
 
     await pool.query(`
+        CREATE TABLE IF NOT EXISTS public.user_supabase_connections (
+            user_id UUID PRIMARY KEY REFERENCES public.users(id) ON DELETE CASCADE,
+            project_url TEXT NOT NULL,
+            anon_key TEXT NOT NULL,
+            service_role_key TEXT NULL,
+            database_url TEXT NULL,
+            project_ref TEXT NULL,
+            schema_snapshot JSONB NULL,
+            enabled BOOLEAN NOT NULL DEFAULT true,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+    `);
+
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS public.user_supabase_migrations (
+            user_id UUID NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
+            migration_id TEXT NOT NULL,
+            sql_hash TEXT NOT NULL,
+            applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY (user_id, migration_id)
+        )
+    `);
+
+    await pool.query(`
         CREATE TABLE IF NOT EXISTS public.user_github_connections (
             user_id UUID PRIMARY KEY REFERENCES public.users(id) ON DELETE CASCADE,
             access_token TEXT NOT NULL,

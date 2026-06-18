@@ -25,6 +25,7 @@ import {
     StitchContextInput,
 } from './stitchContextService';
 import { getUserStitchMcpConfig } from '../controllers/stitchController';
+import { getUserSupabaseContext, SupabasePromptContext } from '../controllers/supabaseController';
 
 dotenv.config();
 
@@ -184,6 +185,7 @@ export const buildEnhancedSystemPrompt = (
     savedPlanContext?: string | null,
     figmaContexts: FigmaDesignContext[] = [],
     stitchContext: StitchDesignContext | null = null,
+    supabaseContext: SupabasePromptContext | null = null,
 ): string => {
     let enhanced = basePrompt;
     enhanced += `\n\n--- CONVERSATION MODE ---\n${mode === 'plan' ? PLAN_MODE_PROMPT : BUILD_MODE_PROMPT}\n--- END MODE ---\n`;
@@ -227,6 +229,32 @@ export const buildEnhancedSystemPrompt = (
         }
         enhanced += '[/stitch_context]\n';
         enhanced += '\n--- END STITCH DESIGN CONTEXT ---\n';
+    }
+    if (supabaseContext) {
+        enhanced += '\n--- SUPABASE PROJECT CONTEXT ---\n';
+        enhanced += 'The user has connected a Supabase project to serve as the backend (database, auth, storage). ';
+        enhanced += 'When the build needs data persistence or auth, use Supabase as described in the Supabase build rules. ';
+        enhanced += 'Do NOT hardcode keys: the platform injects VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY into the sandbox.\n';
+        enhanced += `\n[supabase_context projectRef="${supabaseContext.projectRef || ''}" migrationsEnabled="${supabaseContext.migrationsEnabled}"]\n`;
+        if (supabaseContext.migrationsEnabled) {
+            enhanced += 'Migrations are enabled: emit schema changes as <boltAction type="supabase-migration" id="..."> blocks and the platform will apply them.\n';
+        } else {
+            enhanced += 'Migrations are NOT enabled (no database URL connected): generate SQL the user must run manually in the Supabase SQL editor, and explain this.\n';
+        }
+        if (supabaseContext.schema && supabaseContext.schema.tables.length > 0) {
+            enhanced += '\nExisting public schema:\n';
+            for (const table of supabaseContext.schema.tables) {
+                const cols = table.columns.map((c) => `${c.name} ${c.type}${c.nullable ? '' : ' NOT NULL'}`).join(', ');
+                enhanced += `- ${table.name} (RLS ${table.rlsEnabled ? 'enabled' : 'DISABLED'}): ${cols}\n`;
+            }
+        } else {
+            enhanced += '\nNo tables exist yet in the public schema.\n';
+        }
+        if (supabaseContext.appliedMigrations.length > 0) {
+            enhanced += `\nAlready-applied migration ids: ${supabaseContext.appliedMigrations.join(', ')}\n`;
+        }
+        enhanced += '[/supabase_context]\n';
+        enhanced += '\n--- END SUPABASE PROJECT CONTEXT ---\n';
     }
     if (fileSnapshot.length > 0) {
         enhanced += '\n--- CURRENT PROJECT FILES ---\n';
@@ -529,6 +557,7 @@ export class ChatService {
                 defaultProjectId: stitchMcpConfig?.defaultProjectId ?? null,
             })
             : null;
+        const supabaseContext = await getUserSupabaseContext(userId);
         const enhancedSystemPrompt = buildEnhancedSystemPrompt(
             SYSTEM_PROMPT,
             fileSnapshot,
@@ -536,6 +565,7 @@ export class ChatService {
             savedPlanContext?.planContext ?? null,
             figmaContexts,
             stitchDesignContext,
+            supabaseContext,
         );
 
         const recentRows = await messagesRepo.recentForThread(threadId, 10);

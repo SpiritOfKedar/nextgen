@@ -1,6 +1,6 @@
 import JSZip from 'jszip';
 
-export const EXCLUDED_ROOT_ENTRIES = new Set(['node_modules', '.boltly', '.git']);
+export const EXCLUDED_ROOT_ENTRIES = new Set(['node_modules', '.boltly', '.git', '.env.local']);
 
 export type ProjectFileEntry = {
   path: string;

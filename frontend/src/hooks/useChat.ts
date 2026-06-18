@@ -42,6 +42,11 @@ import {
     MINIMAL_ROOT_PACKAGE_JSON,
     syncProjectFiles,
 } from '../lib/sandboxInstall';
+import {
+    injectSupabaseEnv,
+    applySupabaseMigrations,
+    type SupabaseMigrationInput,
+} from '../lib/supabaseSandboxEnv';
 import type { WebContainer } from '@webcontainer/api';
 
 /** Serialize WebContainer fs writes so the chat stream reader never stalls on slow I/O (fixes dropped Claude streams). */
@@ -416,6 +421,7 @@ const COMMON_PACKAGE_VERSIONS: Record<string, string> = {
     '@dnd-kit/sortable': '^8.0.0',
     recharts: '^2.13.0',
     sonner: '^1.7.0',
+    '@supabase/supabase-js': '^2.45.0',
 };
 
 const pinnedVersionForPackage = (name: string): string =>
@@ -853,6 +859,10 @@ createRoot(document.getElementById('root')!).render(
         mountedFilesByThread.set(threadId, incomingFiles);
         activeMountedThreadId = threadId;
 
+        if (authToken) {
+            await injectSupabaseEnv(wc, authToken);
+        }
+
         const depFingerprint = getDependencyFingerprint(fileMap);
         const criticalFingerprint = getCriticalConfigFingerprint(fileMap);
         const shouldRestartServer =
@@ -1124,6 +1134,7 @@ createRoot(document.getElementById('root')!).render(
 
             const parser = new BoltParser();
             const pendingShellCommands: string[] = [];
+            const pendingMigrations: SupabaseMigrationInput[] = [];
             // Track all files written during this stream for dependency patching
             const writtenFiles = new Map<string, string>();
             const fsWriteChain = { current: Promise.resolve() };
@@ -1175,6 +1186,14 @@ createRoot(document.getElementById('root')!).render(
                     if (action.type === 'shell') {
                         pendingShellCommands.push(action.content.trim());
                     }
+                    if (action.type === 'supabase-migration' && action.id) {
+                        const sql = action.content.trim();
+                        pendingMigrations.push({ migrationId: action.id, sql });
+                        const migrationPath = `supabase/migrations/${action.id}.sql`;
+                        if (wc) queueBoltFileWrite(fsWriteChain, wc, migrationPath, sql);
+                        writtenFiles.set(migrationPath, sql);
+                        setFileSystem((prev) => upsertFile(prev, migrationPath, sql));
+                    }
                 }
 
                 setMessages((prev) =>
@@ -1207,6 +1226,15 @@ createRoot(document.getElementById('root')!).render(
                 if (action.type === 'shell') {
                     pendingShellCommands.push(action.content.trim());
                 }
+                if (action.type === 'supabase-migration' && action.id) {
+                    const sql = action.content.trim();
+                    pendingMigrations.push({ migrationId: action.id, sql });
+                    const migrationPath = `supabase/migrations/${action.id}.sql`;
+                    const wc = webContainerInstance ?? getWebContainerInstance();
+                    if (wc) queueBoltFileWrite(fsWriteChain, wc, migrationPath, sql);
+                    writtenFiles.set(migrationPath, sql);
+                    setFileSystem((prev) => upsertFile(prev, migrationPath, sql));
+                }
             }
 
             await fsWriteChain.current;
@@ -1215,6 +1243,27 @@ createRoot(document.getElementById('root')!).render(
                 const wcForNpm = webContainerInstance ?? getWebContainerInstance();
                 await ensureRootPackageJsonExists(writtenFiles, wcForNpm, setFileSystem);
                 await patchMissingDependencies(writtenFiles, wcForNpm, setFileSystem);
+
+                // Supabase backend: apply schema migrations server-side, then inject the
+                // browser-safe client env so the dev server boots against the live project.
+                if (token && pendingMigrations.length > 0) {
+                    setPreviewStatus('starting');
+                    setPreviewStatusMessage('Applying Supabase migrations…');
+                    writeShellOutput(`\r\n\x1b[36m⬢ Applying ${pendingMigrations.length} Supabase migration(s)...\x1b[0m\r\n`);
+                    try {
+                        const results = await applySupabaseMigrations(token, pendingMigrations);
+                        for (const r of results) {
+                            const color = r.status === 'failed' || r.status === 'blocked' ? '31'
+                                : r.status === 'applied' ? '32' : '90';
+                            writeShellOutput(`\x1b[${color}m  • ${r.migrationId}: ${r.status}${r.detail ? ` — ${r.detail}` : ''}\x1b[0m\r\n`);
+                        }
+                    } catch (err) {
+                        writeShellOutput(`\r\n\x1b[31m✗ Supabase migration error: ${err instanceof Error ? err.message : String(err)}\x1b[0m\r\n`);
+                    }
+                }
+                if (wcForNpm && token) {
+                    await injectSupabaseEnv(wcForNpm, token);
+                }
 
                 const wc = wcForNpm;
                 const buildThreadId = newThreadId ?? currentThreadId ?? localStorage.getItem('currentThreadId') ?? '';
