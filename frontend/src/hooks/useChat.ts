@@ -516,6 +516,11 @@ export const useChat = () => {
         prompt?: string;
         screenId?: string;
     };
+    type SupabaseContextPayload = {
+        fetchTables?: boolean;
+        fetchAdvisors?: boolean;
+        docsQuery?: string;
+    };
 
 
     const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001/api';
@@ -1034,6 +1039,7 @@ createRoot(document.getElementById('root')!).render(
         attachments: ChatAttachmentPayload[] = [],
         figmaLinks: FigmaLinkPayload[] = [],
         stitchContext: StitchContextPayload | null = null,
+        supabaseContext: SupabaseContextPayload | null = null,
         options?: SendMessageOptions,
     ): Promise<SendMessageResult> => {
         if (!content.trim()) {
@@ -1054,6 +1060,7 @@ createRoot(document.getElementById('root')!).render(
         console.log('[useChat] sendMessage called:', { content: content.substring(0, 50), model: selectedModel, mode: effectiveMode });
 
         const stitchSuffix = stitchContext ? '\n[Stitch context attached]' : '';
+        const supabaseSuffix = supabaseContext ? '\n[Supabase MCP context attached]' : '';
         const figmaSuffix = figmaLinks.length > 0
             ? `\n[Figma context: ${figmaLinks.length} link${figmaLinks.length > 1 ? 's' : ''}]`
             : '';
@@ -1063,8 +1070,8 @@ createRoot(document.getElementById('root')!).render(
             id: Date.now().toString(),
             role: 'user' as const,
             content: attachments.length > 0
-                ? `[Mode: ${effectiveMode === 'plan' ? 'Plan' : 'Build'}]\n${content}\n\n[Attached ${attachments.length} file${attachments.length > 1 ? 's' : ''}]${figmaSuffix}${stitchSuffix}`
-                : `[Mode: ${effectiveMode === 'plan' ? 'Plan' : 'Build'}]\n${content}${figmaSuffix || stitchSuffix ? `\n\n${figmaSuffix}${stitchSuffix}` : ''}`,
+                ? `[Mode: ${effectiveMode === 'plan' ? 'Plan' : 'Build'}]\n${content}\n\n[Attached ${attachments.length} file${attachments.length > 1 ? 's' : ''}]${figmaSuffix}${stitchSuffix}${supabaseSuffix}`
+                : `[Mode: ${effectiveMode === 'plan' ? 'Plan' : 'Build'}]\n${content}${figmaSuffix || stitchSuffix || supabaseSuffix ? `\n\n${figmaSuffix}${stitchSuffix}${supabaseSuffix}` : ''}`,
             timestamp: Date.now(),
             conversationMode: effectiveMode,
         };
@@ -1092,6 +1099,7 @@ createRoot(document.getElementById('root')!).render(
                     attachments,
                     figmaLinks,
                     stitchContext: stitchContext || undefined,
+                    supabaseContext: supabaseContext || undefined,
                 }),
             });
 
@@ -1858,6 +1866,7 @@ createRoot(document.getElementById('root')!).render(
                 [],
                 [],
                 null,
+                null,
                 { mode: 'build' },
             );
         }
@@ -1870,6 +1879,7 @@ createRoot(document.getElementById('root')!).render(
                 [],
                 [],
                 null,
+                null,
                 { mode: 'plan' },
             );
         }
@@ -1881,6 +1891,7 @@ createRoot(document.getElementById('root')!).render(
                 `Incorporate the following feedback into the plan (add notes or adjust sections as needed):\n\n${feedback.trim()}\n\nReturn the full updated plan using the same structured sections.`,
                 [],
                 [],
+                null,
                 null,
                 { mode: 'plan' },
             );

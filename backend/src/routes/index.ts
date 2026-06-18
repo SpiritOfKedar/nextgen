@@ -93,6 +93,8 @@ router.get('/supabase/env', authMiddleware, supabaseController.getEnv);
 router.get('/supabase/schema', authMiddleware, supabaseController.getSchema);
 // @ts-ignore
 router.post('/supabase/migrations/apply', authMiddleware, supabaseController.applyMigrations);
+// @ts-ignore
+router.post('/supabase/inspect', authMiddleware, supabaseController.inspect);
 
 // Sandbox cache/snapshot architecture endpoints
 // @ts-ignore

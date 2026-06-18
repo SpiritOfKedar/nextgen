@@ -9,12 +9,15 @@ import {
     type MigrationResult,
 } from '../services/supabaseMigrationService';
 import { fetchSchemaSnapshot, type SchemaSnapshot } from '../services/supabaseSchemaService';
+import { supabaseMcpClient } from '../services/supabaseMcpClient';
+import { supabaseMcpContextService, type SupabaseContextInput } from '../services/supabaseMcpContextService';
 
 interface SupabaseConnectionRow {
     project_url: string;
     anon_key: string;
     service_role_key: string | null;
     database_url: string | null;
+    mcp_access_token: string | null;
     project_ref: string | null;
     schema_snapshot: SchemaSnapshot | null;
     enabled: boolean;
@@ -22,7 +25,7 @@ interface SupabaseConnectionRow {
 
 const loadUserConnection = async (userId: string): Promise<SupabaseConnectionRow | null> => {
     const { rows } = await getPool().query(
-        `SELECT project_url, anon_key, service_role_key, database_url, project_ref, schema_snapshot, enabled
+        `SELECT project_url, anon_key, service_role_key, database_url, mcp_access_token, project_ref, schema_snapshot, enabled
          FROM public.user_supabase_connections WHERE user_id = $1`,
         [userId],
     );
@@ -66,6 +69,7 @@ export const supabaseController = {
                 projectRef: conn.project_ref,
                 migrationsEnabled: Boolean(conn.database_url),
                 hasServiceRole: Boolean(conn.service_role_key),
+                mcpConnected: Boolean(conn.mcp_access_token),
                 tableCount: conn.schema_snapshot?.tables?.length ?? 0,
             });
         } catch (error) {
@@ -82,6 +86,7 @@ export const supabaseController = {
             const anonKey = typeof req.body?.anonKey === 'string' ? req.body.anonKey.trim() : '';
             const serviceRoleKey = typeof req.body?.serviceRoleKey === 'string' ? req.body.serviceRoleKey.trim() : '';
             const databaseUrl = typeof req.body?.databaseUrl === 'string' ? req.body.databaseUrl.trim() : '';
+            const mcpAccessToken = typeof req.body?.mcpAccessToken === 'string' ? req.body.mcpAccessToken.trim() : '';
 
             if (!projectUrlRaw.trim() || !anonKey) {
                 return res.status(400).json({ error: 'A project URL and anon key are required.' });
@@ -115,15 +120,30 @@ export const supabaseController = {
                 schemaSnapshot = await fetchSchemaSnapshot(databaseUrl, req.requestId);
             }
 
+            if (mcpAccessToken) {
+                try {
+                    await supabaseMcpClient.validateAccessToken(mcpAccessToken, projectRef);
+                } catch (error) {
+                    return res.status(400).json({
+                        error: 'Failed to validate the Supabase MCP access token for this project.',
+                        detail: error instanceof Error ? error.message : String(error),
+                    });
+                }
+            }
+
+            const existing = await loadUserConnection(req.user.id);
+            const resolvedMcpToken = mcpAccessToken || existing?.mcp_access_token || null;
+
             await getPool().query(
                 `INSERT INTO public.user_supabase_connections
-                   (user_id, project_url, anon_key, service_role_key, database_url, project_ref, schema_snapshot, enabled, created_at, updated_at)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, true, NOW(), NOW())
+                   (user_id, project_url, anon_key, service_role_key, database_url, mcp_access_token, project_ref, schema_snapshot, enabled, created_at, updated_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true, NOW(), NOW())
                  ON CONFLICT (user_id) DO UPDATE SET
                    project_url = EXCLUDED.project_url,
                    anon_key = EXCLUDED.anon_key,
                    service_role_key = EXCLUDED.service_role_key,
                    database_url = EXCLUDED.database_url,
+                   mcp_access_token = COALESCE(EXCLUDED.mcp_access_token, public.user_supabase_connections.mcp_access_token),
                    project_ref = EXCLUDED.project_ref,
                    schema_snapshot = EXCLUDED.schema_snapshot,
                    enabled = true,
@@ -134,6 +154,7 @@ export const supabaseController = {
                     anonKey,
                     serviceRoleKey || null,
                     databaseUrl || null,
+                    resolvedMcpToken,
                     projectRef,
                     schemaSnapshot ? JSON.stringify(schemaSnapshot) : null,
                 ],
@@ -144,6 +165,7 @@ export const supabaseController = {
                 internalUserId: req.user.id,
                 projectRef,
                 migrationsEnabled: Boolean(databaseUrl),
+                mcpConnected: Boolean(resolvedMcpToken),
             });
 
             return res.json({
@@ -151,7 +173,8 @@ export const supabaseController = {
                 projectUrl,
                 projectRef,
                 migrationsEnabled: Boolean(databaseUrl),
-                hasServiceRole: Boolean(serviceRoleKey),
+                hasServiceRole: Boolean(serviceRoleKey || existing?.service_role_key),
+                mcpConnected: Boolean(resolvedMcpToken),
                 tableCount: schemaSnapshot?.tables?.length ?? 0,
             });
         } catch (error) {
@@ -268,6 +291,34 @@ export const supabaseController = {
             return res.status(500).json({ error: 'Failed to apply migrations' });
         }
     },
+
+    async inspect(req: Request, res: Response) {
+        try {
+            if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+
+            const fetchTables = req.body?.fetchTables !== false;
+            const fetchAdvisors = req.body?.fetchAdvisors !== false;
+            const docsQuery = typeof req.body?.docsQuery === 'string' ? req.body.docsQuery.trim() : undefined;
+
+            const conn = await loadUserConnection(req.user.id);
+            const mcpConfig = getMcpConfigFromConnection(conn);
+            if (!mcpConfig) {
+                return res.status(400).json({
+                    error: 'Supabase MCP is not configured. Connect a project and add a personal access token.',
+                });
+            }
+
+            const context = await supabaseMcpContextService.inspect(
+                { fetchTables, fetchAdvisors, docsQuery },
+                { requestId: req.requestId, userId: req.user.id, mcpConfig },
+            );
+
+            return res.json({ context });
+        } catch (error) {
+            log.error('supabase.inspect_failed', { requestId: req.requestId, ...errorFields(error) });
+            return res.status(500).json({ error: 'Failed to inspect Supabase MCP context' });
+        }
+    },
 };
 
 /** Prompt-context helper for chatService — never exposes keys. */
@@ -291,3 +342,20 @@ export const getUserSupabaseContext = async (userId: string): Promise<SupabasePr
         appliedMigrations,
     };
 };
+
+const getMcpConfigFromConnection = (conn: SupabaseConnectionRow | null) => {
+    if (!conn?.mcp_access_token || !conn.project_ref) return undefined;
+    return {
+        accessToken: conn.mcp_access_token,
+        projectRef: conn.project_ref,
+        enabled: true,
+        readOnly: true,
+    };
+};
+
+export const getUserSupabaseMcpConfig = async (userId: string) => {
+    const conn = await loadUserConnection(userId);
+    return getMcpConfigFromConnection(conn);
+};
+
+export type { SupabaseContextInput };

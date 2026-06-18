@@ -8,7 +8,7 @@ import { FigmaPanel } from './FigmaPanel';
 import { StitchPanel } from './StitchPanel';
 import { useAtom, useAtomValue, useSetAtom } from 'jotai';
 import { chatModeAtom, threadsAtom, threadSwitchStateAtom, currentThreadIdAtom, messagesAtom } from '../../store/atoms';
-import { manualFigmaLinksAtom, stitchContextAtom } from '../../store/mcpAttachments';
+import { manualFigmaLinksAtom, stitchContextAtom, supabaseContextAtom } from '../../store/mcpAttachments';
 import { useThreadClickHandlers } from '../../hooks/useThreadClickHandlers';
 
 const FIGMA_URL_REGEX = /https:\/\/(?:www\.)?figma\.com\/(?:design|file|proto|board)\/[^\s"'<>]+/gi;
@@ -50,6 +50,7 @@ export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default', compa
     const [showStitchPanel, setShowStitchPanel] = useState(false);
     const [manualFigmaLinks, setManualFigmaLinks] = useAtom(manualFigmaLinksAtom);
     const [stitchContext, setStitchContext] = useAtom(stitchContextAtom);
+    const [supabaseContext, setSupabaseContext] = useAtom(supabaseContextAtom);
     const { sendMessage, isLoading, fetchThreads, loadThread, deleteThread } = useChat();
     const [chatMode, setChatMode] = useAtom(chatModeAtom);
     const threads = useAtomValue(threadsAtom);
@@ -308,21 +309,24 @@ export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default', compa
         const savedFiles = attachedFiles;
         const savedFigmaLinks = manualFigmaLinks;
         const savedStitchContext = stitchContext;
+        const savedSupabaseContext = supabaseContext;
         const attachments = await buildOutgoingAttachments(attachedFiles);
         setInputValue('');
         setAttachedFiles([]);
         setManualFigmaLinks([]);
         setStitchContext(null);
+        setSupabaseContext(null);
         setShowFigmaPanel(false);
         setShowStitchPanel(false);
         if (fileInputRef.current) fileInputRef.current.value = '';
         if (textareaRef.current) textareaRef.current.style.height = 'auto';
-        const result = await sendMessage(content, attachments, figmaLinks, stitchContext);
+        const result = await sendMessage(content, attachments, figmaLinks, stitchContext, supabaseContext);
         if (!result.ok) {
             setInputValue(savedInput);
             setAttachedFiles(savedFiles);
             setManualFigmaLinks(savedFigmaLinks);
             setStitchContext(savedStitchContext);
+            setSupabaseContext(savedSupabaseContext);
             setSubmitError(result.error);
         }
     };
@@ -668,6 +672,22 @@ export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default', compa
                                 className="ml-0.5 text-blue-400 hover:text-blue-100 transition-colors"
                                 onClick={() => setStitchContext(null)}
                                 aria-label="Remove Stitch context"
+                            >
+                                <X className="h-3 w-3" />
+                            </button>
+                        </div>
+                    </div>
+                )}
+
+                {supabaseContext && (
+                    <div className="px-3 pb-2.5">
+                        <div className="inline-flex h-8 max-w-full items-center gap-1.5 rounded-lg border border-emerald-500/30 bg-emerald-950/30 px-2.5 text-[11px] text-emerald-100">
+                            <span className="truncate max-w-[220px]">Supabase MCP context attached</span>
+                            <button
+                                type="button"
+                                className="ml-0.5 text-emerald-400 hover:text-emerald-100 transition-colors"
+                                onClick={() => setSupabaseContext(null)}
+                                aria-label="Remove Supabase context"
                             >
                                 <X className="h-3 w-3" />
                             </button>

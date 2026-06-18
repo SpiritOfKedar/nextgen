@@ -7,7 +7,7 @@ const VALID_MODES = new Set(['plan', 'build']);
 
 export const chatController = {
     async sendMessage(req: Request, res: Response) {
-        const { message, threadId, model, attachments, mode, figmaLinks, stitchContext } = req.body;
+        const { message, threadId, model, attachments, mode, figmaLinks, stitchContext, supabaseContext } = req.body;
         const conversationMode = VALID_MODES.has(mode) ? mode : 'build';
 
         if (!message) {
@@ -26,6 +26,13 @@ export const chatController = {
                     screenId: typeof stitchContext.screenId === 'string' ? stitchContext.screenId : undefined,
                 }
                 : null;
+            const supabaseInput = supabaseContext && typeof supabaseContext === 'object'
+                ? {
+                    fetchTables: supabaseContext.fetchTables !== false,
+                    fetchAdvisors: supabaseContext.fetchAdvisors !== false,
+                    docsQuery: typeof supabaseContext.docsQuery === 'string' ? supabaseContext.docsQuery : undefined,
+                }
+                : null;
             const { stream, threadId: newThreadId } = await chatService.generateResponse(
                 message,
                 threadId,
@@ -35,6 +42,7 @@ export const chatController = {
                 Array.isArray(attachments) ? attachments : [],
                 Array.isArray(figmaLinks) ? figmaLinks : [],
                 stitchInput,
+                supabaseInput,
                 { requestId: req.requestId, internalUserId: userId },
             );
 

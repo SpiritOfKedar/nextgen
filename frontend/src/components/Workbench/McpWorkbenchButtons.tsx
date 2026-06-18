@@ -1,7 +1,7 @@
 import React, { useState, useRef } from 'react';
 import { Figma, Database } from 'lucide-react';
 import { useAtom } from 'jotai';
-import { manualFigmaLinksAtom, stitchContextAtom } from '../../store/mcpAttachments';
+import { manualFigmaLinksAtom, stitchContextAtom, supabaseContextAtom } from '../../store/mcpAttachments';
 import { FigmaPanel } from '../Chat/FigmaPanel';
 import { StitchPanel } from '../Chat/StitchPanel';
 import { SupabasePanel } from '../Chat/SupabasePanel';
@@ -15,6 +15,7 @@ const StitchIcon = () => (
 export const McpWorkbenchButtons: React.FC = () => {
     const [manualFigmaLinks, setManualFigmaLinks] = useAtom(manualFigmaLinksAtom);
     const [stitchContext, setStitchContext] = useAtom(stitchContextAtom);
+    const [supabaseContext, setSupabaseContext] = useAtom(supabaseContextAtom);
     const [showFigmaPanel, setShowFigmaPanel] = useState(false);
     const [showStitchPanel, setShowStitchPanel] = useState(false);
     const [showSupabasePanel, setShowSupabasePanel] = useState(false);
@@ -79,7 +80,7 @@ export const McpWorkbenchButtons: React.FC = () => {
                     setShowStitchPanel(false);
                     setShowSupabasePanel((v) => !v);
                 }}
-                className={iconBtnClass(showSupabasePanel)}
+                className={iconBtnClass(showSupabasePanel || !!supabaseContext)}
                 title="Supabase backend"
                 aria-label="Supabase backend"
             >
@@ -108,6 +109,8 @@ export const McpWorkbenchButtons: React.FC = () => {
                 anchorRef={supabaseRef}
                 isOpen={showSupabasePanel}
                 onClose={() => setShowSupabasePanel(false)}
+                supabaseContext={supabaseContext}
+                onSupabaseContextChange={setSupabaseContext}
             />
         </>
     );

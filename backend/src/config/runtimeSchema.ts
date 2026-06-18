@@ -79,12 +79,17 @@ export const ensureRuntimeSchema = async (pool: Pool): Promise<void> => {
             anon_key TEXT NOT NULL,
             service_role_key TEXT NULL,
             database_url TEXT NULL,
+            mcp_access_token TEXT NULL,
             project_ref TEXT NULL,
             schema_snapshot JSONB NULL,
             enabled BOOLEAN NOT NULL DEFAULT true,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
+    `);
+    await pool.query(`
+        ALTER TABLE public.user_supabase_connections
+        ADD COLUMN IF NOT EXISTS mcp_access_token TEXT NULL
     `);
 
     await pool.query(`

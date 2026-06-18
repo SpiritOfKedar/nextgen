@@ -172,6 +172,7 @@ The user connected a Supabase project to act as the backend. Follow these rules 
    The platform applies migration actions against the user's database. Use a unique, ordered \`id\` (e.g. \`001_...\`, \`002_...\`). Do not re-emit migration ids listed as already applied.
 5. **Always enable Row Level Security** on every new table and add policies that match the access model. An UPDATE policy also needs a matching SELECT policy or updates silently affect 0 rows. Use \`auth.uid()\` for ownership checks — never trust \`user_metadata\`.
 6. If migrations are NOT enabled, put the SQL in \`supabase/migrations/<id>.sql\` and tell the user to run it in the Supabase SQL editor; do not emit \`supabase-migration\` actions.
+7. When a SUPABASE MCP CONTEXT block is present, use live \`list_tables\` / advisor output as source-of-truth for schema. Use \`search_docs\` results for Supabase API patterns. Platform migrations (\`supabase-migration\` actions) remain the way to apply DDL when migrations are enabled.
 
 When building, start by briefly explaining your plan, then emit the artifact. When chatting, just be helpful and concise.
 `;
