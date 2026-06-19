@@ -1,5 +1,5 @@
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Terminal, Code, Play, History, Download, Github, ExternalLink } from 'lucide-react';
 import { EditorPanel } from './EditorPanel';
 import { TerminalPanel } from './TerminalPanel';
@@ -10,7 +10,7 @@ import { useWebContainer } from '../../hooks/useWebContainer';
 import { PreviewPanel } from './PreviewPanel';
 import { useAtomValue } from 'jotai';
 import { currentThreadIdAtom } from '../../store/atoms';
-import { webContainerAtom } from '../../store/webContainer';
+import { previewHasPendingChangesAtom, webContainerAtom, requestPreviewRefresh } from '../../store/webContainer';
 import { VersionHistoryModal } from './VersionHistoryModal';
 import { PushToGitHubModal } from './PushToGitHubModal';
 import { McpWorkbenchButtons } from './McpWorkbenchButtons';
@@ -32,6 +32,17 @@ export const Workbench: React.FC = () => {
     const { isLoading, error } = useWebContainer(); // Init WebContainer on mount
     const currentThreadId = useAtomValue(currentThreadIdAtom);
     const webContainer = useAtomValue(webContainerAtom);
+    const previewHasPendingChanges = useAtomValue(previewHasPendingChangesAtom);
+
+    const switchToPreviewTab = () => {
+        setActiveTab('preview');
+    };
+
+    useEffect(() => {
+        if (activeTab === 'preview' && previewHasPendingChanges) {
+            requestPreviewRefresh();
+        }
+    }, [activeTab, previewHasPendingChanges]);
 
     const handleDownload = async () => {
         if (!webContainer) {
@@ -88,7 +99,7 @@ export const Workbench: React.FC = () => {
                     />
                     <TabButton
                         active={activeTab === 'preview'}
-                        onClick={() => setActiveTab('preview')}
+                        onClick={switchToPreviewTab}
                         icon={<Play className="w-3.5 h-3.5" />}
                         label="Preview"
                     />
@@ -164,7 +175,9 @@ export const Workbench: React.FC = () => {
             {/* Workbench Content */}
             <div className="flex-1 overflow-hidden relative">
                 {activeTab === 'code' && <CodeView />}
-                {activeTab === 'preview' && <PreviewPanel />}
+                <div className={activeTab === 'preview' ? 'h-full' : 'hidden'} aria-hidden={activeTab !== 'preview'}>
+                    <PreviewPanel />
+                </div>
                 {activeTab === 'terminal' && <TerminalPanel />}
             </div>
 

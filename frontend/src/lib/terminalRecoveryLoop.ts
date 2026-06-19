@@ -26,8 +26,9 @@ import {
     resolveProjectDirectoryForNpm,
     runCommandWithCapturedOutput,
     syncShellWorkingDirectory,
-    WEBCONTAINER_SPAWN_ENV,
+    buildSpawnOptions,
 } from './webContainerShell';
+import { applyDeterministicTerminalFixes, isDeterministicFixCode, RECOVERY_LLM_MODEL } from './terminalAutoFix';
 import { repairViteScriptsForWebContainer, terminalShowsVitePermissionError } from './webContainerScripts';
 
 export const MAX_RECOVERY_ROUNDS = 3;
@@ -172,9 +173,9 @@ async function parseRecoveryStream(
 export type RunIterativeRecoveryInput = {
     wc: WebContainer;
     threadId: string;
-    token: string;
+    getToken: () => Promise<string | null>;
     apiUrl: string;
-    model: string;
+    model?: string;
     initialTerminalOutput: string;
     initialIssue: TerminalIssue | null;
     getFileMap: () => Map<string, string>;
@@ -197,9 +198,9 @@ export async function runIterativeRecovery(input: RunIterativeRecoveryInput): Pr
     const {
         wc,
         threadId,
-        token,
+        getToken,
         apiUrl,
-        model,
+        model = RECOVERY_LLM_MODEL,
         initialTerminalOutput,
         initialIssue,
         getFileMap,
@@ -227,18 +228,94 @@ export async function runIterativeRecovery(input: RunIterativeRecoveryInput): Pr
         getFileMap(),
         inferProjectDirectory(getFileMap()),
     )).projectDir;
-    await syncShellWorkingDirectory(shellWriter, projectDir);
+    await syncShellWorkingDirectory(shellWriter, wc, projectDir);
 
     let status: 'resolved' | 'failed' = 'failed';
     let detail = '';
     let devServerStarted = false;
     let roundsUsed = 0;
 
+    writeShellOutput('\r\n\x1b[36m⬢ Running automatic terminal fixes (no LLM)…\x1b[0m\r\n');
+    const preFixes = await applyDeterministicTerminalFixes({
+        wc,
+        terminalOutput,
+        projectDir,
+        fileMap: getFileMap(),
+        repairRootForNpm,
+        onPackageJsonPatched: (content) => onFileWritten('package.json', content),
+    });
+    if (preFixes.some((f) => f.applied)) {
+        const preToken = await getToken();
+        if (preToken) {
+            const preDep = await ensureProjectDependencies({
+                wc,
+                threadId,
+                fileMap: getFileMap(),
+                authToken: preToken,
+                apiUrl,
+                writeShellOutput,
+                onPreviewStatus,
+                repairRootForNpm,
+                appendTerminalEvents: (events) => appendTerminalEvents(events),
+            });
+            if (preDep.ok) {
+                projectDir = preDep.projectDir;
+                writeShellOutput('\r\n\x1b[32m✓ Automatic fix resolved install — skipping LLM recovery\x1b[0m\r\n');
+                await syncShellWorkingDirectory(shellWriter, wc, projectDir);
+                if (!devServerStarted) {
+                    writeShellOutput('\r\n\x1b[36m⬢ Starting dev server…\x1b[0m\r\n');
+                    onPreviewStatus('starting', 'Starting development server…');
+                    const devProc = await wc.spawn('npm', ['run', 'dev'], buildSpawnOptions(wc, projectDir));
+                    devProc.output.pipeTo(new WritableStream({ write(data) { writeShellOutput(data); } }));
+                    devServerStarted = true;
+                    onDevServerStarted?.(devProc);
+                }
+                return {
+                    status: 'resolved',
+                    detail: preFixes.filter((f) => f.applied).map((f) => f.message).join('; '),
+                    plannedCommands: [],
+                    executedCommands: devServerStarted ? ['npm run dev'] : [],
+                    roundsUsed: 0,
+                    projectDir,
+                    devServerStarted,
+                    finalIssue: null,
+                };
+            }
+            terminalOutput = getShellOutputBuffer().slice(-12_000);
+            currentIssue = detectTerminalIssue(terminalOutput);
+        }
+
+        // If the remaining problem is purely environmental, the LLM cannot help.
+        // Bail out with an actionable message instead of burning recovery rounds.
+        if (isDeterministicFixCode(currentIssue)) {
+            writeShellOutput(
+                '\r\n\x1b[33m⚠ Environmental issue persists after automatic fixes — skipping LLM recovery.\x1b[0m\r\n',
+            );
+            return {
+                status: 'failed',
+                detail: currentIssue?.message
+                    ? `${currentIssue.message} (automatic fixes applied; manual retry may be needed)`
+                    : 'Environmental sandbox issue could not be auto-resolved',
+                plannedCommands: [],
+                executedCommands: [],
+                roundsUsed: 0,
+                projectDir,
+                devServerStarted: false,
+                finalIssue: currentIssue,
+            };
+        }
+    }
+
     for (let round = 1; round <= MAX_RECOVERY_ROUNDS; round += 1) {
         roundsUsed = round;
         const issueCode = currentIssue?.code ?? initialIssueCode;
         writeShellOutput(`\r\n\x1b[36m⬢ Recovery round ${round}/${MAX_RECOVERY_ROUNDS} — diagnosing (${model})…\x1b[0m\r\n`);
         onPreviewStatus('starting', `Recovery round ${round}/${MAX_RECOVERY_ROUNDS}: analyzing error…`);
+
+        const token = await getToken();
+        if (!token) {
+            throw new Error('Auth token unavailable — sign in again');
+        }
 
         const flatFiles = [...getFileMap().entries()].map(([filePath, content]) => ({ filePath, content }));
         const recoveryFiles = selectRecoveryFiles(flatFiles, terminalOutput);
@@ -325,7 +402,7 @@ export async function runIterativeRecovery(input: RunIterativeRecoveryInput): Pr
             recoveryFileMap,
             inferProjectDirectory(recoveryFileMap),
         )).projectDir;
-        await syncShellWorkingDirectory(shellWriter, projectDir);
+        await syncShellWorkingDirectory(shellWriter, wc, projectDir);
 
         const verifyMark = markShellOutputPosition();
         let devServerStartedThisRound = false;
@@ -363,7 +440,7 @@ export async function runIterativeRecovery(input: RunIterativeRecoveryInput): Pr
         }
 
         projectDir = depResult.projectDir;
-        await syncShellWorkingDirectory(shellWriter, projectDir);
+        await syncShellWorkingDirectory(shellWriter, wc, projectDir);
 
         const shellQueue = filterInstallShellCommands(normalizeShellCommandQueue(pendingShellCommands));
         allPlannedCommands.push(...shellQueue);
@@ -424,10 +501,7 @@ export async function runIterativeRecovery(input: RunIterativeRecoveryInput): Pr
             allPlannedCommands.push('npm run dev');
             roundCommands.push('npm run dev');
             writeShellOutput('\r\n\x1b[36m⬢ Starting dev server to verify…\x1b[0m\r\n');
-            const devProc = await wc.spawn('npm', ['run', 'dev'], {
-                env: WEBCONTAINER_SPAWN_ENV,
-                cwd: projectDir,
-            });
+            const devProc = await wc.spawn('npm', ['run', 'dev'], buildSpawnOptions(wc, projectDir));
             devProc.output.pipeTo(new WritableStream({ write(data) { writeShellOutput(data); } }));
             devServerStarted = true;
             devServerStartedThisRound = true;
@@ -472,6 +546,18 @@ export async function runIterativeRecovery(input: RunIterativeRecoveryInput): Pr
 
     if (status !== 'resolved' && !detail) {
         detail = currentIssue?.message ?? `Recovery failed after ${roundsUsed} rounds`;
+    }
+
+    if (status === 'resolved' && !devServerStarted) {
+        await syncShellWorkingDirectory(shellWriter, wc, projectDir);
+        writeShellOutput('\r\n\x1b[36m⬢ Starting dev server…\x1b[0m\r\n');
+        onPreviewStatus('starting', 'Starting development server…');
+        const devProc = await wc.spawn('npm', ['run', 'dev'], buildSpawnOptions(wc, projectDir));
+        devProc.output.pipeTo(new WritableStream({ write(data) { writeShellOutput(data); } }));
+        devServerStarted = true;
+        onDevServerStarted?.(devProc);
+        allExecutedCommands.push('npm run dev');
+        await appendTerminalEvents([{ eventType: 'command', payload: 'npm run dev', cwd: projectDir }]);
     }
 
     return {

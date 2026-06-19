@@ -47,6 +47,10 @@ export const ensureRuntimeSchema = async (pool: Pool): Promise<void> => {
         )
     `);
     await pool.query(`
+        ALTER TABLE public.thread_plan_contexts
+        ADD COLUMN IF NOT EXISTS supabase_plan_excerpt TEXT NULL
+    `);
+    await pool.query(`
         CREATE INDEX IF NOT EXISTS idx_thread_plan_contexts_user_updated
             ON public.thread_plan_contexts(user_id, updated_at DESC)
     `);

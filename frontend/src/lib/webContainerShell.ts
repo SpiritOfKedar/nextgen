@@ -3,14 +3,111 @@ import { repairViteScriptsForWebContainer } from './webContainerScripts';
 
 export const INSTALL_FIRST_ATTEMPT_TIMEOUT_MS = 120_000;
 
-/** npm cache + color for all WebContainer spawns */
-export const WEBCONTAINER_SPAWN_ENV: Record<string, string> = {
+export const NPM_CACHE_DIR_NAME = '.npm-cache';
+
+/**
+ * Root-level paths (e.g. /.npm-cache) are NOT reliably writable inside WebContainer and
+ * trigger npm's EACCES "cache folder contains root-owned files" guard. The container's
+ * writable home is /home, so we default there and verify before use.
+ */
+export const DEFAULT_NPM_CACHE_PATH = '/home/.npm-cache';
+
+const NPM_CACHE_CANDIDATES = ['/home/.npm-cache', '/tmp/.npm-cache'] as const;
+
+/** Resolved-once writable cache path for the booted WebContainer (module singleton). */
+let verifiedNpmCachePath: string | null = null;
+
+const SPAWN_ENV_BASE = {
     FORCE_COLOR: '1',
-    npm_config_cache: '/.boltly/npm-cache',
     npm_config_prefer_offline: 'true',
     npm_config_audit: 'false',
     npm_config_fund: 'false',
-};
+} as const;
+
+/**
+ * Returns the npm cache path to use. After {@link ensureNpmCacheDir} has probed a writable
+ * location it returns that; otherwise it falls back to the writable-home default. Never
+ * returns a root-level path, which is the source of the recurring EACCES loop.
+ */
+export function resolveNpmCachePath(_projectDir = '/'): string {
+    return verifiedNpmCachePath ?? DEFAULT_NPM_CACHE_PATH;
+}
+
+export function buildSpawnEnv(projectDir = '/'): Record<string, string> {
+    return {
+        ...SPAWN_ENV_BASE,
+        npm_config_cache: resolveNpmCachePath(projectDir),
+    };
+}
+
+/** @deprecated Prefer buildSpawnEnv(projectDir) — kept for callers without a known cwd */
+export const WEBCONTAINER_SPAWN_ENV: Record<string, string> = buildSpawnEnv('/');
+
+/** mkdir + write+read+delete a probe file to confirm npm can actually use this dir. */
+async function isDirWritable(wc: WebContainer, dir: string): Promise<boolean> {
+    const probe = `${dir}/.write-probe-${Date.now()}`;
+    try {
+        await wc.fs.mkdir(dir, { recursive: true });
+        await wc.fs.writeFile(probe, 'ok');
+        await wc.fs.rm(probe);
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * Probes candidate cache locations (writable home, then /tmp, then project-relative),
+ * caches the first that genuinely accepts writes, and persists it to .npmrc so
+ * shell-driven `npm` runs (not just env-spawned ones) honor the same cache.
+ *
+ * Returns the verified writable cache path. Surfaces nothing on failure but leaves the
+ * default in place so callers can still proceed and let recovery report the real error.
+ */
+export async function ensureNpmCacheDir(wc: WebContainer, projectDir = '/'): Promise<string> {
+    if (verifiedNpmCachePath) {
+        // Already resolved this session — just make sure it still exists.
+        try { await wc.fs.mkdir(verifiedNpmCachePath, { recursive: true }); } catch { /* best effort */ }
+        await writeNpmrc(wc, projectDir, verifiedNpmCachePath);
+        return verifiedNpmCachePath;
+    }
+
+    const projectRelative = projectDir && projectDir !== '/'
+        ? `${projectDir.replace(/\/$/, '')}/${NPM_CACHE_DIR_NAME}`
+        : `/${NPM_CACHE_DIR_NAME}`;
+    const candidates = [...NPM_CACHE_CANDIDATES, projectRelative];
+
+    for (const candidate of candidates) {
+        if (await isDirWritable(wc, candidate)) {
+            verifiedNpmCachePath = candidate;
+            await writeNpmrc(wc, projectDir, candidate);
+            return candidate;
+        }
+    }
+
+    // Nothing probed clean — fall back to the writable-home default (still better than root).
+    verifiedNpmCachePath = DEFAULT_NPM_CACHE_PATH;
+    try { await wc.fs.mkdir(DEFAULT_NPM_CACHE_PATH, { recursive: true }); } catch { /* best effort */ }
+    await writeNpmrc(wc, projectDir, DEFAULT_NPM_CACHE_PATH);
+    return DEFAULT_NPM_CACHE_PATH;
+}
+
+/** Persist the cache path into the project's .npmrc so all npm invocations agree. */
+async function writeNpmrc(wc: WebContainer, projectDir: string, cachePath: string): Promise<void> {
+    const dir = projectDir && projectDir !== '/' ? projectDir.replace(/\/$/, '') : '';
+    const npmrcPath = dir ? `${dir}/.npmrc` : '/.npmrc';
+    const content = `cache=${cachePath}\nprefer-offline=true\naudit=false\nfund=false\n`;
+    try {
+        await wc.fs.writeFile(npmrcPath.replace(/^\//, ''), content);
+    } catch {
+        // best effort — env var still carries the cache path
+    }
+}
+
+/** Resets the cached writable path. Used when a fresh WebContainer boots. */
+export function resetNpmCacheResolution(): void {
+    verifiedNpmCachePath = null;
+}
 const BUILD_INSTALL_TIMEOUT_MS = 300_000;
 const DEFAULT_COMMAND_TIMEOUT_MS = 120_000;
 
@@ -22,6 +119,53 @@ export const normalizeWebContainerPath = (path: string): string => {
     const parts = normalized.split('/').filter(Boolean);
     return `/${parts.join('/')}`;
 };
+
+/** WebContainer project root — files live here, not at OS `/`. */
+export function getWebContainerWorkdir(wc: WebContainer): string {
+    return wc.workdir;
+}
+
+/**
+ * Map legacy `/` (and mistaken absolute paths) to the instance workdir where
+ * `wc.fs.writeFile('package.json')` actually lands.
+ */
+export function normalizeProjectDir(wc: WebContainer, projectDir: string): string {
+    const workdir = wc.workdir;
+    const normalized = normalizeWebContainerPath(projectDir);
+    if (!normalized || normalized === '/') return workdir;
+    if (normalized === workdir) return workdir;
+    if (normalized.startsWith(`${workdir}/`)) return normalized;
+    if (!normalized.startsWith('/')) {
+        return normalizeWebContainerPath(`${workdir}/${normalized}`);
+    }
+    // Absolute path outside workdir (e.g. `/`) — project files are in workdir.
+    return workdir;
+}
+
+/** `spawn` cwd is relative to workdir; omit when already at project root. */
+export function resolveSpawnCwd(wc: WebContainer, projectDir: string): string | undefined {
+    const workdir = wc.workdir;
+    const absolute = normalizeProjectDir(wc, projectDir);
+    if (absolute === workdir) return undefined;
+    if (absolute.startsWith(`${workdir}/`)) {
+        const rel = absolute.slice(workdir.length + 1);
+        return rel || undefined;
+    }
+    return undefined;
+}
+
+export function buildSpawnOptions(
+    wc: WebContainer,
+    projectDir: string,
+): { env: Record<string, string>; cwd?: string } {
+    const absolute = normalizeProjectDir(wc, projectDir);
+    const cwd = resolveSpawnCwd(wc, projectDir);
+    const opts: { env: Record<string, string>; cwd?: string } = {
+        env: buildSpawnEnv(absolute),
+    };
+    if (cwd) opts.cwd = cwd;
+    return opts;
+}
 
 export const resolveWorkingDirectory = (currentDir: string, targetPath: string): string => {
     const cleaned = targetPath.trim().replace(/^["']|["']$/g, '');
@@ -127,16 +271,23 @@ export const inferProjectDirectory = (writtenFiles: Map<string, string>): string
 };
 
 const hasValidPackageJsonInDir = async (wc: WebContainer, dir: string): Promise<boolean> => {
-    const normalizedDir = normalizeWebContainerPath(dir);
-    const packagePath = normalizedDir === '/' ? '/package.json' : `${normalizedDir}/package.json`;
-    try {
-        const raw = await wc.fs.readFile(packagePath, 'utf-8');
-        if (!raw?.trim()) return false;
-        JSON.parse(raw);
-        return true;
-    } catch {
-        return false;
+    const workdir = wc.workdir;
+    const absolute = normalizeProjectDir(wc, dir);
+    const rel = absolute === workdir
+        ? 'package.json'
+        : `${absolute.slice(workdir.length + 1)}/package.json`;
+    const pathsToTry = [rel, 'package.json'].filter((p, i, arr) => arr.indexOf(p) === i);
+    for (const packagePath of pathsToTry) {
+        try {
+            const raw = await wc.fs.readFile(packagePath, 'utf-8');
+            if (!raw?.trim()) continue;
+            JSON.parse(raw);
+            return true;
+        } catch {
+            /* try next */
+        }
     }
+    return false;
 };
 
 export const resolveProjectDirectoryForNpm = async (
@@ -162,15 +313,16 @@ export const resolveProjectDirectoryForNpm = async (
     for (const candidate of candidates) {
         const exists = await hasValidPackageJsonInDir(wc, candidate);
         if (!exists) continue;
+        const projectDir = normalizeProjectDir(wc, candidate);
         return {
-            projectDir: candidate,
-            packageJsonPath: candidate === '/' ? '/package.json' : `${candidate}/package.json`,
+            projectDir,
+            packageJsonPath: projectDir === wc.workdir ? 'package.json' : `${projectDir}/package.json`,
             reasonCode: candidate === normalizeWebContainerPath(inferredDir) ? 'inferred_project_dir' : 'fallback_probe_dir',
         };
     }
 
     return {
-        projectDir: normalizeWebContainerPath(inferredDir),
+        projectDir: wc.workdir,
         packageJsonPath: null,
         reasonCode: 'package_json_missing_all_candidates',
     };
@@ -184,14 +336,15 @@ export const resetSyncedShellCwd = (): void => {
 
 export const syncShellWorkingDirectory = async (
     shellWriter: WritableStreamDefaultWriter<string> | null,
+    wc: WebContainer,
     projectDir: string,
 ): Promise<void> => {
     if (!shellWriter) return;
-    const normalizedDir = normalizeWebContainerPath(projectDir);
-    if (lastSyncedShellCwd === normalizedDir) return;
+    const target = normalizeProjectDir(wc, projectDir);
+    if (lastSyncedShellCwd === target) return;
     try {
-        await shellWriter.write(`cd "${normalizedDir}"\n`);
-        lastSyncedShellCwd = normalizedDir;
+        await shellWriter.write(`cd "${target}"\n`);
+        lastSyncedShellCwd = target;
     } catch {
         // best effort only
     }
@@ -272,10 +425,8 @@ export async function runCommandWithCapturedOutput(
         });
     }
 
-    const proc = await wc.spawn(program, args, {
-        env: WEBCONTAINER_SPAWN_ENV,
-        cwd,
-    });
+    const spawnOpts = buildSpawnOptions(wc, cwd);
+    const proc = await wc.spawn(program, args, spawnOpts);
     await proc.output.pipeTo(new WritableStream({
         write(data) {
             chunks.push(data);
@@ -321,7 +472,7 @@ export async function executeShellCommandsInWebContainer(
 
     const shellQueue = normalizeShellCommandQueue(commands);
     const executedCommands: string[] = [];
-    let commandCwd = initialCwd;
+    let commandCwd = normalizeProjectDir(wc, initialCwd);
     let status: 'resolved' | 'failed' = 'resolved';
     let detail: string | undefined;
     let devServerStarted = false;
@@ -363,10 +514,7 @@ export async function executeShellCommandsInWebContainer(
             }
 
             const { program, args } = tokenizeShellCommand(adjustedCommand);
-                        const proc = await wc.spawn(program, args, {
-                            env: WEBCONTAINER_SPAWN_ENV,
-                            cwd: commandCwd,
-                        });
+            const proc = await wc.spawn(program, args, buildSpawnOptions(wc, commandCwd));
             proc.output.pipeTo(new WritableStream({
                 write(data) { writeOutput(data); },
             }));

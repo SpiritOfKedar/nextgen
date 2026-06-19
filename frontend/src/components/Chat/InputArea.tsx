@@ -1,11 +1,12 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { motion } from 'framer-motion';
-import { Paperclip, ArrowRight, X, Figma, MessageSquare, Loader2, Plus } from 'lucide-react';
+import { Paperclip, ArrowRight, X, Figma, MessageSquare, Loader2, Plus, Sparkles } from 'lucide-react';
 import { SignInButton, useAuth } from '@clerk/clerk-react';
 import { useChat } from '../../hooks/useChat';
 import { ModelSelector } from './ModelSelector';
 import { FigmaPanel } from './FigmaPanel';
 import { StitchPanel } from './StitchPanel';
+import { SupabaseToolbarButton } from './SupabaseToolbarButton';
 import { useAtom, useAtomValue, useSetAtom } from 'jotai';
 import { chatModeAtom, threadsAtom, threadSwitchStateAtom, currentThreadIdAtom, messagesAtom } from '../../store/atoms';
 import { manualFigmaLinksAtom, stitchContextAtom, supabaseContextAtom } from '../../store/mcpAttachments';
@@ -51,7 +52,7 @@ export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default', compa
     const [manualFigmaLinks, setManualFigmaLinks] = useAtom(manualFigmaLinksAtom);
     const [stitchContext, setStitchContext] = useAtom(stitchContextAtom);
     const [supabaseContext, setSupabaseContext] = useAtom(supabaseContextAtom);
-    const { sendMessage, isLoading, fetchThreads, loadThread, deleteThread } = useChat();
+    const { sendMessage, enhancePrompt, isLoading, fetchThreads, loadThread, deleteThread } = useChat();
     const [chatMode, setChatMode] = useAtom(chatModeAtom);
     const threads = useAtomValue(threadsAtom);
     const threadSwitchState = useAtomValue(threadSwitchStateAtom);
@@ -60,6 +61,7 @@ export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default', compa
     const setCurrentThreadId = useSetAtom(currentThreadIdAtom);
     const [historyError, setHistoryError] = useState<string | null>(null);
     const [submitError, setSubmitError] = useState<string | null>(null);
+    const [isEnhancing, setIsEnhancing] = useState(false);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
     const figmaButtonRef = useRef<HTMLButtonElement>(null);
@@ -291,6 +293,33 @@ export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default', compa
         };
     }, [imagePreviewUrls]);
 
+    const handleEnhancePrompt = async () => {
+        if (!inputValue.trim() || isEnhancing || isLoading) return;
+
+        if (!isLoaded) {
+            setSubmitError('Still loading — try again in a moment.');
+            return;
+        }
+        if (!isSignedIn) {
+            setSubmitError('Sign in to enhance prompts.');
+            return;
+        }
+
+        setSubmitError(null);
+        setIsEnhancing(true);
+        const savedInput = inputValue;
+        try {
+            const result = await enhancePrompt(savedInput, chatMode);
+            if (!result.ok) {
+                setSubmitError(result.error);
+                return;
+            }
+            setInputValue(result.enhanced);
+        } finally {
+            setIsEnhancing(false);
+        }
+    };
+
     const handleSendMessage = async () => {
         if ((!inputValue.trim() && attachedFiles.length === 0) || isLoading) return;
 
@@ -401,6 +430,22 @@ export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default', compa
         : isCompact
             ? 'bg-zinc-800 text-zinc-600 cursor-not-allowed'
             : 'cursor-not-allowed border-zinc-700 bg-zinc-800 text-zinc-500';
+
+    const enhanceBtnActive = isMac
+        ? 'text-amber-300 bg-amber-500/10'
+        : 'border-amber-500/50 bg-amber-950/40 text-amber-300 hover:bg-amber-900/40';
+
+    const enhanceBtnIdle = isMac
+        ? 'text-zinc-400 hover:text-zinc-200 hover:bg-white/5'
+        : 'border-zinc-700/80 bg-zinc-900 text-zinc-300 hover:text-zinc-100 hover:bg-zinc-800/70';
+
+    const supabaseBtnActive = isMac
+        ? 'text-emerald-300 bg-emerald-500/10'
+        : 'border-emerald-500/50 bg-emerald-950/40 text-emerald-300 hover:bg-emerald-900/40';
+
+    const supabaseBtnIdle = isMac
+        ? 'text-zinc-400 hover:text-zinc-200 hover:bg-white/5'
+        : 'border-zinc-700/80 bg-zinc-900 text-zinc-300 hover:text-zinc-100 hover:bg-zinc-800/70';
 
     const windowTitle = isMac
         ? (currentThreadId
@@ -712,6 +757,21 @@ export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default', compa
                     <div className="flex items-center gap-1.5 shrink-0">
                         <button
                             type="button"
+                            onClick={() => void handleEnhancePrompt()}
+                            disabled={!inputValue.trim() || isEnhancing || isLoading}
+                            className={`${iconBtnClass} ${isEnhancing ? enhanceBtnActive : enhanceBtnIdle} disabled:opacity-40 disabled:cursor-not-allowed`}
+                            title="Enhance prompt with Claude Haiku 4.5"
+                            aria-label="Enhance prompt"
+                        >
+                            {isEnhancing ? (
+                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            ) : (
+                                <Sparkles className="w-3.5 h-3.5" />
+                            )}
+                        </button>
+
+                        <button
+                            type="button"
                             onClick={() => fileInputRef.current?.click()}
                             className={iconBtnClass}
                             title="Add files"
@@ -719,6 +779,12 @@ export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default', compa
                         >
                             <Paperclip className="w-3.5 h-3.5" />
                         </button>
+
+                        <SupabaseToolbarButton
+                            iconBtnClass={iconBtnClass}
+                            activeClass={supabaseBtnActive}
+                            idleClass={supabaseBtnIdle}
+                        />
 
                         {isMac && (
                             <>

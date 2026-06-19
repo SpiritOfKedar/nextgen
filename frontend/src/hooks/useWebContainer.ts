@@ -10,7 +10,9 @@ import {
     shellReadyAtom,
     writeShellOutput,
     setShellResizeFn,
+    requestPreviewRefresh,
 } from '../store/webContainer';
+import { resetNpmCacheResolution, syncShellWorkingDirectory } from '../lib/webContainerShell';
 
 // ── Module-level singletons (survive React strict-mode double-invoke) ──
 let _bootPromise: Promise<WebContainer> | null = null;
@@ -51,6 +53,7 @@ export const useWebContainer = () => {
             try {
                 if (!_bootPromise) {
                     console.log('[WebContainer] Booting...');
+                    resetNpmCacheResolution();
                     _bootPromise = WebContainer.boot();
                 }
 
@@ -65,6 +68,7 @@ export const useWebContainer = () => {
                     setServerUrl(url);
                     setPreviewStatus('ready');
                     setPreviewStatusMessage(`Dev server is live at ${url}`);
+                    requestPreviewRefresh();
                 });
 
                 // ── Spawn persistent jsh shell (once) ──────────────────
@@ -91,6 +95,10 @@ export const useWebContainer = () => {
 
                         setShellWriter(writer);
                         setShellReady(true);
+
+                        // jsh starts outside the project workdir — cd there so manual
+                        // `npm run dev` finds package.json (same dir programmatic spawns use).
+                        void syncShellWorkingDirectory(writer, instance, instance.workdir);
 
                         setShellResizeFn((dims) => shellProcess.resize?.(dims));
 

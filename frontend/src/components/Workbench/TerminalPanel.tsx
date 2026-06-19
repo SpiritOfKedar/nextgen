@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Terminal } from 'xterm';
 import { FitAddon } from 'xterm-addon-fit';
 import { useAtomValue, useSetAtom } from 'jotai';
@@ -11,8 +11,10 @@ import {
     terminalStatusByThreadAtom,
     recoveryAuditsByThreadAtom,
 } from '../../store/webContainer';
-import { currentThreadIdAtom, selectedModelAtom } from '../../store/atoms';
+import { currentThreadIdAtom } from '../../store/atoms';
 import { detectTerminalIssue } from '../../lib/terminalIssues';
+import { shouldAutoRecover, RECOVERY_LLM_MODEL } from '../../lib/terminalAutoFix';
+import { scheduleAutoTerminalRecovery } from '../../lib/terminalAutoRecovery';
 import { useAuth } from '@clerk/clerk-react';
 import { useChat } from '../../hooks/useChat';
 import { X } from 'lucide-react';
@@ -28,7 +30,6 @@ export const TerminalPanel: React.FC = () => {
     const shellWriterRef = useRef<WritableStreamDefaultWriter<string> | null>(null);
     const shellWriter = useAtomValue(shellInputWriterAtom);
     const currentThreadId = useAtomValue(currentThreadIdAtom);
-    const selectedModel = useAtomValue(selectedModelAtom);
     const setTerminalIssueByThread = useSetAtom(terminalIssueByThreadAtom);
     const setTerminalStatusByThread = useSetAtom(terminalStatusByThreadAtom);
     const { getToken } = useAuth();
@@ -191,26 +192,33 @@ export const TerminalPanel: React.FC = () => {
 
     const showIssueBanner = !!(issue && currentThreadId && !isRecovering && dismissedIssueCode !== issue.code);
 
-    useEffect(() => {
-        fitRef.current?.();
-    }, [isRecovering, showIssueBanner, latestAudit?.status]);
-
-    const invokeRecovery = (triggerSource: 'manual' | 'auto') => {
+    const invokeRecovery = useCallback((triggerSource: 'manual' | 'auto') => {
         if (!currentThreadId || isRecovering) return;
         void runTerminalRecovery({
             threadId: currentThreadId,
             triggerSource,
             terminalOutput: outputBufferRef.current.slice(-12000),
             issue,
-            model: selectedModel,
         });
-    };
+    }, [currentThreadId, isRecovering, issue, runTerminalRecovery]);
+
+    useEffect(() => {
+        fitRef.current?.();
+    }, [isRecovering, showIssueBanner, latestAudit?.status]);
+
+    useEffect(() => {
+        if (!currentThreadId || !issue || isRecovering || dismissedIssueCode === issue.code) return;
+        if (!shouldAutoRecover(issue)) return;
+        scheduleAutoTerminalRecovery(currentThreadId, issue.code, () => {
+            invokeRecovery('auto');
+        });
+    }, [currentThreadId, issue, isRecovering, dismissedIssueCode, invokeRecovery]);
 
     return (
         <div className="flex h-full min-h-0 flex-col bg-zinc-950">
             {isRecovering && (
                 <div className="shrink-0 border-b border-blue-800/40 bg-blue-950/30 px-3 py-1.5 text-xs text-blue-200">
-                    Diagnosing and verifying fix (up to 3 rounds) · model: <span className="font-medium text-blue-100">{selectedModel}</span>
+                    Diagnosing and verifying fix (up to 3 rounds) · model: <span className="font-medium text-blue-100">{RECOVERY_LLM_MODEL}</span>
                 </div>
             )}
 
@@ -250,7 +258,7 @@ export const TerminalPanel: React.FC = () => {
                             ) : null}
                         </>
                     ) : (
-                        <span>Recovery uses the model selected in chat</span>
+                        <span>Errors auto-fix via agent ({RECOVERY_LLM_MODEL})</span>
                     )}
                 </div>
                 {currentThreadId && (
@@ -259,9 +267,9 @@ export const TerminalPanel: React.FC = () => {
                         className="shrink-0 rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800 hover:text-white disabled:opacity-50"
                         disabled={isRecovering}
                         onClick={() => invokeRecovery('manual')}
-                        title={`Run recovery with ${selectedModel}`}
+                        title={`Run recovery with ${RECOVERY_LLM_MODEL}`}
                     >
-                        {isRecovering ? 'Recovering…' : `Fix (${selectedModel.split('-').slice(0, 2).join(' ')})`}
+                        {isRecovering ? 'Recovering…' : 'Fix with agent'}
                     </button>
                 )}
             </div>

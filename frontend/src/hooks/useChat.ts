@@ -13,6 +13,9 @@ import {
     terminalStatusByThreadAtom,
     terminalIssueByThreadAtom,
     writeShellOutput,
+    markPreviewStale,
+    requestPreviewRefresh,
+    getShellOutputBuffer,
     type TerminalIssue,
 } from '../store/webContainer';
 import { getWebContainerInstance } from './useWebContainer';
@@ -23,6 +26,8 @@ import { useNavigate } from 'react-router-dom';
 import { BoltParser } from '../lib/boltProtocol';
 import type { BoltAction } from '../lib/boltProtocol';
 import { detectTerminalIssue } from '../lib/terminalIssues';
+import { RECOVERY_LLM_MODEL, shouldAutoRecover } from '../lib/terminalAutoFix';
+import { scheduleAutoTerminalRecovery, resetAutoRecoveryAttempts } from '../lib/terminalAutoRecovery';
 import { runIterativeRecovery } from '../lib/terminalRecoveryLoop';
 import {
     executeShellCommandsInWebContainer,
@@ -31,7 +36,7 @@ import {
     normalizeWrittenPath,
     resetSyncedShellCwd,
     syncShellWorkingDirectory,
-    WEBCONTAINER_SPAWN_ENV,
+    buildSpawnOptions,
 } from '../lib/webContainerShell';
 import { repairViteScriptsForWebContainer } from '../lib/webContainerScripts';
 import {
@@ -45,9 +50,29 @@ import {
 import {
     injectSupabaseEnv,
     applySupabaseMigrations,
+    fetchSupabaseStatus,
     type SupabaseMigrationInput,
 } from '../lib/supabaseSandboxEnv';
+import { collectMigrationsFromFileMap, mergeMigrationInputs } from '../lib/supabaseMigrationCollect';
+import { supabaseContextAtom } from '../store/mcpAttachments';
 import type { WebContainer } from '@webcontainer/api';
+
+const DEFAULT_SUPABASE_MCP_CONTEXT = {
+    fetchTables: true,
+    fetchAdvisors: true,
+} as const;
+
+const BACKEND_BUILD_PROMPT = `Implement BACKEND PHASE ONLY from the approved Supabase plan above.
+Emit every migration as <boltAction type="supabase-migration" id="..."> AND matching supabase/migrations/*.sql files.
+Include src/lib/supabase.ts, src/lib/types.ts, and package.json with @supabase/supabase-js.
+Do NOT build React UI pages or layout components in this phase.`;
+
+const UI_BUILD_PROMPT = `Implement UI PHASE from the approved plan. Supabase migrations and src/lib/supabase.ts should already exist.
+Build React routes, components, contexts/hooks that read/write Supabase (not localStorage as primary storage).
+Follow the plan's component breakdown and wire auth, feed, posts, comments, and communities. Start the dev server when ready.`;
+
+const FULL_BUILD_PROMPT = `Implement the approved plan above exactly. Follow the saved plan context — create all listed files, install dependencies, and start the dev server.
+When Supabase is connected, emit supabase-migration actions for all schema changes before or alongside UI files.`;
 
 /** Serialize WebContainer fs writes so the chat stream reader never stalls on slow I/O (fixes dropped Claude streams). */
 const queueBoltFileWrite = (
@@ -68,6 +93,7 @@ const queueBoltFileWrite = (
                 }
             }
             await wc.fs.writeFile(absPath, fileContent);
+            markPreviewStale();
         } catch (err) {
             console.error(`[Bolt] Failed to write ${filePath}:`, err);
         }
@@ -537,6 +563,7 @@ export const useChat = () => {
     const setTerminalStatusByThread = useSetAtom(terminalStatusByThreadAtom);
     const setTerminalIssueByThread = useSetAtom(terminalIssueByThreadAtom);
     const fileSystem = useAtomValue(fileSystemAtom);
+    const supabaseContextAttachment = useAtomValue(supabaseContextAtom);
 
     const [isLoading, setIsLoading] = useState(false);
     type ThreadVersionItem = {
@@ -617,10 +644,11 @@ export const useChat = () => {
             model?: string;
         },
     ) => {
-        const { threadId, triggerSource, terminalOutput = '', issue = null, model = selectedModel } = input;
+        const { threadId, triggerSource, terminalOutput = '', issue = null } = input;
+        const recoveryModel = RECOVERY_LLM_MODEL;
         if (!threadId || !isLoaded || !isSignedIn) return;
-        const token = await getToken();
-        if (!token) return;
+        const initialToken = await getToken();
+        if (!initialToken) return;
         const issueCode = issue?.code || 'auto_recovery';
         const wc = webContainerInstance ?? getWebContainerInstance();
         if (!wc) return;
@@ -629,7 +657,7 @@ export const useChat = () => {
         const sessionWrites = new Map<string, string>();
 
         setTerminalStatusByThread((prev) => ({ ...prev, [threadId]: 'running' }));
-        writeShellOutput(`\r\n\x1b[36m⬢ Agent analyzing terminal output (up to 3 fix rounds, model: ${model})…\x1b[0m\r\n`);
+        writeShellOutput(`\r\n\x1b[36m⬢ Agent analyzing terminal output (up to 3 fix rounds, model: ${recoveryModel})…\x1b[0m\r\n`);
         setPreviewStatus('starting');
         setPreviewStatusMessage('Agent is diagnosing and fixing…');
 
@@ -643,9 +671,9 @@ export const useChat = () => {
             const result = await runIterativeRecovery({
                 wc,
                 threadId,
-                token,
+                getToken,
                 apiUrl: API_URL,
-                model,
+                model: recoveryModel,
                 initialTerminalOutput: terminalOutput,
                 initialIssue: issue,
                 getFileMap: () => {
@@ -672,7 +700,10 @@ export const useChat = () => {
                     setPreviewStatus(previewStatus);
                     setPreviewStatusMessage(message);
                 },
-                appendTerminalEvents: (events) => appendTerminalEvents(threadId, token, events),
+                appendTerminalEvents: async (events) => {
+                    const t = await getToken();
+                    if (t) await appendTerminalEvents(threadId, t, events);
+                },
                 killActiveDevProcess: async () => {
                     if (activeDevProcess?.kill) {
                         try { await activeDevProcess.kill(); } catch { /* ignore */ }
@@ -709,6 +740,7 @@ export const useChat = () => {
                 }
                 setPreviewStatus('starting');
                 setPreviewStatusMessage('Recovery verified. Preview should load shortly…');
+                requestPreviewRefresh();
             } else {
                 writeShellOutput(`\r\n\x1b[31m✗ Recovery failed after ${result.roundsUsed} round(s): ${detail}\x1b[0m\r\n`);
                 setPreviewStatus('error');
@@ -729,23 +761,26 @@ export const useChat = () => {
 
         setTerminalStatusByThread((prev) => ({ ...prev, [threadId]: status === 'resolved' ? 'idle' : 'error' }));
 
-        await fetch(`${API_URL}/terminal/${encodeURIComponent(threadId)}/recovery-audits`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                Authorization: `Bearer ${token}`,
-            },
-            body: JSON.stringify({
-                triggerSource,
-                issueCode,
-                plannedCommands,
-                executedCommands,
-                status,
-                detail,
-            }),
-        }).catch(() => undefined);
+        const auditToken = await getToken();
+        if (auditToken) {
+            await fetch(`${API_URL}/terminal/${encodeURIComponent(threadId)}/recovery-audits`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    Authorization: `Bearer ${auditToken}`,
+                },
+                body: JSON.stringify({
+                    triggerSource,
+                    issueCode,
+                    plannedCommands,
+                    executedCommands,
+                    status,
+                    detail,
+                }),
+            }).catch(() => undefined);
 
-        await refreshTerminalSession(threadId, token);
+            await refreshTerminalSession(threadId, auditToken);
+        }
     }, [
         API_URL,
         appendTerminalEvents,
@@ -762,7 +797,6 @@ export const useChat = () => {
         setTerminalStatusByThread,
         shellWriter,
         webContainerInstance,
-        selectedModel,
     ]);
 
     const startThreadSandboxInBackground = useCallback(async (
@@ -946,7 +980,7 @@ createRoot(document.getElementById('root')!).render(
             });
 
             const projectDir = depResult.projectDir;
-            await syncShellWorkingDirectory(shellWriter, projectDir);
+            await syncShellWorkingDirectory(shellWriter, wc, projectDir);
 
             if (!depResult.ok) {
                 if (depResult.errorMessage === 'Stale thread switch') return;
@@ -960,6 +994,28 @@ createRoot(document.getElementById('root')!).render(
                     knownFiles: incomingFiles,
                     installFailureReason: depResult.errorMessage,
                 });
+                const output = getShellOutputBuffer().slice(-12_000);
+                const detectedIssue = detectTerminalIssue(output);
+                const recoveryIssue: TerminalIssue = detectedIssue ?? {
+                    code: 'install_failed',
+                    confidence: 0.85,
+                    message: depResult.errorMessage ?? 'Dependency installation failed.',
+                    diagnosticHints: ['Read npm ERR! lines and fix package.json or sandbox cache.'],
+                };
+                // Surface the issue so the terminal banner shows immediately.
+                setTerminalIssueByThread((prev) => ({ ...prev, [threadId]: recoveryIssue }));
+                // Only spend an LLM recovery on code/config issues. Environmental issues
+                // (npm cache, permissions) were already handled deterministically inline.
+                if (shouldAutoRecover(recoveryIssue)) {
+                    scheduleAutoTerminalRecovery(threadId, recoveryIssue.code, () => {
+                        void runTerminalRecovery({
+                            threadId,
+                            triggerSource: 'auto',
+                            terminalOutput: output,
+                            issue: recoveryIssue,
+                        });
+                    });
+                }
                 return;
             }
 
@@ -987,10 +1043,7 @@ createRoot(document.getElementById('root')!).render(
                 setPreviewStatus('starting');
                 setPreviewStatusMessage('Starting development server…');
                 writeShellOutput('\r\n\x1b[36m⬢ Starting dev server...\x1b[0m\r\n');
-                const devProc = await wc.spawn('npm', ['run', 'dev'], {
-                    env: WEBCONTAINER_SPAWN_ENV,
-                    cwd: projectDir,
-                });
+                const devProc = await wc.spawn('npm', ['run', 'dev'], buildSpawnOptions(wc, projectDir));
                 await appendTerminalEvents(threadId, authToken, [
                     { eventType: 'command', payload: 'npm run dev', cwd: projectDir },
                 ]);
@@ -1008,6 +1061,7 @@ createRoot(document.getElementById('root')!).render(
             } else {
                 setPreviewStatus('ready');
                 setPreviewStatusMessage('Reusing running dev server.');
+                requestPreviewRefresh();
             }
 
             threadRuntimeMeta.set(threadId, {
@@ -1080,10 +1134,36 @@ createRoot(document.getElementById('root')!).render(
                 error: String(err),
             });
         }
-    }, [API_URL, appendTerminalEvents, setFileSystem, setPreviewStatus, setPreviewStatusMessage, setSandboxRuntimeMetadata, shellWriter]);
+    }, [API_URL, appendTerminalEvents, runTerminalRecovery, setFileSystem, setPreviewStatus, setPreviewStatusMessage, setSandboxRuntimeMetadata, shellWriter]);
 
     type SendMessageResult = { ok: true } | { ok: false; error: string };
-    type SendMessageOptions = { mode?: ChatMode };
+    type SendMessageOptions = { mode?: ChatMode; buildPhase?: 'full' | 'backend' | 'ui' };
+
+    const applyMergedSupabaseMigrations = async (
+        token: string,
+        boltMigrations: SupabaseMigrationInput[],
+        fileMap: Map<string, string>,
+    ) => {
+        const allMigrations = mergeMigrationInputs(
+            boltMigrations,
+            collectMigrationsFromFileMap(fileMap),
+        );
+        if (allMigrations.length === 0) return;
+
+        setPreviewStatus('starting');
+        setPreviewStatusMessage('Applying Supabase migrations…');
+        writeShellOutput(`\r\n\x1b[36m⬢ Applying ${allMigrations.length} Supabase migration(s)...\x1b[0m\r\n`);
+        try {
+            const results = await applySupabaseMigrations(token, allMigrations);
+            for (const r of results) {
+                const color = r.status === 'failed' || r.status === 'blocked' ? '31'
+                    : r.status === 'applied' ? '32' : '90';
+                writeShellOutput(`\x1b[${color}m  • ${r.migrationId}: ${r.status}${r.detail ? ` — ${r.detail}` : ''}\x1b[0m\r\n`);
+            }
+        } catch (err) {
+            writeShellOutput(`\r\n\x1b[31m✗ Supabase migration error: ${err instanceof Error ? err.message : String(err)}\x1b[0m\r\n`);
+        }
+    };
 
     const sendMessage = async (
         content: string,
@@ -1135,6 +1215,15 @@ createRoot(document.getElementById('root')!).render(
                 console.error('[useChat] Failed to get token. Aborting send.');
                 return { ok: false, error: 'Could not get auth token. Try signing in again.' };
             }
+
+            let effectiveSupabaseContext = supabaseContext;
+            if (!effectiveSupabaseContext && (effectiveMode === 'build' || effectiveMode === 'plan')) {
+                const status = await fetchSupabaseStatus(token);
+                if (status.connected) {
+                    effectiveSupabaseContext = { ...DEFAULT_SUPABASE_MCP_CONTEXT };
+                }
+            }
+
             console.log('[useChat] Sending to API...', { threadId: localStorage.getItem('currentThreadId'), model: selectedModel });
             const response = await fetch(`${API_URL}/chat`, {
                 method: 'POST',
@@ -1147,10 +1236,11 @@ createRoot(document.getElementById('root')!).render(
                     threadId: currentThreadId,
                     model: selectedModel,
                     mode: effectiveMode,
+                    buildPhase: options?.buildPhase ?? 'full',
                     attachments,
                     figmaLinks,
                     stitchContext: stitchContext || undefined,
-                    supabaseContext: supabaseContext || undefined,
+                    supabaseContext: effectiveSupabaseContext || undefined,
                 }),
             });
 
@@ -1206,7 +1296,7 @@ createRoot(document.getElementById('root')!).render(
                 const { done, value } = await reader.read();
                 if (done) break;
 
-                if (!didNavigateForStream && value && value.byteLength > 0 && effectiveMode === 'build') {
+                if (!didNavigateForStream && value && value.byteLength > 0) {
                     didNavigateForStream = true;
                     navigate('/builder');
                 }
@@ -1305,20 +1395,8 @@ createRoot(document.getElementById('root')!).render(
 
                 // Supabase backend: apply schema migrations server-side, then inject the
                 // browser-safe client env so the dev server boots against the live project.
-                if (token && pendingMigrations.length > 0) {
-                    setPreviewStatus('starting');
-                    setPreviewStatusMessage('Applying Supabase migrations…');
-                    writeShellOutput(`\r\n\x1b[36m⬢ Applying ${pendingMigrations.length} Supabase migration(s)...\x1b[0m\r\n`);
-                    try {
-                        const results = await applySupabaseMigrations(token, pendingMigrations);
-                        for (const r of results) {
-                            const color = r.status === 'failed' || r.status === 'blocked' ? '31'
-                                : r.status === 'applied' ? '32' : '90';
-                            writeShellOutput(`\x1b[${color}m  • ${r.migrationId}: ${r.status}${r.detail ? ` — ${r.detail}` : ''}\x1b[0m\r\n`);
-                        }
-                    } catch (err) {
-                        writeShellOutput(`\r\n\x1b[31m✗ Supabase migration error: ${err instanceof Error ? err.message : String(err)}\x1b[0m\r\n`);
-                    }
+                if (token) {
+                    await applyMergedSupabaseMigrations(token, pendingMigrations, writtenFiles);
                 }
                 if (wcForNpm && token) {
                     await injectSupabaseEnv(wcForNpm, token);
@@ -1352,10 +1430,31 @@ createRoot(document.getElementById('root')!).render(
                     if (!depResult.ok) {
                         setPreviewStatus('error');
                         setPreviewStatusMessage(depResult.errorMessage ?? 'Dependency install failed');
+                        const output = getShellOutputBuffer().slice(-12_000);
+                        const detectedIssue = detectTerminalIssue(output);
+                        const recoveryIssue: TerminalIssue = detectedIssue ?? {
+                            code: 'install_failed',
+                            confidence: 0.85,
+                            message: depResult.errorMessage ?? 'Dependency installation failed.',
+                            diagnosticHints: [],
+                        };
+                        if (buildThreadId) {
+                            setTerminalIssueByThread((prev) => ({ ...prev, [buildThreadId]: recoveryIssue }));
+                        }
+                        if (shouldAutoRecover(recoveryIssue)) {
+                            scheduleAutoTerminalRecovery(buildThreadId, recoveryIssue.code, () => {
+                                void runTerminalRecovery({
+                                    threadId: buildThreadId,
+                                    triggerSource: 'auto',
+                                    terminalOutput: output,
+                                    issue: recoveryIssue,
+                                });
+                            });
+                        }
                     } else {
                         activeDevServerFingerprint = depResult.depFingerprint;
                         activeCriticalFingerprint = depResult.criticalFingerprint;
-                        await syncShellWorkingDirectory(shellWriter, depResult.projectDir);
+                        await syncShellWorkingDirectory(shellWriter, wc, depResult.projectDir);
 
                         const shellQueue = filterInstallShellCommands(normalizeShellCommandQueue(pendingShellCommands));
                         const hasDevCommand = shellQueue.some((c) => /npm\s+run\s+dev\b/i.test(c));
@@ -1397,10 +1496,7 @@ createRoot(document.getElementById('root')!).render(
                             setPreviewStatus('starting');
                             setPreviewStatusMessage('Starting development server…');
                             writeShellOutput('\r\n\x1b[36m⬢ Starting dev server...\x1b[0m\r\n');
-                            const devProc = await wc.spawn('npm', ['run', 'dev'], {
-                                env: WEBCONTAINER_SPAWN_ENV,
-                                cwd: depResult.projectDir,
-                            });
+                            const devProc = await wc.spawn('npm', ['run', 'dev'], buildSpawnOptions(wc, depResult.projectDir));
                             devProc.output.pipeTo(new WritableStream({
                                 write(data) { writeShellOutput(data); },
                             }));
@@ -1450,6 +1546,10 @@ createRoot(document.getElementById('root')!).render(
                         : msg,
                 ),
             );
+
+            if (effectiveMode === 'build' && writtenFiles.size > 0) {
+                requestPreviewRefresh();
+            }
 
             return { ok: true };
         } catch (error) {
@@ -1964,13 +2064,50 @@ createRoot(document.getElementById('root')!).render(
         action: PlanAction,
         feedback = '',
     ): Promise<SendMessageResult> => {
+        const supabaseCtx = supabaseContextAttachment ?? { ...DEFAULT_SUPABASE_MCP_CONTEXT };
+
         if (action === 'build') {
+            // A new build gets a fresh automatic-recovery budget so prior failures don't
+            // permanently suppress recovery for this thread.
+            if (currentThreadId) resetAutoRecoveryAttempts(currentThreadId);
+
+            const token = await getToken();
+            let migrationsEnabled = false;
+            if (token) {
+                const status = await fetchSupabaseStatus(token);
+                migrationsEnabled = status.connected && status.migrationsEnabled === true;
+            }
+
+            // Backend phase is purely ADDITIVE — only when the user has a DB-connected
+            // Supabase project. The frontend build always runs and never blocks on Supabase.
+            if (migrationsEnabled) {
+                const backendResult = await sendMessage(
+                    BACKEND_BUILD_PROMPT,
+                    [],
+                    [],
+                    null,
+                    supabaseCtx,
+                    { mode: 'build', buildPhase: 'backend' },
+                );
+                if (!backendResult.ok) return backendResult;
+                return sendMessage(
+                    UI_BUILD_PROMPT,
+                    [],
+                    [],
+                    null,
+                    supabaseCtx,
+                    { mode: 'build', buildPhase: 'ui' },
+                );
+            }
+
+            // No DB-connected Supabase: build the full app anyway. Generated code includes
+            // src/lib/supabase.ts reading VITE_SUPABASE_* and degrades gracefully if unset.
             return sendMessage(
-                'Implement the approved plan above exactly. Follow the saved plan context — create all listed files, install dependencies, and start the dev server.',
+                FULL_BUILD_PROMPT,
                 [],
                 [],
                 null,
-                null,
+                supabaseCtx,
                 { mode: 'build' },
             );
         }
@@ -1983,7 +2120,7 @@ createRoot(document.getElementById('root')!).render(
                 [],
                 [],
                 null,
-                null,
+                supabaseCtx,
                 { mode: 'plan' },
             );
         }
@@ -1996,16 +2133,68 @@ createRoot(document.getElementById('root')!).render(
                 [],
                 [],
                 null,
-                null,
+                supabaseCtx,
                 { mode: 'plan' },
             );
         }
         return { ok: false, error: 'Unknown plan action.' };
-    }, [sendMessage]);
+    }, [getToken, sendMessage, supabaseContextAttachment, currentThreadId]);
+
+    const enhancePrompt = useCallback(async (
+        prompt: string,
+        mode: ChatMode = chatMode,
+    ): Promise<{ ok: true; enhanced: string } | { ok: false; error: string }> => {
+        const trimmed = prompt.trim();
+        if (!trimmed) {
+            return { ok: false, error: 'Enter a prompt to enhance.' };
+        }
+        if (!isLoaded) {
+            return { ok: false, error: 'Still loading — try again in a moment.' };
+        }
+        if (!isSignedIn) {
+            return { ok: false, error: 'Sign in to enhance prompts.' };
+        }
+
+        try {
+            const token = await getToken();
+            if (!token) {
+                return { ok: false, error: 'Could not get auth token. Try signing in again.' };
+            }
+
+            const response = await fetch(`${API_URL}/chat/enhance-prompt`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    Authorization: `Bearer ${token}`,
+                },
+                body: JSON.stringify({ prompt: trimmed, mode }),
+            });
+
+            if (!response.ok) {
+                const errorBody = await response.json().catch(() => null);
+                const message = typeof errorBody?.error === 'string'
+                    ? errorBody.error
+                    : `Enhancement failed (${response.status})`;
+                return { ok: false, error: message };
+            }
+
+            const data = await response.json();
+            const enhanced = typeof data?.enhanced === 'string' ? data.enhanced.trim() : '';
+            if (!enhanced) {
+                return { ok: false, error: 'Enhancement returned an empty prompt.' };
+            }
+
+            return { ok: true, enhanced };
+        } catch (error) {
+            const message = error instanceof Error ? error.message : 'Failed to enhance prompt';
+            return { ok: false, error: message };
+        }
+    }, [API_URL, chatMode, getToken, isLoaded, isSignedIn]);
 
     return {
         messages,
         sendMessage,
+        enhancePrompt,
         executePlanAction,
         fetchThreads,
         deleteThread,

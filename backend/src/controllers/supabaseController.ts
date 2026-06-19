@@ -69,13 +69,17 @@ export const supabaseController = {
             if (!userId) return res.json({ connected: false });
 
             const conn = await loadUserConnection(userId);
-            if (!conn || !conn.enabled) return res.json({ connected: false });
+            if (!conn || !conn.enabled) return res.json({ connected: false, connectionMode: 'none' });
 
+            const migrationsEnabled = Boolean(conn.database_url);
             return res.json({
                 connected: true,
+                // Explicit tri-state so the UI never mislabels a client-only connection as
+                // "not connected": none | client (URL+anon) | database (DB URL present).
+                connectionMode: migrationsEnabled ? 'database' : 'client',
                 projectUrl: conn.project_url,
                 projectRef: conn.project_ref,
-                migrationsEnabled: Boolean(conn.database_url),
+                migrationsEnabled,
                 hasServiceRole: Boolean(conn.service_role_key),
                 mcpConnected: Boolean(conn.mcp_access_token),
                 tableCount: conn.schema_snapshot?.tables?.length ?? 0,

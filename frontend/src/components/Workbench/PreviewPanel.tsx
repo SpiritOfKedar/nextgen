@@ -1,17 +1,50 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef } from 'react';
 import { useAtomValue } from 'jotai';
-import { previewStatusAtom, previewStatusMessageAtom, serverUrlAtom } from '../../store/webContainer';
+import {
+    previewStatusAtom,
+    previewStatusMessageAtom,
+    previewRefreshNonceAtom,
+    previewHasPendingChangesAtom,
+    serverUrlAtom,
+    requestPreviewRefresh,
+    clearPreviewPendingChanges,
+} from '../../store/webContainer';
 import { RefreshCw } from 'lucide-react';
 
 export const PreviewPanel: React.FC = () => {
     const url = useAtomValue(serverUrlAtom);
     const previewStatus = useAtomValue(previewStatusAtom);
     const previewStatusMessage = useAtomValue(previewStatusMessageAtom);
+    const refreshNonce = useAtomValue(previewRefreshNonceAtom);
+    const hasPendingChanges = useAtomValue(previewHasPendingChangesAtom);
     const iframeRef = useRef<HTMLIFrameElement>(null);
-    const [refreshNonce, setRefreshNonce] = useState(0);
+    const lastLoadedUrlRef = useRef<string | null>(null);
+
+    const reloadIframe = () => {
+        const iframe = iframeRef.current;
+        if (!iframe || !url) return;
+
+        try {
+            iframe.contentWindow?.location.reload();
+        } catch {
+            // Cross-origin fallback: remount via src assignment
+            iframe.src = url;
+        }
+        lastLoadedUrlRef.current = url;
+    };
+
+    useEffect(() => {
+        if (!url) return;
+        if (lastLoadedUrlRef.current !== url) {
+            lastLoadedUrlRef.current = url;
+            return;
+        }
+        reloadIframe();
+        clearPreviewPendingChanges();
+    }, [refreshNonce, url]);
 
     const handleRefresh = () => {
-        setRefreshNonce((k) => k + 1);
+        requestPreviewRefresh();
     };
 
     if (!url) {
@@ -41,15 +74,18 @@ export const PreviewPanel: React.FC = () => {
             <div className="h-8 bg-zinc-100 border-b border-zinc-200 flex items-center px-4 gap-2 overflow-hidden">
                 <button
                     onClick={handleRefresh}
-                    className="p-0.5 rounded hover:bg-zinc-200 transition-colors"
-                    title="Refresh preview"
+                    className={`p-0.5 rounded hover:bg-zinc-200 transition-colors ${hasPendingChanges ? 'text-blue-600' : ''}`}
+                    title={hasPendingChanges ? 'Refresh preview (updates available)' : 'Refresh preview'}
                 >
-                    <RefreshCw className="w-3.5 h-3.5 text-zinc-500" />
+                    <RefreshCw className={`w-3.5 h-3.5 ${hasPendingChanges ? 'text-blue-600' : 'text-zinc-500'}`} />
                 </button>
+                {hasPendingChanges && (
+                    <span className="text-[10px] text-blue-600 font-medium shrink-0">Updates available</span>
+                )}
                 <span className="text-xs text-zinc-500 truncate flex-1">{url}</span>
             </div>
             <iframe
-                key={`${url}-${refreshNonce}`}
+                key={url}
                 ref={iframeRef}
                 src={url}
                 className="flex-1 w-full border-0"

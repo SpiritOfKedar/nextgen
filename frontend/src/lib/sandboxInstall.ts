@@ -1,12 +1,16 @@
 import JSZip from 'jszip';
 import type { WebContainer } from '@webcontainer/api';
+import { markPreviewStale, getShellOutputBuffer } from '../store/webContainer';
 import {
     INSTALL_FIRST_ATTEMPT_TIMEOUT_MS,
+    buildSpawnEnv,
+    buildSpawnOptions,
+    ensureNpmCacheDir,
     inferProjectDirectory,
     resolveProjectDirectoryForNpm,
     runProcessAndCollectExit,
-    WEBCONTAINER_SPAWN_ENV,
 } from './webContainerShell';
+import { applyDeterministicTerminalFixes } from './terminalAutoFix';
 import {
     listDependencySnapshots,
     loadDependencySnapshot,
@@ -54,7 +58,7 @@ export const VITE_REACT_BASE_FINGERPRINT = hashString(`${MINIMAL_ROOT_PACKAGE_JS
 const INSTALL_RETRY_TIMEOUT_MS = 420_000;
 export const MAX_INDEXEDDB_SNAPSHOT_BYTES = 120 * 1024 * 1024;
 
-export { WEBCONTAINER_SPAWN_ENV } from './webContainerShell';
+export { buildSpawnEnv, WEBCONTAINER_SPAWN_ENV } from './webContainerShell';
 
 const contentHashByThread = new Map<string, Map<string, string>>();
 
@@ -174,7 +178,7 @@ const bytesToBase64 = (input: Uint8Array): string => {
 
 const isTarAvailable = async (wc: WebContainer): Promise<boolean> => {
     try {
-        const proc = await wc.spawn('tar', ['--version'], { env: WEBCONTAINER_SPAWN_ENV });
+        const proc = await wc.spawn('tar', ['--version'], { env: buildSpawnEnv('/') });
         const exitCode = await runProcessAndCollectExit(proc, 10_000);
         return exitCode === 0;
     } catch {
@@ -224,7 +228,7 @@ const createNodeModulesSnapshot = async (
         return { bytes: zipBytes, format: 'zip' };
     }
     const proc = await wc.spawn('sh', ['-lc', `tar -czf "${SNAPSHOT_ARCHIVE_PATH}" -C "${cwd}" node_modules`], {
-        env: WEBCONTAINER_SPAWN_ENV,
+        env: buildSpawnEnv(cwd),
     });
     const exitCode = await runProcessAndCollectExit(proc, 120_000);
     if (exitCode !== 0) return null;
@@ -292,7 +296,7 @@ const restoreNodeModulesSnapshot = async (
         await wc.fs.mkdir('/.boltly', { recursive: true });
         await wc.fs.writeFile(SNAPSHOT_ARCHIVE_PATH, archiveBytes);
         const proc = await wc.spawn('sh', ['-lc', `mkdir -p "${cwd}" && tar -xzf "${SNAPSHOT_ARCHIVE_PATH}" -C "${cwd}"`], {
-            env: WEBCONTAINER_SPAWN_ENV,
+            env: buildSpawnEnv(cwd),
         });
         const exitCode = await runProcessAndCollectExit(proc, 120_000);
         return exitCode === 0;
@@ -613,6 +617,7 @@ export async function ensureProjectDependencies(
     const installStart = performance.now();
     if (repairRootForNpm) await repairRootForNpm(true);
     if (beforeInstall) await beforeInstall();
+    await ensureNpmCacheDir(wc, projectDir);
 
     const installPlan = buildInstallPlan(fileMap, deltaPackages);
     writeShellOutput(`\r\n\x1b[36m⬢ ${installPlan.label}...\x1b[0m\r\n`);
@@ -625,25 +630,43 @@ export async function ensureProjectDependencies(
                 : 'Installing dependencies…',
     );
 
-    let installExit = 0;
-    for (let attempts = 0; attempts < 2; attempts += 1) {
-        const timeoutMs = attempts === 0 ? INSTALL_FIRST_ATTEMPT_TIMEOUT_MS : INSTALL_RETRY_TIMEOUT_MS;
+    const runInstallAttempt = async (timeoutMs: number): Promise<number> => {
         const cmdPayload = `${installPlan.program} ${installPlan.args.join(' ')}`;
         await appendTerminalEvents?.([
             { eventType: 'command', payload: cmdPayload, cwd: projectDir },
         ]);
-        const installProc = await wc.spawn(installPlan.program, installPlan.args, {
-            env: WEBCONTAINER_SPAWN_ENV,
-            cwd: projectDir,
-        });
+        const installProc = await wc.spawn(installPlan.program, installPlan.args, buildSpawnOptions(wc, projectDir));
         installProc.output.pipeTo(new WritableStream({ write(data) { writeShellOutput(data); } }));
-        installExit = await runProcessAndCollectExit(installProc, timeoutMs);
+        const exitCode = await runProcessAndCollectExit(installProc, timeoutMs);
         await appendTerminalEvents?.([
-            { eventType: 'status', payload: `${installPlan.label} exit ${installExit}`, cwd: projectDir, exitCode: installExit },
+            { eventType: 'status', payload: `${installPlan.label} exit ${exitCode}`, cwd: projectDir, exitCode: exitCode },
         ]);
+        return exitCode;
+    };
+
+    let installExit = 0;
+    for (let attempts = 0; attempts < 2; attempts += 1) {
+        const timeoutMs = attempts === 0 ? INSTALL_FIRST_ATTEMPT_TIMEOUT_MS : INSTALL_RETRY_TIMEOUT_MS;
+        installExit = await runInstallAttempt(timeoutMs);
         if (installExit === 0) break;
         if (attempts === 0) {
             writeShellOutput('\r\n\x1b[33m⚠ Install failed once, retrying with extended timeout...\x1b[0m\r\n');
+        }
+    }
+
+    if (installExit !== 0) {
+        const tailOutput = getShellOutputBuffer().slice(-12_000);
+        const fixes = await applyDeterministicTerminalFixes({
+            wc,
+            terminalOutput: tailOutput,
+            projectDir,
+            fileMap,
+            repairRootForNpm,
+        });
+        if (fixes.some((f) => f.applied)) {
+            await ensureNpmCacheDir(wc, projectDir);
+            writeShellOutput('\r\n\x1b[36m⬢ Retrying install after automatic fix…\x1b[0m\r\n');
+            installExit = await runInstallAttempt(INSTALL_RETRY_TIMEOUT_MS);
         }
     }
 
@@ -652,8 +675,8 @@ export async function ensureProjectDependencies(
 
     if (installExit !== 0) {
         const msg = installExit === -1
-            ? `${installPlan.label} timed out. Open Terminal and click Fix with agent.`
-            : `${installPlan.label} failed (exit ${installExit}). Open Terminal and click Fix with agent.`;
+            ? `${installPlan.label} timed out. Agent will attempt automatic recovery…`
+            : `${installPlan.label} failed (exit ${installExit}). Agent will attempt automatic recovery…`;
         onPreviewStatus?.('error', msg);
         writeShellOutput(`\r\n\x1b[31m✗ ${msg}\x1b[0m\r\n`);
         return {
@@ -769,5 +792,8 @@ export async function syncProjectFiles(
 
     const ms = Math.round(performance.now() - started);
     console.info('[SandboxPerf] file_sync_ms', { threadId, written, skipped, deleted, ms });
+    if (written > 0 || deleted > 0) {
+        markPreviewStale();
+    }
     return { written, skipped, deleted, ms };
 }

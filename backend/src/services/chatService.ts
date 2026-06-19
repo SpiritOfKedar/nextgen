@@ -31,6 +31,13 @@ import {
     SupabaseMcpDesignContext,
     SupabaseContextInput,
 } from './supabaseMcpContextService';
+import {
+    normalizePlanContext,
+    MAX_PLAN_CONTEXT_CHARS,
+    PLAN_CONTEXT_MIN_CHARS,
+} from '../lib/planContext';
+
+export { normalizePlanContext, MAX_PLAN_CONTEXT_CHARS, PLAN_CONTEXT_MIN_CHARS };
 
 dotenv.config();
 
@@ -54,6 +61,12 @@ export type ChatLogContext = {
 };
 
 export type ConversationMode = 'plan' | 'build';
+export type BuildPhase = 'full' | 'backend' | 'ui';
+
+export const normalizeBuildPhase = (raw: string | null | undefined): BuildPhase => {
+    if (raw === 'backend' || raw === 'ui') return raw;
+    return 'full';
+};
 
 type ChatAttachment = {
     kind: 'image' | 'text';
@@ -144,6 +157,21 @@ Rules:
 - Keep each section substantive — avoid one-line placeholders.
 `.trim();
 
+const PLAN_MODE_SUPABASE_PROMPT = `
+When SUPABASE PROJECT CONTEXT is present, the plan MUST include a dedicated backend section:
+## Database schema & migrations
+- List every table, column, FK, and index with exact SQL-ready definitions.
+- Number migrations (001_, 002_, …) and describe what each migration does.
+## Row Level Security
+- For each table: SELECT/INSERT/UPDATE/DELETE policies using auth.uid().
+- Note auth.users → profiles trigger if profiles extend auth.
+## Supabase Auth integration
+- Sign-up, sign-in, session handling, and profile row creation.
+## Real-time & queries (if needed)
+- Which tables subscribe to postgres_changes; key query patterns with joins.
+Do NOT plan localStorage as the primary data store when Supabase is connected.
+`.trim();
+
 const BUILD_MODE_PROMPT = `
 You are in BUILD MODE.
 - Implement requested changes directly.
@@ -151,8 +179,25 @@ You are in BUILD MODE.
 - Keep changes minimal and consistent with existing project files.
 `.trim();
 
-const MAX_PLAN_CONTEXT_CHARS = 12_000;
-const PLAN_CONTEXT_MIN_CHARS = 80;
+const BUILD_BACKEND_PHASE_PROMPT = `
+You are in BUILD MODE — BACKEND PHASE ONLY (Supabase schema + client wiring).
+Emit ONLY:
+- <boltAction type="supabase-migration" id="001_..."> for EVERY migration when migrations are enabled (required — not optional).
+- Matching files under supabase/migrations/<id>.sql for each migration.
+- src/lib/supabase.ts, src/lib/types.ts (schema types matching migrations).
+- package.json updates (@supabase/supabase-js and any DB-related deps).
+Do NOT emit React pages, layout components, routes, or UI primitives yet.
+Do NOT emit npm run dev unless you only need to add dependencies.
+`.trim();
+
+const BUILD_UI_PHASE_PROMPT = `
+You are in BUILD MODE — UI PHASE (Supabase schema already applied).
+The database migrations and src/lib/supabase.ts should already exist. Implement the React UI per the approved plan:
+- Contexts/hooks that query Supabase (no localStorage as primary store).
+- Components, routes, auth modals, feeds, and polish.
+Do NOT re-emit migrations unless fixing a schema error reported in chat.
+Emit npm run dev when the app is ready to preview.
+`.trim();
 
 export const AUTO_MODEL_ID = 'auto';
 
@@ -193,13 +238,27 @@ export const buildEnhancedSystemPrompt = (
     stitchContext: StitchDesignContext | null = null,
     supabaseContext: SupabasePromptContext | null = null,
     supabaseMcpContext: SupabaseMcpDesignContext | null = null,
+    savedSupabasePlanExcerpt?: string | null,
+    buildPhase: BuildPhase = 'full',
 ): string => {
     let enhanced = basePrompt;
-    enhanced += `\n\n--- CONVERSATION MODE ---\n${mode === 'plan' ? PLAN_MODE_PROMPT : BUILD_MODE_PROMPT}\n--- END MODE ---\n`;
+    const modePrompt = mode === 'plan'
+        ? `${PLAN_MODE_PROMPT}${supabaseContext ? `\n\n${PLAN_MODE_SUPABASE_PROMPT}` : ''}`
+        : buildPhase === 'backend'
+            ? BUILD_BACKEND_PHASE_PROMPT
+            : buildPhase === 'ui'
+                ? BUILD_UI_PHASE_PROMPT
+                : BUILD_MODE_PROMPT;
+    enhanced += `\n\n--- CONVERSATION MODE ---\n${modePrompt}\n--- END MODE ---\n`;
     if (mode === 'build' && savedPlanContext) {
         enhanced += '\n--- APPROVED PLAN CONTEXT ---\n';
         enhanced += `${savedPlanContext}\n`;
         enhanced += '--- END APPROVED PLAN CONTEXT ---\n';
+    }
+    if (mode === 'build' && savedSupabasePlanExcerpt) {
+        enhanced += '\n--- APPROVED SUPABASE BACKEND PLAN (preserve migrations & RLS) ---\n';
+        enhanced += `${savedSupabasePlanExcerpt}\n`;
+        enhanced += '--- END SUPABASE BACKEND PLAN ---\n';
     }
     if (figmaContexts.length > 0) {
         enhanced += '\n--- FIGMA DESIGN CONTEXT ---\n';
@@ -287,12 +346,6 @@ export const buildEnhancedSystemPrompt = (
         enhanced += '\n--- END OF PROJECT FILES ---\n';
     }
     return enhanced;
-};
-
-export const normalizePlanContext = (responseText: string): string | null => {
-    const stripped = stripBoltTags(responseText).trim();
-    if (stripped.length < PLAN_CONTEXT_MIN_CHARS) return null;
-    return stripped.slice(0, MAX_PLAN_CONTEXT_CHARS);
 };
 
 // ── Bolt protocol parsing helpers (unchanged from previous service) ──
@@ -497,8 +550,10 @@ export class ChatService {
         rawStitchContext: StitchContextInput | null = null,
         rawSupabaseContext: SupabaseContextInput | null = null,
         logContext: ChatLogContext = {},
+        buildPhaseParam: string | null = null,
     ): Promise<{ stream: AsyncGenerator<string>; threadId: string }> {
         const conversationMode = normalizeMode(modeParam);
+        const buildPhase = normalizeBuildPhase(buildPhaseParam);
         const attachments = sanitizeAttachments(rawAttachments);
         const hasFigma = Array.isArray(rawFigmaLinks) && rawFigmaLinks.length > 0;
         const hasStitch = !!(rawStitchContext?.projectId || rawStitchContext?.prompt || rawStitchContext?.screenId);
@@ -589,8 +644,10 @@ export class ChatService {
         }));
 
         const { context: supabaseContext, mcpConfig: supabaseMcpConfig } = supabaseIntegration;
-        const shouldResolveSupabaseMcp = conversationMode === 'build' && supabaseMcpConfig && (
-            hasSupabaseMcp || !!supabaseContext
+        const shouldResolveSupabaseMcp = supabaseMcpConfig && (
+            hasSupabaseMcp
+            || !!supabaseContext
+            || conversationMode === 'plan'
         );
 
         const [figmaContexts, stitchDesignContext, supabaseMcpDesignContext] = await Promise.all([
@@ -631,6 +688,8 @@ export class ChatService {
             stitchDesignContext,
             supabaseContext,
             supabaseMcpDesignContext,
+            savedPlanContext?.supabasePlanExcerpt ?? null,
+            buildPhase,
         );
 
         const messages = recentRows.map((m) => ({
@@ -785,13 +844,14 @@ export class ChatService {
                     tx,
                 );
                 if (mode === 'plan') {
-                    const planContext = normalizePlanContext(displayContent);
-                    if (planContext && ctx.internalUserId) {
+                    const normalizedPlan = normalizePlanContext(stripBoltTags(displayContent));
+                    if (normalizedPlan && ctx.internalUserId) {
                         await planContextsRepo.upsertPlanContext(
                             {
                                 threadId,
                                 userId: ctx.internalUserId,
-                                planContext,
+                                planContext: normalizedPlan.planContext,
+                                supabasePlanExcerpt: normalizedPlan.supabaseExcerpt,
                                 sourceMessageId: assistantMessageId,
                             },
                             tx,

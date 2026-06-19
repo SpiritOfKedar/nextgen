@@ -1,14 +1,21 @@
 import { Request, Response } from 'express';
 import { ChatService, ThreadAccessError } from '../services/chatService';
+import {
+    PromptEnhancementService,
+    enhanceUserPrompt,
+    PROMPT_ENHANCEMENT_MODEL_ID,
+    type PromptEnhancementMode,
+} from '../services/promptEnhancementService';
 import { log, errorFields } from '../lib/logger';
 
 const chatService = new ChatService();
+const promptEnhancementService = new PromptEnhancementService();
 export { chatService };
 const VALID_MODES = new Set(['plan', 'build']);
 
 export const chatController = {
     async sendMessage(req: Request, res: Response) {
-        const { message, threadId, model, attachments, mode, figmaLinks, stitchContext, supabaseContext } = req.body;
+            const { message, threadId, model, attachments, mode, figmaLinks, stitchContext, supabaseContext, buildPhase } = req.body;
         const conversationMode = VALID_MODES.has(mode) ? mode : 'build';
 
         if (!message) {
@@ -45,6 +52,7 @@ export const chatController = {
                 stitchInput,
                 supabaseInput,
                 { requestId: req.requestId, internalUserId: userId },
+                typeof buildPhase === 'string' ? buildPhase : null,
             );
 
             // Set headers for SSE/Streaming only after we have a valid stream
@@ -226,6 +234,45 @@ export const chatController = {
                 return res.status(404).json({ error: error.message });
             }
             res.status(500).json({ error: 'Failed to delete thread' });
+        }
+    },
+
+    async enhancePrompt(req: Request, res: Response) {
+        const { prompt, mode } = req.body;
+
+        if (!prompt || typeof prompt !== 'string' || !prompt.trim()) {
+            return res.status(400).json({ error: 'Prompt is required' });
+        }
+        if (prompt.length > 8_000) {
+            return res.status(400).json({ error: 'Prompt is too long (max 8000 characters)' });
+        }
+
+        const conversationMode: PromptEnhancementMode = VALID_MODES.has(mode) ? mode : 'build';
+
+        try {
+            if (!req.user) {
+                return res.status(401).json({ error: 'Unauthorized' });
+            }
+
+            const enhanced = await enhanceUserPrompt(
+                promptEnhancementService,
+                prompt.trim(),
+                conversationMode,
+            );
+
+            res.json({
+                enhanced,
+                model: PROMPT_ENHANCEMENT_MODEL_ID,
+            });
+        } catch (error) {
+            log.error('chat.enhance_prompt_controller_failed', {
+                requestId: req.requestId,
+                internalUserId: req.user?.id,
+                ...errorFields(error),
+            });
+            res.status(500).json({
+                error: error instanceof Error ? error.message : 'Failed to enhance prompt',
+            });
         }
     },
 };

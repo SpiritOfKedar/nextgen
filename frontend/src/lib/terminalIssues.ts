@@ -81,8 +81,18 @@ const PATTERNS: PatternRule[] = [
     ],
   },
   {
+    code: 'npm_cache_eacces',
+    regex: /EACCES|EPERM[\s\S]*npm-cache|cache folder contains root-owned files|Your cache folder contains root-owned files/i,
+    confidence: 0.97,
+    message: 'npm cannot write to its cache directory (permission denied).',
+    diagnosticHints: [
+      'Platform auto-creates a project-local .npm-cache — retry install after cache path fix.',
+      'Do not suggest chown on host paths; WebContainer uses in-sandbox directories only.',
+    ],
+  },
+  {
     code: 'wrong_working_directory',
-    regex: /EACCES|ENOTDIR|spawn ENOENT[\s\S]*cwd/i,
+    regex: /ENOTDIR|spawn ENOENT[\s\S]*cwd/i,
     confidence: 0.82,
     message: 'Shell may be running in the wrong project directory.',
     diagnosticHints: [

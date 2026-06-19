@@ -20,6 +20,8 @@ const jsonLarge = express.json({ limit: '10mb' });
 // @ts-ignore
 router.post('/chat', jsonLarge, authMiddleware, chatController.sendMessage);
 // @ts-ignore
+router.post('/chat/enhance-prompt', jsonDefault, authMiddleware, chatController.enhancePrompt);
+// @ts-ignore
 router.post('/terminal/:threadId/events', jsonLarge, authMiddleware, terminalController.appendEvents);
 // @ts-ignore
 router.put('/sandbox/dependencies/:fingerprint', jsonLarge, authMiddleware, sandboxController.putDependencyPlan);

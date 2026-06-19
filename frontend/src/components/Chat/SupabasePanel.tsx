@@ -12,8 +12,11 @@ export type SupabaseContextPayload = {
     docsQuery?: string;
 };
 
+type SupabaseConnectionMode = 'none' | 'client' | 'database';
+
 interface SupabaseStatus {
     connected: boolean;
+    connectionMode?: SupabaseConnectionMode;
     projectUrl?: string;
     projectRef?: string | null;
     migrationsEnabled?: boolean;
@@ -195,6 +198,83 @@ export const SupabasePanel: React.FC<SupabasePanelProps> = ({
 
     if (!isOpen) return null;
 
+    const credentialsForm = (
+        <div className="space-y-2">
+            <div className="space-y-1">
+                <label className="block text-[10px] uppercase tracking-wider text-zinc-500">Project URL</label>
+                <input
+                    type="text"
+                    value={projectUrl}
+                    onChange={(e) => setProjectUrl(e.target.value)}
+                    placeholder="https://xxxx.supabase.co"
+                    className={fieldClass}
+                />
+            </div>
+            <div className="space-y-1">
+                <label className="block text-[10px] uppercase tracking-wider text-zinc-500">Anon / publishable key</label>
+                <input
+                    type="password"
+                    value={anonKey}
+                    onChange={(e) => setAnonKey(e.target.value)}
+                    placeholder="eyJ..."
+                    className={fieldClass}
+                />
+            </div>
+            <div className="space-y-1">
+                <label className="block text-[10px] uppercase tracking-wider text-zinc-500">
+                    MCP access token (optional)
+                </label>
+                <input
+                    type="password"
+                    value={mcpAccessToken}
+                    onChange={(e) => setMcpAccessToken(e.target.value)}
+                    placeholder="sbp_... — enables live schema via MCP"
+                    className={fieldClass}
+                />
+            </div>
+            <div className="space-y-1">
+                <label className="block text-[10px] uppercase tracking-wider text-zinc-500">
+                    Service role key (optional)
+                </label>
+                <input
+                    type="password"
+                    value={serviceRoleKey}
+                    onChange={(e) => setServiceRoleKey(e.target.value)}
+                    placeholder="Stored on server only"
+                    className={fieldClass}
+                />
+            </div>
+            <div className="space-y-1">
+                <label className="block text-[10px] uppercase tracking-wider text-zinc-500">
+                    Database URL (enables migrations)
+                </label>
+                <input
+                    type="password"
+                    value={databaseUrl}
+                    onChange={(e) => setDatabaseUrl(e.target.value)}
+                    placeholder="postgresql://...pooler.supabase.com:5432/postgres"
+                    className={fieldClass}
+                />
+            </div>
+
+            {error && (
+                <div className="flex items-start gap-2 rounded-lg bg-red-950/30 border border-red-500/20 px-3 py-2">
+                    <AlertCircle className="h-3.5 w-3.5 text-red-400 shrink-0 mt-0.5" />
+                    <span className="text-[11px] text-red-200">{error}</span>
+                </div>
+            )}
+
+            <button
+                onClick={handleConnect}
+                disabled={connecting || !projectUrl.trim() || !anonKey.trim()}
+                className="w-full rounded-lg bg-emerald-600 px-3 py-2.5 text-xs font-medium text-white hover:bg-emerald-500 disabled:opacity-50 transition-colors flex items-center justify-center gap-2"
+            >
+                {connecting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+                {connecting ? 'Validating…' : 'Save connection'}
+            </button>
+        </div>
+    );
+
     const panel = (
         <AnimatePresence>
             <motion.div
@@ -229,6 +309,9 @@ export const SupabasePanel: React.FC<SupabasePanelProps> = ({
                                 <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400 shrink-0" />
                                 <span className="text-[11px] text-emerald-200 font-medium truncate">
                                     {status.projectRef || 'Connected'}
+                                    <span className="ml-1 text-emerald-400/70">
+                                        · {status.migrationsEnabled ? 'database + client' : 'client only'}
+                                    </span>
                                 </span>
                                 <button
                                     onClick={handleDisconnect}
@@ -237,6 +320,28 @@ export const SupabasePanel: React.FC<SupabasePanelProps> = ({
                                     Disconnect
                                 </button>
                             </div>
+
+                            {!status.migrationsEnabled && (
+                                <div className="space-y-2">
+                                    <div className="rounded-lg border border-amber-500/20 bg-amber-950/20 px-3 py-2 text-[11px] text-amber-200 leading-relaxed">
+                                        Client connected — auth and data work in the preview. Add a database URL
+                                        to enable schema migrations for backend features. Building never waits on this.
+                                    </div>
+                                    {!showForm ? (
+                                        <button
+                                            onClick={() => {
+                                                setProjectUrl(status.projectUrl || projectUrl);
+                                                setShowForm(true);
+                                            }}
+                                            className="w-full rounded-lg border border-amber-500/30 px-3 py-2 text-[11px] font-medium text-amber-200 hover:bg-amber-900/30 transition-colors"
+                                        >
+                                            Add database URL
+                                        </button>
+                                    ) : (
+                                        credentialsForm
+                                    )}
+                                </div>
+                            )}
 
                             <div className="space-y-1.5 text-[11px] text-zinc-400">
                                 <div className="flex items-center justify-between">
@@ -340,80 +445,7 @@ export const SupabasePanel: React.FC<SupabasePanelProps> = ({
                                     Connect Supabase
                                 </button>
                             ) : (
-                                <div className="space-y-2">
-                                    <div className="space-y-1">
-                                        <label className="block text-[10px] uppercase tracking-wider text-zinc-500">Project URL</label>
-                                        <input
-                                            type="text"
-                                            value={projectUrl}
-                                            onChange={(e) => setProjectUrl(e.target.value)}
-                                            placeholder="https://xxxx.supabase.co"
-                                            className={fieldClass}
-                                        />
-                                    </div>
-                                    <div className="space-y-1">
-                                        <label className="block text-[10px] uppercase tracking-wider text-zinc-500">Anon / publishable key</label>
-                                        <input
-                                            type="password"
-                                            value={anonKey}
-                                            onChange={(e) => setAnonKey(e.target.value)}
-                                            placeholder="eyJ..."
-                                            className={fieldClass}
-                                        />
-                                    </div>
-                                    <div className="space-y-1">
-                                        <label className="block text-[10px] uppercase tracking-wider text-zinc-500">
-                                            MCP access token (optional)
-                                        </label>
-                                        <input
-                                            type="password"
-                                            value={mcpAccessToken}
-                                            onChange={(e) => setMcpAccessToken(e.target.value)}
-                                            placeholder="sbp_... — enables live schema via MCP"
-                                            className={fieldClass}
-                                        />
-                                    </div>
-                                    <div className="space-y-1">
-                                        <label className="block text-[10px] uppercase tracking-wider text-zinc-500">
-                                            Service role key (optional)
-                                        </label>
-                                        <input
-                                            type="password"
-                                            value={serviceRoleKey}
-                                            onChange={(e) => setServiceRoleKey(e.target.value)}
-                                            placeholder="Stored on server only"
-                                            className={fieldClass}
-                                        />
-                                    </div>
-                                    <div className="space-y-1">
-                                        <label className="block text-[10px] uppercase tracking-wider text-zinc-500">
-                                            Database URL (enables migrations)
-                                        </label>
-                                        <input
-                                            type="password"
-                                            value={databaseUrl}
-                                            onChange={(e) => setDatabaseUrl(e.target.value)}
-                                            placeholder="postgresql://...pooler.supabase.com:5432/postgres"
-                                            className={fieldClass}
-                                        />
-                                    </div>
-
-                                    {error && (
-                                        <div className="flex items-start gap-2 rounded-lg bg-red-950/30 border border-red-500/20 px-3 py-2">
-                                            <AlertCircle className="h-3.5 w-3.5 text-red-400 shrink-0 mt-0.5" />
-                                            <span className="text-[11px] text-red-200">{error}</span>
-                                        </div>
-                                    )}
-
-                                    <button
-                                        onClick={handleConnect}
-                                        disabled={connecting || !projectUrl.trim() || !anonKey.trim()}
-                                        className="w-full rounded-lg bg-emerald-600 px-3 py-2.5 text-xs font-medium text-white hover:bg-emerald-500 disabled:opacity-50 transition-colors flex items-center justify-center gap-2"
-                                    >
-                                        {connecting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
-                                        {connecting ? 'Validating…' : 'Save connection'}
-                                    </button>
-                                </div>
+                                credentialsForm
                             )}
                         </div>
                     )}

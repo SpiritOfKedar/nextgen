@@ -1,10 +1,29 @@
-import { atom } from 'jotai';
+import { atom, getDefaultStore } from 'jotai';
 import { WebContainer } from '@webcontainer/api';
 
 export const webContainerAtom = atom<WebContainer | null>(null);
 export const serverUrlAtom = atom<string | null>(null);
 export const previewStatusAtom = atom<'idle' | 'booting' | 'starting' | 'ready' | 'error'>('idle');
 export const previewStatusMessageAtom = atom<string | null>(null);
+
+/** Bumped to force the preview iframe to reload without restarting the sandbox. */
+export const previewRefreshNonceAtom = atom(0);
+/** True when project files changed since the preview iframe last loaded. */
+export const previewHasPendingChangesAtom = atom(false);
+
+const previewStore = getDefaultStore();
+
+export function markPreviewStale() {
+    previewStore.set(previewHasPendingChangesAtom, true);
+}
+
+export function requestPreviewRefresh() {
+    previewStore.set(previewRefreshNonceAtom, previewStore.get(previewRefreshNonceAtom) + 1);
+}
+
+export function clearPreviewPendingChanges() {
+    previewStore.set(previewHasPendingChangesAtom, false);
+}
 export interface SandboxRuntimeMetadata {
     threadId: string;
     depFingerprint: string;

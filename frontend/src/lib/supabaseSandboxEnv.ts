@@ -7,6 +7,15 @@ export interface SupabaseClientEnv {
     anonKey: string;
 }
 
+export type SupabaseConnectionMode = 'none' | 'client' | 'database';
+
+export interface SupabaseConnectionStatus {
+    connected: boolean;
+    connectionMode?: SupabaseConnectionMode;
+    migrationsEnabled?: boolean;
+    projectRef?: string | null;
+}
+
 export interface SupabaseMigrationInput {
     migrationId: string;
     sql: string;
@@ -18,7 +27,28 @@ export interface SupabaseMigrationResult {
     detail?: string;
 }
 
-/** Fetch the browser-safe Supabase client env for the signed-in user, or null if not connected. */
+/** Fetch connection status including whether server-side migrations are enabled. */
+export const fetchSupabaseStatus = async (authToken: string): Promise<SupabaseConnectionStatus> => {
+    try {
+        const res = await fetch(`${API_URL}/supabase/status`, {
+            headers: { Authorization: `Bearer ${authToken}` },
+        });
+        if (!res.ok) return { connected: false, connectionMode: 'none' };
+        const data = await res.json();
+        const connected = data?.connected === true;
+        const migrationsEnabled = data?.migrationsEnabled === true;
+        return {
+            connected,
+            connectionMode: (data?.connectionMode as SupabaseConnectionMode)
+                ?? (connected ? (migrationsEnabled ? 'database' : 'client') : 'none'),
+            migrationsEnabled,
+            projectRef: data?.projectRef ?? null,
+        };
+    } catch {
+        return { connected: false, connectionMode: 'none' };
+    }
+};
+
 export const fetchSupabaseEnv = async (authToken: string): Promise<SupabaseClientEnv | null> => {
     try {
         const res = await fetch(`${API_URL}/supabase/env`, {

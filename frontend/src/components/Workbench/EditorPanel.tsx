@@ -12,7 +12,7 @@ import {
     fileSystemAtom,
 } from '../../store/fileSystem';
 import type { FolderNode, FileSystemItem } from '../../store/fileSystem';
-import { webContainerAtom } from '../../store/webContainer';
+import { webContainerAtom, markPreviewStale } from '../../store/webContainer';
 
 interface EditorPanelProps {
     readOnly?: boolean;
@@ -80,7 +80,9 @@ export const EditorPanel: React.FC<EditorPanelProps> = ({
 
         if (webContainerInstance) {
             const wcPath = `/${activeTab.path.replace(/^\//, '')}`;
-            webContainerInstance.fs.writeFile(wcPath, value).catch((err) => {
+            webContainerInstance.fs.writeFile(wcPath, value).then(() => {
+                markPreviewStale();
+            }).catch((err) => {
                 console.error(`[Editor] Failed to write ${wcPath}:`, err);
             });
         }

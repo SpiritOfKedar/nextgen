@@ -7,6 +7,7 @@ const {
     resolveAutoModel,
     buildEnhancedSystemPrompt,
     normalizePlanContext,
+    MAX_PLAN_CONTEXT_CHARS,
     AUTO_MODEL_ID,
 } = require('../dist/services/chatService');
 
@@ -53,8 +54,24 @@ test('buildEnhancedSystemPrompt injects plan context only in build mode', () => 
 
 test('normalizePlanContext rejects tiny plans and trims large content', () => {
     assert.equal(normalizePlanContext('short'), null);
-    const big = `${'A'.repeat(200)}${'B'.repeat(20000)}`;
+    const big = `${'A'.repeat(200)}${'B'.repeat(30000)}`;
     const normalized = normalizePlanContext(big);
     assert.ok(normalized);
-    assert.ok(normalized.length <= 12000);
+    assert.ok(normalized.planContext.length <= MAX_PLAN_CONTEXT_CHARS);
+});
+
+test('buildEnhancedSystemPrompt includes supabase plan excerpt in build mode', () => {
+    const prompt = buildEnhancedSystemPrompt(
+        'BASE',
+        [],
+        'build',
+        'Main plan body',
+        [],
+        null,
+        { projectUrl: 'https://x.supabase.co', projectRef: 'x', migrationsEnabled: true, schema: null, appliedMigrations: [] },
+        null,
+        'create table public.posts (id uuid primary key);',
+    );
+    assert.match(prompt, /APPROVED SUPABASE BACKEND PLAN/);
+    assert.match(prompt, /create table public\.posts/i);
 });
