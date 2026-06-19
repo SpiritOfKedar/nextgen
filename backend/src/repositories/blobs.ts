@@ -19,6 +19,42 @@ const blobCache = new LRUCache<string, string>({
 const REDIS_BLOB_MAX_BYTES = 512 * 1024;
 const REDIS_BLOB_TTL_SECONDS = 7 * 24 * 60 * 60;
 
+const DEFAULT_BLOB_MATERIALIZE_CONCURRENCY = 10;
+const MAX_BLOB_MATERIALIZE_CONCURRENCY = 32;
+
+const blobMaterializeConcurrency = (): number => {
+    const parsed = Number(process.env.BLOB_MATERIALIZE_CONCURRENCY);
+    if (!Number.isFinite(parsed) || parsed < 1) return DEFAULT_BLOB_MATERIALIZE_CONCURRENCY;
+    return Math.min(Math.floor(parsed), MAX_BLOB_MATERIALIZE_CONCURRENCY);
+};
+
+/** Run async work over `items` with at most `concurrency` in flight. */
+const mapWithConcurrency = async <T, R>(
+    items: readonly T[],
+    concurrency: number,
+    fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> => {
+    if (items.length === 0) return [];
+    const results = new Array<R>(items.length);
+    let nextIndex = 0;
+
+    const worker = async (): Promise<void> => {
+        while (true) {
+            const index = nextIndex;
+            nextIndex += 1;
+            if (index >= items.length) return;
+            results[index] = await fn(items[index], index);
+        }
+    };
+
+    const workers = Array.from(
+        { length: Math.min(concurrency, items.length) },
+        () => worker(),
+    );
+    await Promise.all(workers);
+    return results;
+};
+
 const blobRedisKey = (sha: string): string => `blob:${sha}`;
 
 const canCacheInRedis = (content: string): boolean =>
@@ -76,12 +112,21 @@ export const putBlob = async (content: string, tx?: Tx): Promise<string> => {
     return sha;
 };
 
-const materializeBlob = async (row: CodeBlobRow): Promise<string> => {
+/** Hash + store many blobs concurrently (content-addressed, idempotent). */
+export const putBlobs = async (contents: readonly string[]): Promise<string[]> =>
+    mapWithConcurrency(contents, blobMaterializeConcurrency(), (content) => putBlob(content));
+
+type MaterializeBlobOptions = {
+    /** Caller already batch-checked Redis (e.g. getBlobs MGET). */
+    skipRedis?: boolean;
+};
+
+const materializeBlob = async (row: CodeBlobRow, options?: MaterializeBlobOptions): Promise<string> => {
     const sha = row.sha256;
     const cached = blobCache.get(sha);
     if (cached !== undefined) return cached;
 
-    if (isRedisEnabled()) {
+    if (!options?.skipRedis && isRedisEnabled()) {
         const fromRedis = await redisGet(blobRedisKey(sha));
         if (fromRedis !== null) {
             blobCache.set(sha, fromRedis);
@@ -168,10 +213,18 @@ export const getBlobs = async (shas: string[], tx?: Tx): Promise<Map<string, str
     );
     const bySha = new Map(result.rows.map((r) => [r.sha256, r]));
 
-    for (const sha of needRedis) {
-        const row = bySha.get(sha);
-        if (!row) throw new Error(`Blob not found: ${sha}`);
-        out.set(sha, await materializeBlob(row));
+    const pairs = await mapWithConcurrency(
+        needRedis,
+        blobMaterializeConcurrency(),
+        async (sha) => {
+            const row = bySha.get(sha);
+            if (!row) throw new Error(`Blob not found: ${sha}`);
+            const content = await materializeBlob(row, { skipRedis: true });
+            return [sha, content] as const;
+        },
+    );
+    for (const [sha, content] of pairs) {
+        out.set(sha, content);
     }
     return out;
 };

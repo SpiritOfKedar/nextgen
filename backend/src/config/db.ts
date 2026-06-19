@@ -5,7 +5,12 @@ import { checkB2Connectivity } from '../services/b2StorageService';
 import { isB2Enabled } from './b2';
 
 let pool: Pool | null = null;
+let appReady = false;
+let bootError: Error | null = null;
+
 const DEFAULT_DB_CONNECT_TIMEOUT_MS = 10_000;
+const DEFAULT_PG_POOL_MAX = 25;
+const MAX_PG_POOL_MAX = 100;
 
 const parseTimeoutMs = (raw: string | undefined, fallbackMs: number): number => {
     const parsed = Number(raw);
@@ -17,6 +22,18 @@ const DB_CONNECT_TIMEOUT_MS = parseTimeoutMs(process.env.DB_CONNECT_TIMEOUT_MS, 
 
 /** Session statement_timeout (ms). Chat prep can include DDL-heavy first touches. */
 const DB_STATEMENT_TIMEOUT_MS = parseTimeoutMs(process.env.DB_STATEMENT_TIMEOUT_MS, 120_000);
+
+const parsePoolMax = (raw: string | undefined): number => {
+    const parsed = Number(raw);
+    if (!Number.isFinite(parsed) || parsed < 1) return DEFAULT_PG_POOL_MAX;
+    return Math.min(Math.floor(parsed), MAX_PG_POOL_MAX);
+};
+
+const PG_POOL_MAX = parsePoolMax(process.env.PG_POOL_MAX);
+
+export const isAppReady = (): boolean => appReady;
+
+export const getBootError = (): Error | null => bootError;
 
 const withTimeout = async <T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> => {
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -65,7 +82,7 @@ const createPgPool = (connectionString: string): Pool => {
     const nextPool = new Pool({
         connectionString: sanitizePgConnectionString(connectionString),
         ssl: { rejectUnauthorized: false },
-        max: 10,
+        max: PG_POOL_MAX,
         idleTimeoutMillis: 30_000,
         connectionTimeoutMillis: DB_CONNECT_TIMEOUT_MS,
     });
@@ -104,16 +121,25 @@ export const getPool = (): Pool => {
 };
 
 export const connectDB = async (): Promise<void> => {
-    const activePool = getPool();
+    try {
+        const activePool = getPool();
 
-    log.info('db.connect_start', { timeoutMs: DB_CONNECT_TIMEOUT_MS });
-    await pingPool(activePool);
-    log.info('db.postgres_connected');
+        log.info('db.connect_start', { timeoutMs: DB_CONNECT_TIMEOUT_MS, poolMax: PG_POOL_MAX });
+        await pingPool(activePool);
+        log.info('db.postgres_connected');
 
-    await ensureRuntimeSchema(getPool());
+        await ensureRuntimeSchema(getPool());
 
-    if (isB2Enabled()) {
-        void checkB2Connectivity();
+        if (isB2Enabled()) {
+            void checkB2Connectivity();
+        }
+
+        appReady = true;
+        bootError = null;
+        log.info('db.app_ready');
+    } catch (err) {
+        bootError = err instanceof Error ? err : new Error(String(err));
+        throw err;
     }
 };
 

@@ -3,6 +3,7 @@ import { ChatService, ThreadAccessError } from '../services/chatService';
 import { log, errorFields } from '../lib/logger';
 
 const chatService = new ChatService();
+export { chatService };
 const VALID_MODES = new Set(['plan', 'build']);
 
 export const chatController = {
@@ -66,6 +67,9 @@ export const chatController = {
             });
             // Only send error JSON if headers haven't been sent yet
             if (!res.headersSent) {
+                if (error instanceof ThreadAccessError) {
+                    return res.status(404).json({ error: error.message });
+                }
                 res.status(500).json({ error: error instanceof Error ? error.message : 'Internal Server Error' });
             } else {
                 res.end();

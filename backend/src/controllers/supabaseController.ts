@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import { getPool } from '../config/db';
 import { log, errorFields } from '../lib/logger';
+import { createConnectionCache, loadCachedConnection } from '../lib/integrationConnectionCache';
 import {
     parseProjectRef,
     validateDatabaseUrl,
@@ -23,13 +24,20 @@ interface SupabaseConnectionRow {
     enabled: boolean;
 }
 
-const loadUserConnection = async (userId: string): Promise<SupabaseConnectionRow | null> => {
-    const { rows } = await getPool().query(
-        `SELECT project_url, anon_key, service_role_key, database_url, mcp_access_token, project_ref, schema_snapshot, enabled
-         FROM public.user_supabase_connections WHERE user_id = $1`,
-        [userId],
-    );
-    return rows[0] ?? null;
+const supabaseConnectionCache = createConnectionCache<SupabaseConnectionRow>();
+
+const loadUserConnection = async (userId: string): Promise<SupabaseConnectionRow | null> =>
+    loadCachedConnection(supabaseConnectionCache, userId, async () => {
+        const { rows } = await getPool().query<SupabaseConnectionRow>(
+            `SELECT project_url, anon_key, service_role_key, database_url, mcp_access_token, project_ref, schema_snapshot, enabled
+             FROM public.user_supabase_connections WHERE user_id = $1`,
+            [userId],
+        );
+        return rows[0] ?? null;
+    });
+
+const invalidateSupabaseConnectionCache = (userId: string): void => {
+    supabaseConnectionCache.invalidate(userId);
 };
 
 const normalizeProjectUrl = (raw: string): string => raw.trim().replace(/\/+$/, '');
@@ -160,6 +168,8 @@ export const supabaseController = {
                 ],
             );
 
+            invalidateSupabaseConnectionCache(req.user.id);
+
             log.info('supabase.connected', {
                 requestId: req.requestId,
                 internalUserId: req.user.id,
@@ -190,6 +200,7 @@ export const supabaseController = {
                 `DELETE FROM public.user_supabase_connections WHERE user_id = $1`,
                 [req.user.id],
             );
+            invalidateSupabaseConnectionCache(req.user.id);
             return res.json({ connected: false });
         } catch (error) {
             log.error('supabase.disconnect_failed', { requestId: req.requestId, ...errorFields(error) });
@@ -282,6 +293,7 @@ export const supabaseController = {
                         `UPDATE public.user_supabase_connections SET schema_snapshot = $2, updated_at = NOW() WHERE user_id = $1`,
                         [req.user.id, JSON.stringify(schemaSnapshot)],
                     );
+                    invalidateSupabaseConnectionCache(req.user.id);
                 }
             }
 
@@ -331,16 +343,8 @@ export interface SupabasePromptContext {
 }
 
 export const getUserSupabaseContext = async (userId: string): Promise<SupabasePromptContext | null> => {
-    const conn = await loadUserConnection(userId);
-    if (!conn || !conn.enabled) return null;
-    const appliedMigrations = await listAppliedMigrationIds(userId);
-    return {
-        projectUrl: conn.project_url,
-        projectRef: conn.project_ref,
-        migrationsEnabled: Boolean(conn.database_url),
-        schema: conn.schema_snapshot,
-        appliedMigrations,
-    };
+    const { context } = await getUserSupabaseIntegration(userId);
+    return context;
 };
 
 const getMcpConfigFromConnection = (conn: SupabaseConnectionRow | null) => {
@@ -354,8 +358,34 @@ const getMcpConfigFromConnection = (conn: SupabaseConnectionRow | null) => {
 };
 
 export const getUserSupabaseMcpConfig = async (userId: string) => {
+    const { mcpConfig } = await getUserSupabaseIntegration(userId);
+    return mcpConfig;
+};
+
+export type SupabaseMcpConfig = NonNullable<ReturnType<typeof getMcpConfigFromConnection>>;
+
+export interface SupabaseIntegration {
+    context: SupabasePromptContext | null;
+    mcpConfig: SupabaseMcpConfig | undefined;
+}
+
+/** Single load of the Supabase connection row + migrations for chat hot path. */
+export const getUserSupabaseIntegration = async (userId: string): Promise<SupabaseIntegration> => {
     const conn = await loadUserConnection(userId);
-    return getMcpConfigFromConnection(conn);
+    if (!conn || !conn.enabled) {
+        return { context: null, mcpConfig: undefined };
+    }
+    const appliedMigrations = await listAppliedMigrationIds(userId);
+    return {
+        context: {
+            projectUrl: conn.project_url,
+            projectRef: conn.project_ref,
+            migrationsEnabled: Boolean(conn.database_url),
+            schema: conn.schema_snapshot,
+            appliedMigrations,
+        },
+        mcpConfig: getMcpConfigFromConnection(conn),
+    };
 };
 
 export type { SupabaseContextInput };

@@ -25,7 +25,7 @@ import {
     StitchContextInput,
 } from './stitchContextService';
 import { getUserStitchMcpConfig } from '../controllers/stitchController';
-import { getUserSupabaseContext, getUserSupabaseMcpConfig, SupabasePromptContext } from '../controllers/supabaseController';
+import { getUserSupabaseIntegration, type SupabasePromptContext } from '../controllers/supabaseController';
 import {
     supabaseMcpContextService,
     SupabaseMcpDesignContext,
@@ -518,7 +518,10 @@ export class ChatService {
         // 1. Resolve / create thread (outside the per-thread lock since a brand
         //    new thread can't have concurrent traffic yet).
         let threadId = threadIdParam;
-        if (!threadId) {
+        if (threadId) {
+            const existing = await threadsRepo.findByIdForUser(threadId, userId);
+            if (!existing) throw new ThreadAccessError();
+        } else {
             const title = messageContent.substring(0, 50) + (messageContent.length > 50 ? '...' : '');
             const thread = await threadsRepo.create(userId, title);
             threadId = thread.id;
@@ -559,51 +562,66 @@ export class ChatService {
         });
 
         // 3. Build context: current snapshot + recent message tail.
-        const snapshotRows = await fileVersionsRepo.currentSnapshot(threadId);
+        const hasStitchInput = !!(rawStitchContext?.projectId || rawStitchContext?.prompt || rawStitchContext?.screenId);
+
+        const [
+            snapshotRows,
+            savedPlanContext,
+            userMcpConfig,
+            stitchMcpConfig,
+            supabaseIntegration,
+            recentRows,
+        ] = await Promise.all([
+            fileVersionsRepo.currentSnapshot(threadId),
+            conversationMode === 'build'
+                ? planContextsRepo.getPlanContext(threadId, userId)
+                : Promise.resolve(null),
+            hasFigma ? getUserFigmaMcpConfig(userId) : Promise.resolve(undefined),
+            hasStitchInput ? getUserStitchMcpConfig(userId) : Promise.resolve(undefined),
+            getUserSupabaseIntegration(userId),
+            messagesRepo.recentForThread(threadId, 10),
+        ]);
+
         const blobMap = await blobsRepo.getBlobs(snapshotRows.map((r) => r.current_blob_sha256));
         const fileSnapshot = snapshotRows.map((r) => ({
             filePath: r.file_path,
             content: blobMap.get(r.current_blob_sha256) ?? '',
         }));
 
-        const savedPlanContext = conversationMode === 'build'
-            ? await planContextsRepo.getPlanContext(threadId, userId)
-            : null;
-        const userMcpConfig = await getUserFigmaMcpConfig(userId);
-        const figmaContexts = await figmaDesignContextService.resolveDesignContexts(rawFigmaLinks, {
-            requestId: logContext.requestId,
-            userId,
-            mcpConfig: userMcpConfig,
-        });
-        const stitchMcpConfig = await getUserStitchMcpConfig(userId);
-        const hasStitchInput = !!(rawStitchContext?.projectId || rawStitchContext?.prompt || rawStitchContext?.screenId);
-        const stitchDesignContext = hasStitchInput
-            ? await stitchContextService.resolveContext(rawStitchContext || {}, {
-                requestId: logContext.requestId,
-                userId,
-                mcpConfig: stitchMcpConfig,
-                defaultProjectId: stitchMcpConfig?.defaultProjectId ?? null,
-            })
-            : null;
-        const supabaseContext = await getUserSupabaseContext(userId);
-        const supabaseMcpConfig = await getUserSupabaseMcpConfig(userId);
+        const { context: supabaseContext, mcpConfig: supabaseMcpConfig } = supabaseIntegration;
         const shouldResolveSupabaseMcp = conversationMode === 'build' && supabaseMcpConfig && (
             hasSupabaseMcp || !!supabaseContext
         );
-        const supabaseMcpDesignContext = shouldResolveSupabaseMcp
-            ? await supabaseMcpContextService.resolveContext(
-                {
-                    fetchTables: rawSupabaseContext?.fetchTables ?? true,
-                    fetchAdvisors: rawSupabaseContext?.fetchAdvisors ?? true,
-                    docsQuery: rawSupabaseContext?.docsQuery,
-                },
-                {
+
+        const [figmaContexts, stitchDesignContext, supabaseMcpDesignContext] = await Promise.all([
+            figmaDesignContextService.resolveDesignContexts(rawFigmaLinks, {
+                requestId: logContext.requestId,
+                userId,
+                mcpConfig: userMcpConfig,
+            }),
+            hasStitchInput
+                ? stitchContextService.resolveContext(rawStitchContext || {}, {
                     requestId: logContext.requestId,
                     userId,
-                    mcpConfig: supabaseMcpConfig,
-                },
-            )
-            : null;
+                    mcpConfig: stitchMcpConfig,
+                    defaultProjectId: stitchMcpConfig?.defaultProjectId ?? null,
+                })
+                : Promise.resolve(null),
+            shouldResolveSupabaseMcp
+                ? supabaseMcpContextService.resolveContext(
+                    {
+                        fetchTables: rawSupabaseContext?.fetchTables ?? true,
+                        fetchAdvisors: rawSupabaseContext?.fetchAdvisors ?? true,
+                        docsQuery: rawSupabaseContext?.docsQuery,
+                    },
+                    {
+                        requestId: logContext.requestId,
+                        userId,
+                        mcpConfig: supabaseMcpConfig,
+                    },
+                )
+                : Promise.resolve(null),
+        ]);
         const enhancedSystemPrompt = buildEnhancedSystemPrompt(
             SYSTEM_PROMPT,
             fileSnapshot,
@@ -615,7 +633,6 @@ export class ChatService {
             supabaseMcpDesignContext,
         );
 
-        const recentRows = await messagesRepo.recentForThread(threadId, 10);
         const messages = recentRows.map((m) => ({
             role: m.role,
             content: m.content || '(no content)',
@@ -630,7 +647,7 @@ export class ChatService {
             }
         }
 
-        log.info('chat.context_built', {
+        log.debug('chat.context_built', {
             requestId: logContext.requestId,
             internalUserId: logContext.internalUserId ?? userId,
             threadId,
@@ -708,22 +725,23 @@ export class ChatService {
         ctx: ChatLogContext = {},
     ): AsyncGenerator<string> {
         const flusher = new ChunkFlusher(assistantMessageId);
-        let fullResponse = '';
+        const responseChunks: string[] = [];
 
         try {
             for await (const chunk of stream) {
-                fullResponse += chunk;
+                responseChunks.push(chunk);
                 flusher.push(chunk);
                 yield chunk;
             }
         } catch (err) {
+            const partialResponse = responseChunks.join('');
             log.error('chat.provider_stream_aborted', {
                 requestId: ctx.requestId,
                 internalUserId: ctx.internalUserId,
                 threadId,
                 assistantMessageId,
                 model: ctx.model,
-                responseChars: fullResponse.length,
+                responseChars: partialResponse.length,
                 ...errorFields(err),
             });
             await flusher.flushAndWait();
@@ -736,6 +754,7 @@ export class ChatService {
         }
 
         await flusher.flushAndWait();
+        const fullResponse = responseChunks.join('');
 
         // Finalize: parse, hash + upload blobs, version files, save shell cmds,
         // mark message complete — all in one transaction.
@@ -747,11 +766,13 @@ export class ChatService {
 
             // Hash + upload blobs OUTSIDE the transaction (Storage upload may
             // be slow; code_blobs row insert inside the upload is idempotent).
-            const fileShas: { filePath: string; sha: string }[] = [];
-            for (const f of extractedFiles) {
-                const sha = await blobsRepo.putBlob(f.content);
-                fileShas.push({ filePath: f.filePath, sha });
-            }
+            const blobShas = extractedFiles.length > 0
+                ? await blobsRepo.putBlobs(extractedFiles.map((f) => f.content))
+                : [];
+            const fileShas = extractedFiles.map((f, i) => ({
+                filePath: f.filePath,
+                sha: blobShas[i],
+            }));
 
             await withThreadLock(threadId, async (tx) => {
                 await messagesRepo.finalize(
@@ -780,14 +801,14 @@ export class ChatService {
                         await threadsRepo.touch(threadId, tx, { lastMode: 'plan' });
                     }
                 }
-                for (const { filePath, sha } of fileShas) {
-                    await fileVersionsRepo.insert(
-                        {
-                            threadId,
-                            messageId: assistantMessageId,
+                if (fileShas.length > 0) {
+                    await fileVersionsRepo.insertBatch(
+                        threadId,
+                        assistantMessageId,
+                        fileShas.map(({ filePath, sha }) => ({
                             filePath,
                             blobSha256: sha,
-                        },
+                        })),
                         tx,
                     );
                 }
@@ -798,6 +819,8 @@ export class ChatService {
                     await threadsRepo.touch(threadId, tx, { lastMode: 'build' });
                 }
             });
+
+            await chunksRepo.deleteForMessage(assistantMessageId);
             log.info('chat.message_finalized', {
                 requestId: ctx.requestId,
                 internalUserId: ctx.internalUserId,

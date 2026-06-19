@@ -3,13 +3,27 @@ import { getPool } from '../config/db';
 import { stitchMcpClient } from '../services/stitchMcpClient';
 import { stitchContextService } from '../services/stitchContextService';
 import { log, errorFields } from '../lib/logger';
+import { createConnectionCache, loadCachedConnection } from '../lib/integrationConnectionCache';
 
-const loadUserConnection = async (userId: string) => {
-    const { rows } = await getPool().query(
-        `SELECT api_key, default_project_id, enabled FROM public.user_stitch_connections WHERE user_id = $1`,
-        [userId],
-    );
-    return rows[0] ?? null;
+type StitchConnectionRow = {
+    api_key: string;
+    default_project_id: string | null;
+    enabled: boolean;
+};
+
+const stitchConnectionCache = createConnectionCache<StitchConnectionRow>();
+
+const loadUserConnection = async (userId: string): Promise<StitchConnectionRow | null> =>
+    loadCachedConnection(stitchConnectionCache, userId, async () => {
+        const { rows } = await getPool().query<StitchConnectionRow>(
+            `SELECT api_key, default_project_id, enabled FROM public.user_stitch_connections WHERE user_id = $1`,
+            [userId],
+        );
+        return rows[0] ?? null;
+    });
+
+const invalidateStitchConnectionCache = (userId: string): void => {
+    stitchConnectionCache.invalidate(userId);
 };
 
 export const stitchController = {
@@ -72,6 +86,7 @@ export const stitchController = {
                    updated_at = NOW()`,
                 [req.user.id, apiKey, defaultProjectId || null],
             );
+            invalidateStitchConnectionCache(req.user.id);
 
             log.info('stitch.connected', {
                 requestId: req.requestId,
@@ -93,6 +108,7 @@ export const stitchController = {
                 `DELETE FROM public.user_stitch_connections WHERE user_id = $1`,
                 [req.user.id],
             );
+            invalidateStitchConnectionCache(req.user.id);
             return res.json({ connected: false });
         } catch (error) {
             log.error('stitch.disconnect_failed', { requestId: req.requestId, ...errorFields(error) });

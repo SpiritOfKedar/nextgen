@@ -40,6 +40,40 @@ export const insert = async (
     return result.rows[0];
 };
 
+/**
+ * Append multiple file versions in one statement. Each path gets
+ * max(version)+1 within the batch (paths must be unique).
+ */
+export const insertBatch = async (
+    threadId: string,
+    messageId: string,
+    files: Omit<InsertFileVersionInput, 'threadId' | 'messageId'>[],
+    tx: Tx,
+): Promise<void> => {
+    if (files.length === 0) return;
+    const paths = files.map((f) => f.filePath);
+    const shas = files.map((f) => f.blobSha256);
+    const deletions = files.map((f) => f.isDeletion ?? false);
+    await tx.query(
+        `INSERT INTO public.file_versions
+            (thread_id, message_id, file_path, version, blob_sha256, is_deletion)
+         SELECT
+            $1,
+            $2,
+            input.file_path,
+            COALESCE(
+                (SELECT MAX(fv.version)
+                 FROM public.file_versions fv
+                 WHERE fv.thread_id = $1 AND fv.file_path = input.file_path),
+                0
+            ) + 1,
+            input.blob_sha256,
+            input.is_deletion
+         FROM unnest($3::text[], $4::text[], $5::boolean[]) AS input(file_path, blob_sha256, is_deletion)`,
+        [threadId, messageId, paths, shas, deletions],
+    );
+};
+
 export const listForMessage = async (
     messageId: string,
     tx?: Tx,

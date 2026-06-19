@@ -50,7 +50,7 @@ export const putObject = async (
             ContentType: contentType,
         }),
     );
-    log.info('b2.put', { key, bytes: body.byteLength });
+    log.debug('b2.put', { key, bytes: body.byteLength });
 };
 
 export const getObject = async (key: string): Promise<Buffer | null> => {
@@ -63,7 +63,7 @@ export const getObject = async (key: string): Promise<Buffer | null> => {
         );
         if (!response.Body) return null;
         const bytes = Buffer.from(await response.Body.transformToByteArray());
-        log.info('b2.get', { key, bytes: bytes.byteLength });
+        log.debug('b2.get', { key, bytes: bytes.byteLength });
         return bytes;
     } catch (error: unknown) {
         const err = error as { name?: string; $metadata?: { httpStatusCode?: number } };

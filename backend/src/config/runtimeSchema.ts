@@ -158,6 +158,19 @@ export const ensureRuntimeSchema = async (pool: Pool): Promise<void> => {
         ADD COLUMN IF NOT EXISTS storage_path TEXT NULL
     `);
 
+    await pool.query(`
+        CREATE INDEX IF NOT EXISTS idx_file_versions_thread_path_version
+        ON public.file_versions(thread_id, file_path, version DESC)
+    `);
+    await pool.query(`
+        CREATE INDEX IF NOT EXISTS idx_file_versions_thread_message
+        ON public.file_versions(thread_id, message_id)
+    `);
+    await pool.query(`
+        CREATE INDEX IF NOT EXISTS idx_users_clerk_id
+        ON public.users(clerk_id)
+    `);
+
     applied = true;
     log.info('db.runtime_schema_ready');
 };

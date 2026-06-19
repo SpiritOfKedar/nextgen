@@ -1,12 +1,15 @@
 import express from 'express';
 import cors from 'cors';
+import compression from 'compression';
 import { log, errorFields } from './lib/logger';
 import { requestContextMiddleware, httpRequestLoggerMiddleware } from './middlewares/requestContext';
+import { getBootError, getPool, isAppReady } from './config/db';
 import apiRouter from './routes';
 
 const app = express();
 
 // Middleware
+app.use(compression({ threshold: 1024 }));
 app.use(
     cors({
         origin: (origin, callback) => {
@@ -22,17 +25,47 @@ app.use(
         exposedHeaders: ['X-Thread-Id', 'X-Request-Id'],
     }),
 );
-app.use(express.json({ limit: '10mb' }));
 app.use(requestContextMiddleware);
 app.use(httpRequestLoggerMiddleware);
 
-// Health (before API so it stays cheap and obvious in routing)
-app.get('/health', (req, res) => {
+// Liveness — always cheap; does not require DB.
+app.get('/health', (_req, res) => {
     res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// Routes
-app.use('/api', apiRouter);
+// Readiness — DB connected and boot-time schema migration finished.
+app.get('/ready', async (_req, res) => {
+    if (!isAppReady()) {
+        res.status(503).json({
+            status: 'not_ready',
+            error: getBootError()?.message ?? 'starting',
+        });
+        return;
+    }
+    try {
+        await getPool().query('SELECT 1');
+        res.status(200).json({ status: 'ready', timestamp: new Date().toISOString() });
+    } catch (err) {
+        res.status(503).json({
+            status: 'not_ready',
+            error: err instanceof Error ? err.message : 'db_unreachable',
+        });
+    }
+});
+
+const apiReadinessMiddleware: express.RequestHandler = (_req, res, next) => {
+    if (!isAppReady()) {
+        res.status(503).json({
+            error: 'Service is starting. Please retry shortly.',
+            detail: getBootError()?.message,
+        });
+        return;
+    }
+    next();
+};
+
+// Routes — JSON body limits are applied per-route in routes/index.ts
+app.use('/api', apiReadinessMiddleware, apiRouter);
 
 // 404 for unknown paths
 app.use((req, res) => {

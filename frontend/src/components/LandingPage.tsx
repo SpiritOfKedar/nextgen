@@ -4,6 +4,7 @@ import { Hero } from './Hero';
 import { InputArea } from './Chat/InputArea';
 import { Footer } from './Footer';
 import { BackgroundGrid } from './Layout/BackgroundGrid';
+import { CursorGlow } from './Layout/CursorGlow';
 import { FeatureStrip } from './Landing/FeatureStrip';
 import { StatusTicker } from './Landing/StatusTicker';
 import { StatementSections } from './Landing/StatementSections';
@@ -23,6 +24,7 @@ export const LandingPage: React.FC = () => {
     const setPreviewStatusMessage = useSetAtom(previewStatusMessageAtom);
     const setThreadSwitchState = useSetAtom(threadSwitchStateAtom);
     const didClear = useRef(false);
+    const pageRef = useRef<HTMLDivElement>(null);
 
     // Landing page = new conversation. Clear stale thread state ONCE so the
     // next sendMessage creates a fresh thread. The ref prevents re-clearing
@@ -42,12 +44,15 @@ export const LandingPage: React.FC = () => {
     }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
     return (
-        <div className="min-h-screen bg-zinc-950 text-white selection:bg-neon/30 font-sans relative">
+        <div ref={pageRef} className="min-h-screen bg-zinc-950 text-white selection:bg-neon/30 font-sans relative">
+            <div className="fixed inset-0 pointer-events-none z-0">
+                <BackgroundGrid />
+            </div>
+            <CursorGlow boundsRef={pageRef} />
             <Navbar />
 
-            {/* Hero zone with grid background */}
+            {/* Hero zone */}
             <div className="relative overflow-hidden pb-8">
-                <BackgroundGrid />
                 <main className="relative z-10 flex flex-col items-center justify-center pt-20 px-4 pb-6">
                     <div className="w-full flex flex-col items-center gap-6">
                         <Hero />
@@ -62,12 +67,14 @@ export const LandingPage: React.FC = () => {
                 </div>
             </div>
 
-            {/* Marketing sections — solid black, Neon-style */}
-            <StatusTicker />
-            <StatementSections />
-            <StatusTicker />
-            <AgentSection />
-            <Footer />
+            {/* Marketing sections */}
+            <div className="relative z-10">
+                <StatusTicker />
+                <StatementSections />
+                <StatusTicker />
+                <AgentSection />
+                <Footer />
+            </div>
         </div>
     );
 };

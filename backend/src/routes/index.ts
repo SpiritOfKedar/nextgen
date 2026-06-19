@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import express from 'express';
 import { chatController } from '../controllers/chatController';
 import { sandboxController } from '../controllers/sandboxController';
 import { terminalController } from '../controllers/terminalController';
@@ -12,18 +13,33 @@ import { authMiddleware } from '../middlewares/authMiddleware';
 
 const router = Router();
 
+const jsonDefault = express.json({ limit: '256kb' });
+const jsonLarge = express.json({ limit: '10mb' });
+
+// Routes that accept large JSON bodies (must declare parser before default)
+// @ts-ignore
+router.post('/chat', jsonLarge, authMiddleware, chatController.sendMessage);
+// @ts-ignore
+router.post('/terminal/:threadId/events', jsonLarge, authMiddleware, terminalController.appendEvents);
+// @ts-ignore
+router.put('/sandbox/dependencies/:fingerprint', jsonLarge, authMiddleware, sandboxController.putDependencyPlan);
+// @ts-ignore
+router.put('/sandbox/snapshots/:fingerprint', jsonLarge, authMiddleware, sandboxController.putDependencySnapshot);
+// @ts-ignore
+router.put('/sandbox/templates/:templateId', jsonLarge, authMiddleware, sandboxController.putTemplateSnapshot);
+
+router.use(jsonDefault);
+
 // Public endpoints (no auth required)
 // @ts-ignore
 router.get('/preview/:threadId', previewController.getPreview);
 
-// Sync user to MongoDB on login
+// Sync user on login
 // @ts-ignore
 router.post('/auth/sync', authMiddleware, (req, res) => {
     res.json({ user: req.user });
 });
 
-// @ts-ignore
-router.post('/chat', authMiddleware, chatController.sendMessage);
 // @ts-ignore
 router.get('/chat/history', authMiddleware, chatController.getHistory);
 // @ts-ignore
@@ -41,8 +57,6 @@ router.post('/chat/:threadId/restore', authMiddleware, chatController.restoreThr
 
 // @ts-ignore
 router.get('/terminal/:threadId/session', authMiddleware, terminalController.getSession);
-// @ts-ignore
-router.post('/terminal/:threadId/events', authMiddleware, terminalController.appendEvents);
 // @ts-ignore
 router.post('/terminal/:threadId/recovery-audits', authMiddleware, terminalController.appendRecoveryAudit);
 // @ts-ignore
@@ -100,15 +114,9 @@ router.post('/supabase/inspect', authMiddleware, supabaseController.inspect);
 // @ts-ignore
 router.get('/sandbox/dependencies/:fingerprint', authMiddleware, sandboxController.getDependencyPlan);
 // @ts-ignore
-router.put('/sandbox/dependencies/:fingerprint', authMiddleware, sandboxController.putDependencyPlan);
-// @ts-ignore
 router.get('/sandbox/snapshots/:fingerprint', authMiddleware, sandboxController.getDependencySnapshot);
 // @ts-ignore
-router.put('/sandbox/snapshots/:fingerprint', authMiddleware, sandboxController.putDependencySnapshot);
-// @ts-ignore
 router.get('/sandbox/templates/:templateId', authMiddleware, sandboxController.getTemplateSnapshot);
-// @ts-ignore
-router.put('/sandbox/templates/:templateId', authMiddleware, sandboxController.putTemplateSnapshot);
 
 // Collaborator endpoints
 // @ts-ignore

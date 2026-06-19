@@ -21,12 +21,13 @@ const parseLevel = (raw: string | undefined): LogLevel => {
     return 'info';
 };
 
-const activeLevel = (): LogLevel => parseLevel(process.env.LOG_LEVEL);
+/** Resolved once at module load — avoids re-parsing LOG_LEVEL on every log line. */
+const ACTIVE_LEVEL: LogLevel = parseLevel(process.env.LOG_LEVEL);
+
+const LOG_JSON = (process.env.LOG_FORMAT || 'text').toLowerCase() === 'json';
 
 const shouldLog = (level: LogLevel): boolean =>
-    LEVEL_RANK[level] >= LEVEL_RANK[activeLevel()];
-
-const isJson = (): boolean => (process.env.LOG_FORMAT || 'text').toLowerCase() === 'json';
+    LEVEL_RANK[level] >= LEVEL_RANK[ACTIVE_LEVEL];
 
 /** Normalize unknown throwables for structured logs (never log raw API keys). */
 export const errorFields = (error: unknown): Record<string, string | undefined> => {
@@ -46,7 +47,7 @@ const emit = (level: LogLevel, message: string, fields?: Record<string, unknown>
     const timestamp = new Date().toISOString();
     const base = { timestamp, level, message, ...fields };
 
-    if (isJson()) {
+    if (LOG_JSON) {
         const line = JSON.stringify(base);
         if (level === 'error') console.error(line);
         else if (level === 'warn') console.warn(line);

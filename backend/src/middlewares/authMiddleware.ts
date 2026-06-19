@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import { ClerkExpressRequireAuth, StrictAuthProp, clerkClient } from '@clerk/clerk-sdk-node';
+import { LRUCache } from 'lru-cache';
 import * as users from '../repositories/users';
 import { log, errorFields } from '../lib/logger';
 
@@ -17,12 +18,50 @@ declare global {
     }
 }
 
+type CachedAuthUser = {
+    id: string;
+    clerkId: string;
+    email: string;
+};
+
+const DEFAULT_AUTH_CACHE_TTL_MS = 60_000;
+
+const parseAuthCacheTtlMs = (raw: string | undefined): number => {
+    const parsed = Number(raw);
+    if (!Number.isFinite(parsed) || parsed < 1_000) return DEFAULT_AUTH_CACHE_TTL_MS;
+    return Math.floor(parsed);
+};
+
+const AUTH_USER_CACHE_TTL_MS = parseAuthCacheTtlMs(process.env.AUTH_USER_CACHE_TTL_MS);
+
+const authUserCache = new LRUCache<string, CachedAuthUser>({
+    max: 10_000,
+    ttl: AUTH_USER_CACHE_TTL_MS,
+});
+
+const cacheAuthUser = (row: { id: string; clerk_id: string; email: string }): CachedAuthUser => {
+    const cached: CachedAuthUser = {
+        id: row.id,
+        clerkId: row.clerk_id,
+        email: row.email,
+    };
+    authUserCache.set(row.clerk_id, cached);
+    return cached;
+};
+
 export const authMiddleware = [
     ClerkExpressRequireAuth(),
 
     async (req: Request, res: Response, next: NextFunction) => {
         try {
             const clerkId = req.auth.userId;
+
+            const cached = authUserCache.get(clerkId);
+            if (cached) {
+                req.user = cached;
+                next();
+                return;
+            }
 
             const existing = await users.findByClerkId(clerkId);
             let row = existing;
@@ -43,11 +82,7 @@ export const authMiddleware = [
                 log.info('auth.user_upserted', { requestId: req.requestId, clerkId, email: row.email });
             }
 
-            req.user = {
-                id: row.id,
-                clerkId: row.clerk_id,
-                email: row.email,
-            };
+            req.user = cacheAuthUser(row);
 
             next();
         } catch (error) {

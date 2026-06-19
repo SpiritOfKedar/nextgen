@@ -38,3 +38,10 @@ export const concatenate = async (messageId: string, tx?: Tx): Promise<string> =
     );
     return result.rows.map((r) => r.delta).join('');
 };
+
+export const deleteForMessage = async (messageId: string, tx?: Tx): Promise<void> => {
+    await q(tx).query(
+        `DELETE FROM public.message_chunks WHERE message_id = $1`,
+        [messageId],
+    );
+};

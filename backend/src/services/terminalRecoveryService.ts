@@ -1,4 +1,5 @@
-import { ChatService, ThreadAccessError } from './chatService';
+import { ThreadAccessError } from './chatService';
+import { chatService } from '../controllers/chatController';
 import * as threadsRepo from '../repositories/threads';
 import { log } from '../lib/logger';
 
@@ -73,8 +74,6 @@ export type TerminalRecoveryInput = {
 };
 
 export class TerminalRecoveryService {
-    private chatService = new ChatService();
-
     async generateRecoveryStream(input: TerminalRecoveryInput): Promise<AsyncGenerator<string>> {
         const thread = await threadsRepo.findByIdForUser(input.threadId, input.userId);
         if (!thread) throw new ThreadAccessError();
@@ -142,7 +141,7 @@ export class TerminalRecoveryService {
             priorAttempts: input.priorAttempts?.length ?? 0,
         });
 
-        return this.chatService.streamRecoveryCompletion(
+        return chatService.streamRecoveryCompletion(
             RECOVERY_SYSTEM_PROMPT,
             userContent,
             input.model?.trim() || 'claude-haiku-4.5',

@@ -10,12 +10,6 @@ const PORT = process.env.PORT || 3001;
 
 const main = async () => {
     log.info('boot.starting', { port: PORT, pid: process.pid });
-    await connectDB();
-
-    const aborted = await abortOrphanStreaming();
-    if (aborted > 0) {
-        log.info('boot.orphan_streaming_aborted', { count: aborted });
-    }
 
     const server = app.listen(PORT, () => {
         log.info('boot.server_listening', { port: PORT });
@@ -33,12 +27,25 @@ const main = async () => {
         }
         process.exit(1);
     });
+
+    void (async () => {
+        try {
+            await connectDB();
+
+            const aborted = await abortOrphanStreaming();
+            if (aborted > 0) {
+                log.info('boot.orphan_streaming_aborted', { count: aborted });
+            }
+        } catch (error) {
+            log.error('boot.background_init_failed', {
+                hint: 'Verify DATABASE_URL credentials and network reachability',
+                ...errorFields(error),
+            });
+        }
+    })();
 };
 
 main().catch((error) => {
-    log.error('boot.server_failed', {
-        hint: 'Verify DATABASE_URL credentials and network reachability',
-        ...errorFields(error),
-    });
+    log.error('boot.server_failed', errorFields(error));
     process.exit(1);
 });

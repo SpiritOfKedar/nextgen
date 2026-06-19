@@ -3,17 +3,30 @@ import { figmaMcpClient } from '../services/figmaMcpClient';
 import { figmaDesignContextService, parseFigmaUrl } from '../services/figmaDesignContextService';
 import { getPool } from '../config/db';
 import { log, errorFields } from '../lib/logger';
+import { createConnectionCache, loadCachedConnection } from '../lib/integrationConnectionCache';
+
+type FigmaConnectionRow = {
+    access_token: string;
+    enabled: boolean;
+};
+
+const figmaConnectionCache = createConnectionCache<FigmaConnectionRow>();
 
 /**
  * Load the user's stored Figma connection from the DB.
  * Returns null if no connection exists.
  */
-const loadUserConnection = async (userId: string) => {
-    const { rows } = await getPool().query(
-        `SELECT access_token, enabled FROM public.user_figma_connections WHERE user_id = $1`,
-        [userId],
-    );
-    return rows[0] ?? null;
+const loadUserConnection = async (userId: string): Promise<FigmaConnectionRow | null> =>
+    loadCachedConnection(figmaConnectionCache, userId, async () => {
+        const { rows } = await getPool().query<FigmaConnectionRow>(
+            `SELECT access_token, enabled FROM public.user_figma_connections WHERE user_id = $1`,
+            [userId],
+        );
+        return rows[0] ?? null;
+    });
+
+const invalidateFigmaConnectionCache = (userId: string): void => {
+    figmaConnectionCache.invalidate(userId);
 };
 
 export const figmaController = {
@@ -81,6 +94,7 @@ export const figmaController = {
                  ON CONFLICT (user_id) DO UPDATE SET access_token = $2, enabled = true, updated_at = NOW()`,
                 [req.user.id, accessToken],
             );
+            invalidateFigmaConnectionCache(req.user.id);
 
             log.info('figma.connected', {
                 requestId: req.requestId,
@@ -110,6 +124,7 @@ export const figmaController = {
                 `DELETE FROM public.user_figma_connections WHERE user_id = $1`,
                 [req.user.id],
             );
+            invalidateFigmaConnectionCache(req.user.id);
 
             log.info('figma.disconnected', {
                 requestId: req.requestId,
