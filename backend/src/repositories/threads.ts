@@ -111,6 +111,18 @@ export const touch = async (
     );
 };
 
+export const updateTitle = async (
+    threadId: string,
+    title: string,
+    tx?: Tx,
+): Promise<void> => {
+    await ensureSchema();
+    await q(tx).query(
+        `UPDATE public.threads SET title = $2, updated_at = now() WHERE id = $1`,
+        [threadId, title],
+    );
+};
+
 export const deleteForOwner = async (
     threadId: string,
     userId: string,

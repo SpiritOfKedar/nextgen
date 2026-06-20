@@ -463,7 +463,7 @@ export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default', compa
     return (
         <div className={`w-full ${isMac ? 'mx-auto max-w-5xl px-3 sm:px-4' : isCompact ? '' : 'mx-auto max-w-4xl px-3 sm:px-4'}`}>
             <motion.div
-                className={`${shellClass} ${isMac ? 'h-[min(480px,70vh)] max-h-[70vh]' : ''}`}
+                className={`${shellClass} ${isMac ? 'h-[min(480px,70vh)] max-h-[70vh] select-text' : ''}`}
                 initial={isCompact ? false : { y: 20, opacity: 0 }}
                 animate={isCompact ? undefined : { y: 0, opacity: 1 }}
                 transition={isCompact ? undefined : { delay: 0.1, duration: 0.4 }}

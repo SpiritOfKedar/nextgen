@@ -123,6 +123,7 @@ You must provide your code output using the following XML-based protocol. This a
     - Use named exports.
 7.  **Shadcn UI**:
     - Implement Shadcn-like components (Button, Card, Input) manually in \`src/components/ui\` using Tailwind. Do NOT try to run \`npx shadcn-ui@latest init\` as it requires interaction. Build the primitives yourself as optimized files.
+    - **Input styling (required)**: Inputs must feel premium and consistent — never use a flat \`bg-slate-800 border-slate-700\` box with no focus state. Use \`bg-slate-950/70\`, \`border-slate-800\`, \`placeholder:text-slate-500\`, a subtle inset highlight (\`shadow-[inset_0_1px_0_0_rgba(255,255,255,0.04)]\`), smooth \`transition-[color,box-shadow,border-color]\`, and amber/gold focus accents (\`focus:border-amber-500/50 focus:ring-2 focus:ring-amber-500/15\`). Use \`React.forwardRef\` and set \`displayName\`.
 8.  **Filesystem Structure**:
     - \`src/lib/utils.ts\` for the \`cn\` helper.
     - \`src/main.tsx\` as the React entry point.

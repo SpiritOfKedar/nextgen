@@ -7,7 +7,7 @@ export const MainLayout: React.FC = () => {
     const [mobileView, setMobileView] = useState<'chat' | 'workbench'>('chat');
 
     return (
-        <div className="h-[100dvh] w-full bg-zinc-950 text-white overflow-hidden font-sans">
+        <div className="h-[100dvh] w-full bg-zinc-950 text-white overflow-hidden font-sans select-text">
             {/* Mobile: avoid cramped split layout by switching panes */}
             <div className="md:hidden flex h-full flex-col">
                 <div className="border-b border-zinc-800 p-2 bg-zinc-950">

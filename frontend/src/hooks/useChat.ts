@@ -53,6 +53,7 @@ import {
     fetchSupabaseStatus,
     type SupabaseMigrationInput,
 } from '../lib/supabaseSandboxEnv';
+import { upgradeUiComponents } from '../lib/scaffolds/uiComponents';
 import { collectMigrationsFromFileMap, mergeMigrationInputs } from '../lib/supabaseMigrationCollect';
 import { supabaseContextAtom } from '../store/mcpAttachments';
 import type { WebContainer } from '@webcontainer/api';
@@ -960,6 +961,7 @@ createRoot(document.getElementById('root')!).render(
         const uniqueFilesToDelete = [...new Set(filesToDelete)];
 
         if (abortIfStale('before_file_sync')) return;
+        upgradeUiComponents(fileMap);
         const syncResult = await syncProjectFiles(wc, threadId, fileMap, uniqueFilesToDelete);
         mountedProjectFiles = incomingFiles;
         mountedFilesByThread.set(threadId, incomingFiles);
@@ -1271,7 +1273,9 @@ createRoot(document.getElementById('root')!).render(
             }
             // Update threadId if new
             const newThreadId = response.headers.get('X-Thread-Id');
+            let didCreateNewThread = false;
             if (newThreadId && newThreadId !== currentThreadId) {
+                didCreateNewThread = true;
                 setCurrentThreadId(newThreadId);
                 localStorage.setItem('currentThreadId', newThreadId);
                 // Refresh threads list in background
@@ -1429,6 +1433,13 @@ createRoot(document.getElementById('root')!).render(
                 if (wc && installFileMap.size > 0 && buildThreadId) {
                     setPreviewStatus('starting');
                     setPreviewStatusMessage('Ensuring dependencies…');
+
+                    const upgradedPaths = upgradeUiComponents(installFileMap);
+                    for (const path of upgradedPaths) {
+                        const content = installFileMap.get(path)!;
+                        writtenFiles.set(path, content);
+                        setFileSystem((prev) => upsertFile(prev, path, content));
+                    }
 
                     const incomingFiles = new Set([...installFileMap.keys()]);
                     const currentlyMountedFiles =
@@ -1616,6 +1627,10 @@ createRoot(document.getElementById('root')!).render(
                 requestPreviewRefresh();
             }
 
+            if (didCreateNewThread) {
+                void fetchThreads();
+            }
+
             return { ok: true };
         } catch (error) {
             console.error('Chat Error:', error);
@@ -1774,6 +1789,15 @@ createRoot(document.getElementById('root')!).render(
             if (!activeFileCandidate) {
                 const fileName = filePath.split('/').pop() || filePath;
                 activeFileCandidate = { path: filePath, name: fileName, content };
+            }
+        }
+
+        const upgradedPaths = upgradeUiComponents(fileMap);
+        for (const path of upgradedPaths) {
+            const content = fileMap.get(path)!;
+            restoredFileSystem = upsertFile(restoredFileSystem, path, content);
+            if (activeFileCandidate?.path === path) {
+                activeFileCandidate = { ...activeFileCandidate, content };
             }
         }
 
@@ -1978,6 +2002,15 @@ createRoot(document.getElementById('root')!).render(
             }
 
             if (isStale()) return;
+
+            const upgradedPaths = upgradeUiComponents(fileMap);
+            for (const path of upgradedPaths) {
+                const content = fileMap.get(path)!;
+                restoredFileSystem = upsertFile(restoredFileSystem, path, content);
+                if (lastFile?.path === path) {
+                    lastFile = { ...lastFile, content };
+                }
+            }
 
             // Persist snapshot + seq from resolved file state (full load, merged delta, or fallback).
             if (threadFiles.length > 0 || isDeltaPayload) {

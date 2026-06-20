@@ -32,6 +32,11 @@ import {
     SupabaseContextInput,
 } from './supabaseMcpContextService';
 import {
+    ThreadTitleService,
+    THREAD_TITLE_FALLBACK,
+    updateThreadTitleFromPrompt,
+} from './threadTitleService';
+import {
     normalizePlanContext,
     MAX_PLAN_CONTEXT_CHARS,
     PLAN_CONTEXT_MIN_CHARS,
@@ -40,6 +45,8 @@ import {
 export { normalizePlanContext, MAX_PLAN_CONTEXT_CHARS, PLAN_CONTEXT_MIN_CHARS };
 
 dotenv.config();
+
+const threadTitleService = new ThreadTitleService();
 
 export class ThreadAccessError extends Error {
     public readonly code: 'THREAD_NOT_FOUND_OR_UNAUTHORIZED';
@@ -577,9 +584,14 @@ export class ChatService {
             const existing = await threadsRepo.findByIdForUser(threadId, userId);
             if (!existing) throw new ThreadAccessError();
         } else {
-            const title = messageContent.substring(0, 50) + (messageContent.length > 50 ? '...' : '');
-            const thread = await threadsRepo.create(userId, title);
+            const thread = await threadsRepo.create(userId, THREAD_TITLE_FALLBACK);
             threadId = thread.id;
+            void updateThreadTitleFromPrompt(
+                threadTitleService,
+                threadId,
+                messageContent,
+                conversationMode,
+            );
         }
 
         // 2. Inside the per-thread advisory lock: allocate seq for both the
