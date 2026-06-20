@@ -207,7 +207,7 @@ export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default', compa
     useEffect(() => {
         if (isMac || !textareaRef.current) return;
         textareaRef.current.style.height = 'auto';
-        const maxHeight = isCompact ? 160 : 400;
+        const maxHeight = isCompact ? 112 : 400;
         textareaRef.current.style.height = Math.min(textareaRef.current.scrollHeight, maxHeight) + 'px';
     }, [inputValue, isMac, isCompact]);
 
@@ -370,7 +370,14 @@ export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default', compa
     const shellClass = isMac
         ? 'relative flex flex-col w-full overflow-hidden rounded-xl border border-zinc-700/50 bg-[#1c1c1e] shadow-[0_24px_64px_-16px_rgba(0,0,0,0.75)]'
         : isCompact
-            ? 'relative flex flex-col w-full overflow-hidden rounded-lg border border-zinc-800 bg-zinc-900'
+            ? `
+            relative flex flex-col w-full overflow-hidden rounded-xl
+            border border-zinc-800/70 bg-zinc-900/50
+            shadow-[inset_0_1px_0_0_rgba(255,255,255,0.04),0_4px_24px_-8px_rgba(0,0,0,0.5)]
+            transition-[border-color,box-shadow] duration-200
+            focus-within:border-zinc-600/80
+            focus-within:shadow-[inset_0_1px_0_0_rgba(255,255,255,0.06),0_0_0_1px_rgba(82,82,91,0.35),0_4px_24px_-8px_rgba(0,0,0,0.5)]
+        `
             : `
             relative flex flex-col w-full 
             bg-zinc-900/85 backdrop-blur-xl 
@@ -382,19 +389,19 @@ export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default', compa
     const textareaClass = isMac
         ? 'w-full h-full min-h-[200px] py-4 px-5 bg-[#141416] text-zinc-100 placeholder-zinc-600 resize-none focus:outline-none text-[15px] leading-relaxed scrollbar-hide font-sans'
         : isCompact
-            ? 'w-full py-2.5 px-3 bg-transparent text-zinc-100 placeholder-zinc-500 resize-none focus:outline-none text-sm leading-relaxed min-h-[44px] max-h-[160px] scrollbar-hide'
+            ? 'w-full py-3 px-3.5 bg-transparent text-zinc-100 placeholder:text-zinc-500 resize-none focus:outline-none text-[13px] leading-[1.55] min-h-[48px] max-h-[112px] overflow-y-auto custom-scrollbar'
             : 'w-full py-3 px-4 bg-transparent text-zinc-100 placeholder-zinc-500/80 resize-none focus:outline-none text-base leading-relaxed min-h-[68px] max-h-[320px] scrollbar-hide';
 
     const toolbarClass = isMac
         ? 'grid w-full min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 px-3 py-2 bg-[#232326] border-t border-black/50'
         : isCompact
-            ? 'flex w-full min-w-0 flex-wrap items-center gap-2 px-2 py-1.5 border-t border-zinc-800 bg-zinc-950/80'
+            ? 'grid w-full min-w-0 shrink-0 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 px-2.5 py-2 border-t border-zinc-800/50 bg-zinc-950/50'
             : 'grid w-full min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 px-2.5 py-1.5 bg-zinc-900/65 border-t border-zinc-800/70';
 
     const iconBtnClass = isMac
         ? 'inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-zinc-400 hover:text-zinc-200 hover:bg-white/5 transition-colors'
         : isCompact
-            ? 'inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 transition-colors'
+            ? 'inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800/70 transition-colors'
             : 'inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-zinc-700/80 bg-zinc-900 text-zinc-300 hover:text-zinc-100 hover:bg-zinc-800/70 transition-colors';
 
     const figmaBtnActive = isMac
@@ -416,19 +423,19 @@ export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default', compa
     const modeToggleClass = isMac
         ? 'inline-flex rounded-md bg-black/30 p-0.5 text-[10px] font-semibold uppercase tracking-wide'
         : isCompact
-            ? 'inline-flex rounded-md bg-zinc-800/80 p-0.5 text-[10px] font-medium uppercase tracking-wide'
+            ? 'inline-flex shrink-0 rounded-lg border border-zinc-800/60 bg-zinc-900/80 p-0.5 text-[10px] font-semibold uppercase tracking-wide'
             : 'inline-flex rounded-md border border-zinc-700/80 bg-zinc-900 p-0.5 text-[10px] font-semibold uppercase tracking-wide';
 
     const sendBtnEnabled = isMac
         ? 'bg-white text-zinc-900 hover:bg-zinc-200'
         : isCompact
-            ? 'bg-zinc-100 text-zinc-900 hover:bg-white'
+            ? 'bg-zinc-100 text-zinc-900 shadow-sm hover:bg-white active:scale-[0.98]'
             : 'border-blue-500/70 bg-blue-600/90 text-white hover:bg-blue-600 hover:border-blue-400/80';
 
     const sendBtnDisabled = isMac
         ? 'bg-zinc-800 text-zinc-600 cursor-not-allowed'
         : isCompact
-            ? 'bg-zinc-800 text-zinc-600 cursor-not-allowed'
+            ? 'bg-zinc-800/80 text-zinc-600 cursor-not-allowed'
             : 'cursor-not-allowed border-zinc-700 bg-zinc-800 text-zinc-500';
 
     const enhanceBtnActive = isMac
@@ -616,25 +623,27 @@ export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default', compa
                         </div>
                     </div>
                 ) : (
-                    <textarea
-                        ref={textareaRef}
-                        className={textareaClass}
-                        placeholder={chatMode === 'plan'
-                            ? 'Describe what you want to build — get a detailed plan first…'
-                            : 'Describe your app idea…'}
-                        value={inputValue}
-                        onChange={(e) => {
-                            setInputValue(e.target.value);
-                            if (submitError) setSubmitError(null);
-                        }}
-                        onKeyDown={handleKeyDown}
-                        onPaste={handlePaste}
-                        style={{ overflow: 'hidden' }}
-                    />
+                    <div className={isCompact ? 'min-h-0 shrink overflow-hidden' : undefined}>
+                        <textarea
+                            ref={textareaRef}
+                            className={textareaClass}
+                            placeholder={chatMode === 'plan'
+                                ? 'Describe what you want to build — get a detailed plan first…'
+                                : 'Describe your app idea…'}
+                            value={inputValue}
+                            onChange={(e) => {
+                                setInputValue(e.target.value);
+                                if (submitError) setSubmitError(null);
+                            }}
+                            onKeyDown={handleKeyDown}
+                            onPaste={handlePaste}
+                            style={isCompact ? undefined : { overflow: 'hidden' }}
+                        />
+                    </div>
                 )}
 
                 {!isMac && attachedFiles.length > 0 && (
-                    <div className="px-3 pb-2.5">
+                    <div className={isCompact ? 'px-3 pb-2 shrink-0 border-t border-zinc-800/40 bg-zinc-950/30' : 'px-3 pb-2.5'}>
                         <div className="flex flex-wrap gap-2">
                             {imagePreviewUrls.map(({ file, previewUrl, isImage }, index) => (
                                 <div
@@ -683,7 +692,7 @@ export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default', compa
                 )}
 
                 {figmaLinks.length > 0 && (
-                    <div className="px-3 pb-2.5">
+                    <div className={isCompact ? 'px-3 pb-2 shrink-0 border-t border-zinc-800/40 bg-zinc-950/30' : 'px-3 pb-2.5'}>
                         <div className="flex flex-wrap gap-2">
                             {figmaLinks.map((link, index) => (
                                 <div
@@ -709,7 +718,7 @@ export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default', compa
                 )}
 
                 {stitchContext && (
-                    <div className="px-3 pb-2.5">
+                    <div className={isCompact ? 'px-3 pb-2 shrink-0 border-t border-zinc-800/40 bg-zinc-950/30' : 'px-3 pb-2.5'}>
                         <div className="inline-flex h-8 max-w-full items-center gap-1.5 rounded-lg border border-blue-500/30 bg-blue-950/30 px-2.5 text-[11px] text-blue-100">
                             <span className="truncate max-w-[220px]">Stitch context attached</span>
                             <button
@@ -725,7 +734,7 @@ export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default', compa
                 )}
 
                 {supabaseContext && (
-                    <div className="px-3 pb-2.5">
+                    <div className={isCompact ? 'px-3 pb-2 shrink-0 border-t border-zinc-800/40 bg-zinc-950/30' : 'px-3 pb-2.5'}>
                         <div className="inline-flex h-8 max-w-full items-center gap-1.5 rounded-lg border border-emerald-500/30 bg-emerald-950/30 px-2.5 text-[11px] text-emerald-100">
                             <span className="truncate max-w-[220px]">Supabase MCP context attached</span>
                             <button
@@ -839,18 +848,18 @@ export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default', compa
                         )}
                     </div>
 
-                    <div className={isCompact ? 'flex flex-1 min-w-0 items-center gap-1.5 overflow-hidden' : 'min-w-0 w-full flex justify-start overflow-hidden'}>
+                    <div className="min-w-0 w-full flex justify-start overflow-hidden">
                         <div className="flex min-w-0 items-center gap-1.5 overflow-hidden">
                             <div className={modeToggleClass}>
                                 <button
                                     type="button"
                                     onClick={() => setChatMode('plan')}
-                                    className={`rounded px-2 py-1 transition-colors ${
+                                    className={`rounded-md px-2 py-1 transition-colors ${
                                         chatMode === 'plan'
                                             ? isMac
                                                 ? 'bg-zinc-600 text-white'
                                                 : isCompact
-                                                    ? 'bg-zinc-600 text-white'
+                                                    ? 'bg-zinc-700 text-white shadow-sm'
                                                     : 'bg-blue-600/90 text-white'
                                             : 'text-zinc-500 hover:text-zinc-300'
                                     }`}
@@ -861,12 +870,12 @@ export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default', compa
                                 <button
                                     type="button"
                                     onClick={() => setChatMode('build')}
-                                    className={`rounded px-2 py-1 transition-colors ${
+                                    className={`rounded-md px-2 py-1 transition-colors ${
                                         chatMode === 'build'
                                             ? isMac
                                                 ? 'bg-zinc-600 text-white'
                                                 : isCompact
-                                                    ? 'bg-zinc-600 text-white'
+                                                    ? 'bg-zinc-700 text-white shadow-sm'
                                                     : 'bg-blue-600/90 text-white'
                                             : 'text-zinc-500 hover:text-zinc-300'
                                     }`}
@@ -883,10 +892,9 @@ export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default', compa
                         type="button"
                         onClick={handleSendMessage}
                         className={`
-                            inline-flex shrink-0 items-center justify-center gap-1 h-7 px-3
-                            text-[10px] font-semibold uppercase tracking-wide
-                            rounded-md transition-colors duration-150
-                            ${isCompact ? 'ml-auto' : ''}
+                            inline-flex shrink-0 items-center justify-center gap-1
+                            ${isCompact ? 'h-8 px-3.5 text-xs font-medium rounded-lg' : 'h-7 px-3 text-[10px] font-semibold uppercase tracking-wide rounded-md'}
+                            transition-all duration-150
                             ${(!inputValue.trim() && attachedFiles.length === 0) || isLoading
                                 ? sendBtnDisabled
                                 : `${sendBtnEnabled} ${isMac || isCompact ? '' : 'border'}`}

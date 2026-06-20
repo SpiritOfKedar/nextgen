@@ -1,6 +1,6 @@
 import type { WebContainer } from '@webcontainer/api';
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001/api';
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3003/api';
 
 export interface SupabaseClientEnv {
     url: string;
@@ -63,17 +63,31 @@ export const fetchSupabaseEnv = async (authToken: string): Promise<SupabaseClien
     }
 };
 
+const resolveEnvLocalPath = (projectDir?: string): string => {
+    if (!projectDir || projectDir === '/') return '.env.local';
+    return `${projectDir.replace(/^\//, '')}/.env.local`;
+};
+
 /**
  * Write `.env.local` with the Supabase client env so Vite inside the sandbox exposes
  * VITE_SUPABASE_*. No-op when the user has no connected project. Only the anon key is
  * ever written here — the service role key and database URL stay on the platform.
  */
-export const injectSupabaseEnv = async (wc: WebContainer, authToken: string): Promise<boolean> => {
+export const injectSupabaseEnv = async (
+    wc: WebContainer,
+    authToken: string,
+    projectDir?: string,
+): Promise<boolean> => {
     const creds = await fetchSupabaseEnv(authToken);
     if (!creds) return false;
     const content = `VITE_SUPABASE_URL=${creds.url}\nVITE_SUPABASE_ANON_KEY=${creds.anonKey}\n`;
+    const envPath = resolveEnvLocalPath(projectDir);
     try {
-        await wc.fs.writeFile('.env.local', content);
+        const dir = envPath.includes('/') ? envPath.slice(0, envPath.lastIndexOf('/')) : '';
+        if (dir) {
+            try { await wc.fs.mkdir(dir, { recursive: true }); } catch { /* exists */ }
+        }
+        await wc.fs.writeFile(envPath, content);
         return true;
     } catch {
         return false;

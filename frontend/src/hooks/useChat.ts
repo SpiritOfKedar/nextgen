@@ -74,6 +74,19 @@ Follow the plan's component breakdown and wire auth, feed, posts, comments, and 
 const FULL_BUILD_PROMPT = `Implement the approved plan above exactly. Follow the saved plan context — create all listed files, install dependencies, and start the dev server.
 When Supabase is connected, emit supabase-migration actions for all schema changes before or alongside UI files.`;
 
+const ENHANCEMENT_META_PATTERNS = [
+    /\bI need (?:the )?original prompt\b/i,
+    /\b(?:please|could you) (?:paste|share|provide|send)(?: me)?(?: the| your)? prompt\b/i,
+    /\bshare what you(?:'d| would) like to build\b/i,
+    /\b(?:paste|share) your prompt\b/i,
+];
+
+function isEnhancementMetaResponse(text: string): boolean {
+    const normalized = text.trim();
+    if (!normalized) return true;
+    return ENHANCEMENT_META_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
 /** Serialize WebContainer fs writes so the chat stream reader never stalls on slow I/O (fixes dropped Claude streams). */
 const queueBoltFileWrite = (
     chainRef: { current: Promise<void> },
@@ -875,6 +888,9 @@ import tailwindcss from '@tailwindcss/vite';
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  server: {
+    host: true,
+  },
 });
 `;
             fileMap.set('vite.config.ts', defaultVite);
@@ -949,16 +965,8 @@ createRoot(document.getElementById('root')!).render(
         mountedFilesByThread.set(threadId, incomingFiles);
         activeMountedThreadId = threadId;
 
-        if (authToken) {
-            await injectSupabaseEnv(wc, authToken);
-        }
-
         const depFingerprint = getDependencyFingerprint(fileMap);
         const criticalFingerprint = getCriticalConfigFingerprint(fileMap);
-        const shouldRestartServer =
-            !activeDevProcess ||
-            activeDevServerFingerprint !== depFingerprint ||
-            activeCriticalFingerprint !== criticalFingerprint;
 
         try {
             if (abortIfStale('before_install_gate')) return;
@@ -981,6 +989,17 @@ createRoot(document.getElementById('root')!).render(
 
             const projectDir = depResult.projectDir;
             await syncShellWorkingDirectory(shellWriter, wc, projectDir);
+
+            let supabaseEnvInjected = false;
+            if (authToken) {
+                supabaseEnvInjected = await injectSupabaseEnv(wc, authToken, projectDir);
+            }
+
+            const shouldRestartServer =
+                !activeDevProcess ||
+                activeDevServerFingerprint !== depFingerprint ||
+                activeCriticalFingerprint !== criticalFingerprint ||
+                supabaseEnvInjected;
 
             if (!depResult.ok) {
                 if (depResult.errorMessage === 'Stale thread switch') return;
@@ -1393,15 +1412,13 @@ createRoot(document.getElementById('root')!).render(
                 await ensureRootPackageJsonExists(writtenFiles, wcForNpm, setFileSystem);
                 await patchMissingDependencies(writtenFiles, wcForNpm, setFileSystem);
 
+                const authToken = (await getToken()) ?? token ?? '';
+
                 // Supabase backend: apply schema migrations server-side, then inject the
                 // browser-safe client env so the dev server boots against the live project.
-                if (token) {
-                    await applyMergedSupabaseMigrations(token, pendingMigrations, writtenFiles);
+                if (authToken) {
+                    await applyMergedSupabaseMigrations(authToken, pendingMigrations, writtenFiles);
                 }
-                if (wcForNpm && token) {
-                    await injectSupabaseEnv(wcForNpm, token);
-                }
-
                 const wc = wcForNpm;
                 const buildThreadId = newThreadId ?? currentThreadId ?? localStorage.getItem('currentThreadId') ?? '';
                 const installFileMap = new Map<string, string>();
@@ -1409,15 +1426,29 @@ createRoot(document.getElementById('root')!).render(
                     installFileMap.set(normalizeWrittenPath(k), v);
                 }
 
-                if (wc && installFileMap.size > 0 && buildThreadId && token) {
+                if (wc && installFileMap.size > 0 && buildThreadId) {
                     setPreviewStatus('starting');
                     setPreviewStatusMessage('Ensuring dependencies…');
+
+                    const incomingFiles = new Set([...installFileMap.keys()]);
+                    const currentlyMountedFiles =
+                        activeMountedThreadId === buildThreadId
+                            ? (mountedFilesByThread.get(buildThreadId) ?? mountedProjectFiles)
+                            : mountedProjectFiles;
+                    const filesToDelete = [...currentlyMountedFiles].filter((p) => !incomingFiles.has(p));
+                    await syncProjectFiles(wc, buildThreadId, installFileMap, [...new Set(filesToDelete)]);
+                    mountedProjectFiles = incomingFiles;
+                    mountedFilesByThread.set(buildThreadId, incomingFiles);
+                    activeMountedThreadId = buildThreadId;
+
+                    const depFingerprint = getDependencyFingerprint(installFileMap);
+                    const criticalFingerprint = getCriticalConfigFingerprint(installFileMap);
 
                     const depResult = await ensureProjectDependencies({
                         wc,
                         threadId: buildThreadId,
                         fileMap: installFileMap,
-                        authToken: token,
+                        authToken,
                         apiUrl: API_URL,
                         writeShellOutput,
                         onPreviewStatus: (previewStatus, message) => {
@@ -1426,6 +1457,10 @@ createRoot(document.getElementById('root')!).render(
                         },
                         repairRootForNpm: (announce) => repairRootForNpm(wc, announce),
                     });
+
+                    if (authToken) {
+                        await injectSupabaseEnv(wc, authToken, depResult.projectDir);
+                    }
 
                     if (!depResult.ok) {
                         setPreviewStatus('error');
@@ -1452,17 +1487,20 @@ createRoot(document.getElementById('root')!).render(
                             });
                         }
                     } else {
-                        activeDevServerFingerprint = depResult.depFingerprint;
-                        activeCriticalFingerprint = depResult.criticalFingerprint;
                         await syncShellWorkingDirectory(shellWriter, wc, depResult.projectDir);
 
                         const shellQueue = filterInstallShellCommands(normalizeShellCommandQueue(pendingShellCommands));
                         const hasDevCommand = shellQueue.some((c) => /npm\s+run\s+dev\b/i.test(c));
+                        let devStartedViaShell = false;
 
                         if (shellQueue.length > 0) {
+                            if (hasDevCommand && activeDevProcess?.kill) {
+                                try { await activeDevProcess.kill(); } catch { /* ignore */ }
+                                activeDevProcess = null;
+                            }
                             setPreviewStatus('starting');
                             setPreviewStatusMessage('Running start commands inside the sandbox…');
-                            await executeShellCommandsInWebContainer({
+                            const shellResult = await executeShellCommandsInWebContainer({
                                 wc,
                                 commands: shellQueue,
                                 initialCwd: depResult.projectDir,
@@ -1470,8 +1508,8 @@ createRoot(document.getElementById('root')!).render(
                                 beforeNpmInstall: () => repairRootForNpm(wc, true),
                                 onDevServerStarted: (proc) => {
                                     activeDevProcess = proc;
-                                    activeDevServerFingerprint = depResult.depFingerprint;
-                                    activeCriticalFingerprint = depResult.criticalFingerprint;
+                                    activeDevServerFingerprint = depFingerprint;
+                                    activeCriticalFingerprint = criticalFingerprint;
                                 },
                                 onTimeout: (command, timeoutMs) => {
                                     setPreviewStatus('error');
@@ -1492,7 +1530,25 @@ createRoot(document.getElementById('root')!).render(
                                     writeShellOutput(`\r\n\x1b[31m✗ Failed: ${command} — ${err}\x1b[0m\r\n`);
                                 },
                             });
-                        } else if (!hasDevCommand && !activeDevProcess) {
+                            devStartedViaShell = shellResult.devServerStarted;
+                        }
+
+                        // After a build, always restart unless the shell queue already started dev.
+                        const shouldRestartDev = !devStartedViaShell && !hasDevCommand;
+
+                        if (shouldRestartDev) {
+                            if (activeDevProcess?.kill) {
+                                try { await activeDevProcess.kill(); } catch { /* ignore */ }
+                            }
+                            await repairViteScriptsForWebContainer(wc, {
+                                fileMap: installFileMap,
+                                projectDir: depResult.projectDir,
+                                announce: writeShellOutput,
+                                onPatched: (content) => {
+                                    installFileMap.set('package.json', content);
+                                    setFileSystem((prev) => upsertFile(prev, 'package.json', content));
+                                },
+                            });
                             setPreviewStatus('starting');
                             setPreviewStatusMessage('Starting development server…');
                             writeShellOutput('\r\n\x1b[36m⬢ Starting dev server...\x1b[0m\r\n');
@@ -1501,6 +1557,15 @@ createRoot(document.getElementById('root')!).render(
                                 write(data) { writeShellOutput(data); },
                             }));
                             activeDevProcess = devProc;
+                            activeDevServerFingerprint = depFingerprint;
+                            activeCriticalFingerprint = criticalFingerprint;
+                        } else if (devStartedViaShell) {
+                            setPreviewStatus('starting');
+                            setPreviewStatusMessage('Development server starting…');
+                        } else {
+                            setPreviewStatus('ready');
+                            setPreviewStatusMessage('Reusing running dev server.');
+                            requestPreviewRefresh();
                         }
                     }
                 } else if (wc) {
@@ -2182,6 +2247,13 @@ createRoot(document.getElementById('root')!).render(
             const enhanced = typeof data?.enhanced === 'string' ? data.enhanced.trim() : '';
             if (!enhanced) {
                 return { ok: false, error: 'Enhancement returned an empty prompt.' };
+            }
+
+            if (isEnhancementMetaResponse(enhanced)) {
+                return {
+                    ok: false,
+                    error: 'Enhancement did not produce a valid prompt. Enter your app idea and try again.',
+                };
             }
 
             return { ok: true, enhanced };

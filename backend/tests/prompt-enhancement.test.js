@@ -3,6 +3,8 @@ const assert = require('node:assert/strict');
 
 const {
     buildEnhancementSystemPrompt,
+    buildEnhancementUserMessage,
+    isMetaEnhancementResponse,
     normalizeEnhancedPrompt,
     PROMPT_ENHANCEMENT_MODEL_ID,
     PROMPT_ENHANCEMENT_API_MODEL,
@@ -19,6 +21,26 @@ test('buildEnhancementSystemPrompt differs by mode', () => {
     assert.match(plan, /PLAN mode/i);
     assert.match(build, /BUILD mode/i);
     assert.doesNotMatch(plan, /BUILD mode — optimize for actionable build instructions/);
+});
+
+test('buildEnhancementUserMessage wraps prompt explicitly', () => {
+    const message = buildEnhancementUserMessage('Build a todo app');
+    assert.match(message, /Build a todo app/);
+    assert.match(message, /do not ask for more input/i);
+    const strict = buildEnhancementUserMessage('Build a todo app', { strict: true });
+    assert.match(strict, /--- PROMPT START ---/);
+    assert.match(strict, /--- PROMPT END ---/);
+});
+
+test('isMetaEnhancementResponse detects refusal-style outputs', () => {
+    assert.equal(
+        isMetaEnhancementResponse("I need the original prompt to enhance it. Please paste your prompt."),
+        true,
+    );
+    assert.equal(
+        isMetaEnhancementResponse('Build a Flipkart-style e-commerce site with cart and checkout.'),
+        false,
+    );
 });
 
 test('normalizeEnhancedPrompt strips fences and preamble', () => {

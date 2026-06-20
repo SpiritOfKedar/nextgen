@@ -128,7 +128,11 @@ export const ChatPanel: React.FC = () => {
                 </div>
 
                 {/* Input Area */}
-                <div className="shrink-0 border-t border-zinc-800 bg-zinc-950 px-3 py-2">
+                <div className="shrink-0 bg-zinc-950 px-3 pb-3 pt-2">
+                    <div
+                        className="mb-2.5 h-px bg-gradient-to-r from-transparent via-zinc-800/70 to-transparent"
+                        aria-hidden
+                    />
                     <InputArea compact />
                 </div>
             </div>

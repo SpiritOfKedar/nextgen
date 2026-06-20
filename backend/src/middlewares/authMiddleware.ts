@@ -49,6 +49,13 @@ const cacheAuthUser = (row: { id: string; clerk_id: string; email: string }): Ca
     return cached;
 };
 
+const isTransientDbError = (error: unknown): boolean => {
+    const message = error instanceof Error ? error.message : String(error);
+    return /connection terminated|connection timeout|ECONNRESET|ETIMEDOUT|timeout exceeded/i.test(message);
+};
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
 export const authMiddleware = [
     ClerkExpressRequireAuth(),
 
@@ -63,8 +70,14 @@ export const authMiddleware = [
                 return;
             }
 
-            const existing = await users.findByClerkId(clerkId);
-            let row = existing;
+            let row;
+            try {
+                row = await users.findByClerkId(clerkId);
+            } catch (error) {
+                if (!isTransientDbError(error)) throw error;
+                await sleep(750);
+                row = await users.findByClerkId(clerkId);
+            }
 
             if (!row) {
                 let email = `user_${clerkId}@example.com`;
