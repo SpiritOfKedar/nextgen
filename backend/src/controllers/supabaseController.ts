@@ -12,6 +12,20 @@ import {
 import { fetchSchemaSnapshot, type SchemaSnapshot } from '../services/supabaseSchemaService';
 import { supabaseMcpClient } from '../services/supabaseMcpClient';
 import { supabaseMcpContextService, type SupabaseContextInput } from '../services/supabaseMcpContextService';
+import {
+    clearOAuthSession,
+    consumeOAuthState,
+    createOAuthState,
+    ensureFreshConnectionAccessToken,
+    exchangeAuthorizationCode,
+    getFrontendOAuthRedirectUrl,
+    getProjectApiKeys,
+    getValidOAuthAccessToken,
+    isSupabaseOAuthConfigured,
+    listProjects,
+    loadOAuthSession,
+    storeOAuthSession,
+} from '../services/supabaseOAuthService';
 
 interface SupabaseConnectionRow {
     project_url: string;
@@ -22,17 +36,20 @@ interface SupabaseConnectionRow {
     project_ref: string | null;
     schema_snapshot: SchemaSnapshot | null;
     enabled: boolean;
+    oauth_refresh_token: string | null;
+    oauth_expires_at: Date | null;
+    connection_source: string;
 }
 
 const supabaseConnectionCache = createConnectionCache<SupabaseConnectionRow>();
 
+const CONNECTION_SELECT = `SELECT project_url, anon_key, service_role_key, database_url, mcp_access_token,
+    project_ref, schema_snapshot, enabled, oauth_refresh_token, oauth_expires_at, connection_source
+    FROM public.user_supabase_connections WHERE user_id = $1`;
+
 const loadUserConnection = async (userId: string): Promise<SupabaseConnectionRow | null> =>
     loadCachedConnection(supabaseConnectionCache, userId, async () => {
-        const { rows } = await getPool().query<SupabaseConnectionRow>(
-            `SELECT project_url, anon_key, service_role_key, database_url, mcp_access_token, project_ref, schema_snapshot, enabled
-             FROM public.user_supabase_connections WHERE user_id = $1`,
-            [userId],
-        );
+        const { rows } = await getPool().query<SupabaseConnectionRow>(CONNECTION_SELECT, [userId]);
         return rows[0] ?? null;
     });
 
@@ -62,31 +79,240 @@ const validateAnonKey = async (projectUrl: string, anonKey: string): Promise<voi
     }
 };
 
+const buildStatusPayload = (conn: SupabaseConnectionRow) => {
+    const migrationsEnabled = Boolean(conn.database_url);
+    const oauthConnected = conn.connection_source === 'oauth' && Boolean(conn.oauth_refresh_token);
+    return {
+        connected: true,
+        connectionMode: migrationsEnabled ? 'database' as const : 'client' as const,
+        projectUrl: conn.project_url,
+        projectRef: conn.project_ref,
+        migrationsEnabled,
+        hasServiceRole: Boolean(conn.service_role_key),
+        mcpConnected: Boolean(conn.mcp_access_token),
+        oauthConnected,
+        connectionSource: conn.connection_source === 'oauth' ? 'oauth' as const : 'manual' as const,
+        oauthConfigured: isSupabaseOAuthConfigured(),
+        tableCount: conn.schema_snapshot?.tables?.length ?? 0,
+    };
+};
+
 export const supabaseController = {
     async getStatus(req: Request, res: Response) {
         try {
             const userId = req.user?.id;
-            if (!userId) return res.json({ connected: false });
+            if (!userId) return res.json({ connected: false, oauthConfigured: isSupabaseOAuthConfigured() });
 
             const conn = await loadUserConnection(userId);
-            if (!conn || !conn.enabled) return res.json({ connected: false, connectionMode: 'none' });
+            if (!conn || !conn.enabled) {
+                return res.json({
+                    connected: false,
+                    connectionMode: 'none',
+                    oauthConfigured: isSupabaseOAuthConfigured(),
+                    oauthPending: Boolean(await loadOAuthSession(userId)),
+                });
+            }
 
-            const migrationsEnabled = Boolean(conn.database_url);
-            return res.json({
-                connected: true,
-                // Explicit tri-state so the UI never mislabels a client-only connection as
-                // "not connected": none | client (URL+anon) | database (DB URL present).
-                connectionMode: migrationsEnabled ? 'database' : 'client',
-                projectUrl: conn.project_url,
-                projectRef: conn.project_ref,
-                migrationsEnabled,
-                hasServiceRole: Boolean(conn.service_role_key),
-                mcpConnected: Boolean(conn.mcp_access_token),
-                tableCount: conn.schema_snapshot?.tables?.length ?? 0,
-            });
+            return res.json(buildStatusPayload(conn));
         } catch (error) {
             log.error('supabase.status_failed', { requestId: req.requestId, ...errorFields(error) });
-            return res.json({ connected: false });
+            return res.json({ connected: false, oauthConfigured: isSupabaseOAuthConfigured() });
+        }
+    },
+
+    async startOAuth(req: Request, res: Response) {
+        try {
+            if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+            if (!isSupabaseOAuthConfigured()) {
+                return res.status(503).json({
+                    error: 'Supabase OAuth is not configured on the server.',
+                    detail: 'Set SUPABASE_OAUTH_CLIENT_ID, SUPABASE_OAUTH_CLIENT_SECRET, and SUPABASE_OAUTH_REDIRECT_URI.',
+                });
+            }
+
+            const { authorizeUrl } = await createOAuthState(req.user.id);
+            return res.json({ authorizeUrl });
+        } catch (error) {
+            log.error('supabase.oauth_start_failed', { requestId: req.requestId, ...errorFields(error) });
+            return res.status(500).json({ error: 'Failed to start Supabase OAuth flow' });
+        }
+    },
+
+    async oauthCallback(req: Request, res: Response) {
+        try {
+            const errorParam = typeof req.query.error === 'string' ? req.query.error : '';
+            if (errorParam) {
+                const description = typeof req.query.error_description === 'string'
+                    ? req.query.error_description
+                    : errorParam;
+                return res.redirect(getFrontendOAuthRedirectUrl({
+                    supabase_oauth: 'error',
+                    supabase_oauth_detail: description.slice(0, 200),
+                }));
+            }
+
+            const code = typeof req.query.code === 'string' ? req.query.code : '';
+            const state = typeof req.query.state === 'string' ? req.query.state : '';
+            if (!code || !state) {
+                return res.redirect(getFrontendOAuthRedirectUrl({
+                    supabase_oauth: 'error',
+                    supabase_oauth_detail: 'Missing authorization code or state.',
+                }));
+            }
+
+            const consumed = await consumeOAuthState(state);
+            if (!consumed) {
+                return res.redirect(getFrontendOAuthRedirectUrl({
+                    supabase_oauth: 'error',
+                    supabase_oauth_detail: 'Invalid or expired OAuth state. Please try again.',
+                }));
+            }
+
+            const tokens = await exchangeAuthorizationCode(code, consumed.codeVerifier);
+            await storeOAuthSession(consumed.userId, tokens);
+
+            log.info('supabase.oauth_callback_success', {
+                requestId: req.requestId,
+                internalUserId: consumed.userId,
+            });
+
+            return res.redirect(getFrontendOAuthRedirectUrl({ supabase_oauth: 'success' }));
+        } catch (error) {
+            log.error('supabase.oauth_callback_failed', { requestId: req.requestId, ...errorFields(error) });
+            const detail = error instanceof Error ? error.message : 'OAuth callback failed';
+            return res.redirect(getFrontendOAuthRedirectUrl({
+                supabase_oauth: 'error',
+                supabase_oauth_detail: detail.slice(0, 200),
+            }));
+        }
+    },
+
+    async listOAuthProjects(req: Request, res: Response) {
+        try {
+            if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+
+            const accessToken = await getValidOAuthAccessToken(req.user.id);
+            if (!accessToken) {
+                return res.status(400).json({
+                    error: 'No active Supabase OAuth session. Click Connect with Supabase to authorize.',
+                });
+            }
+
+            const projects = await listProjects(accessToken);
+            return res.json({ projects });
+        } catch (error) {
+            log.error('supabase.oauth_projects_failed', { requestId: req.requestId, ...errorFields(error) });
+            return res.status(500).json({
+                error: 'Failed to list Supabase projects',
+                detail: error instanceof Error ? error.message : String(error),
+            });
+        }
+    },
+
+    async completeOAuth(req: Request, res: Response) {
+        try {
+            if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+
+            const projectRef = typeof req.body?.projectRef === 'string' ? req.body.projectRef.trim() : '';
+            if (!projectRef) {
+                return res.status(400).json({ error: 'projectRef is required.' });
+            }
+
+            const accessToken = await getValidOAuthAccessToken(req.user.id);
+            if (!accessToken) {
+                return res.status(400).json({
+                    error: 'No active Supabase OAuth session. Click Connect with Supabase to authorize.',
+                });
+            }
+
+            const { anonKey, projectUrl } = await getProjectApiKeys(accessToken, projectRef);
+
+            try {
+                await validateAnonKey(projectUrl, anonKey);
+            } catch (error) {
+                return res.status(400).json({
+                    error: 'Failed to validate the Supabase project with the fetched API key.',
+                    detail: error instanceof Error ? error.message : String(error),
+                });
+            }
+
+            try {
+                await supabaseMcpClient.validateAccessToken(accessToken, projectRef);
+            } catch (error) {
+                return res.status(400).json({
+                    error: 'OAuth token could not access Supabase MCP for this project.',
+                    detail: error instanceof Error ? error.message : String(error),
+                });
+            }
+
+            const existing = await loadUserConnection(req.user.id);
+            const session = await loadOAuthSession(req.user.id);
+            if (!session) {
+                return res.status(400).json({ error: 'OAuth session expired. Please reconnect.' });
+            }
+
+            let schemaSnapshot: SchemaSnapshot | null = existing?.schema_snapshot ?? null;
+            const databaseUrl = existing?.database_url ?? null;
+            if (databaseUrl) {
+                try {
+                    schemaSnapshot = await fetchSchemaSnapshot(databaseUrl, req.requestId);
+                } catch {
+                    // keep prior snapshot if refresh fails
+                }
+            }
+
+            await getPool().query(
+                `INSERT INTO public.user_supabase_connections
+                   (user_id, project_url, anon_key, service_role_key, database_url, mcp_access_token,
+                    project_ref, schema_snapshot, enabled, oauth_refresh_token, oauth_expires_at,
+                    connection_source, created_at, updated_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true, $9, $10, 'oauth', NOW(), NOW())
+                 ON CONFLICT (user_id) DO UPDATE SET
+                   project_url = EXCLUDED.project_url,
+                   anon_key = EXCLUDED.anon_key,
+                   service_role_key = COALESCE(public.user_supabase_connections.service_role_key, EXCLUDED.service_role_key),
+                   database_url = COALESCE(public.user_supabase_connections.database_url, EXCLUDED.database_url),
+                   mcp_access_token = EXCLUDED.mcp_access_token,
+                   project_ref = EXCLUDED.project_ref,
+                   schema_snapshot = COALESCE(EXCLUDED.schema_snapshot, public.user_supabase_connections.schema_snapshot),
+                   oauth_refresh_token = EXCLUDED.oauth_refresh_token,
+                   oauth_expires_at = EXCLUDED.oauth_expires_at,
+                   connection_source = 'oauth',
+                   enabled = true,
+                   updated_at = NOW()`,
+                [
+                    req.user.id,
+                    projectUrl,
+                    anonKey,
+                    existing?.service_role_key ?? null,
+                    databaseUrl,
+                    session.accessToken,
+                    projectRef,
+                    schemaSnapshot ? JSON.stringify(schemaSnapshot) : null,
+                    session.refreshToken,
+                    session.expiresAt.toISOString(),
+                ],
+            );
+
+            invalidateSupabaseConnectionCache(req.user.id);
+
+            log.info('supabase.oauth_complete', {
+                requestId: req.requestId,
+                internalUserId: req.user.id,
+                projectRef,
+                migrationsEnabled: Boolean(databaseUrl),
+            });
+
+            const conn = await loadUserConnection(req.user.id);
+            if (!conn) return res.status(500).json({ error: 'Failed to load connection after OAuth complete' });
+
+            return res.json(buildStatusPayload(conn));
+        } catch (error) {
+            log.error('supabase.oauth_complete_failed', { requestId: req.requestId, ...errorFields(error) });
+            return res.status(500).json({
+                error: 'Failed to complete Supabase OAuth connection',
+                detail: error instanceof Error ? error.message : String(error),
+            });
         }
     },
 
@@ -100,18 +326,24 @@ export const supabaseController = {
             const databaseUrl = typeof req.body?.databaseUrl === 'string' ? req.body.databaseUrl.trim() : '';
             const mcpAccessToken = typeof req.body?.mcpAccessToken === 'string' ? req.body.mcpAccessToken.trim() : '';
 
-            if (!projectUrlRaw.trim() || !anonKey) {
+            const existing = await loadUserConnection(req.user.id);
+            const resolvedProjectUrl = projectUrlRaw.trim()
+                ? normalizeProjectUrl(projectUrlRaw)
+                : (existing?.project_url ?? '');
+            const resolvedAnonKey = anonKey || existing?.anon_key || '';
+
+            if (!resolvedProjectUrl || !resolvedAnonKey) {
                 return res.status(400).json({ error: 'A project URL and anon key are required.' });
             }
 
-            const projectUrl = normalizeProjectUrl(projectUrlRaw);
+            const projectUrl = resolvedProjectUrl;
             const projectRef = parseProjectRef(projectUrl);
             if (!projectRef) {
                 return res.status(400).json({ error: 'Project URL must look like https://<ref>.supabase.co' });
             }
 
             try {
-                await validateAnonKey(projectUrl, anonKey);
+                await validateAnonKey(projectUrl, resolvedAnonKey);
             } catch (error) {
                 return res.status(400).json({
                     error: 'Failed to validate the Supabase project with the provided anon key.',
@@ -119,7 +351,11 @@ export const supabaseController = {
                 });
             }
 
-            let schemaSnapshot: SchemaSnapshot | null = null;
+            const resolvedDatabaseUrl = databaseUrl || existing?.database_url || null;
+            const resolvedServiceRoleKey = serviceRoleKey || existing?.service_role_key || null;
+            const resolvedMcpToken = mcpAccessToken || existing?.mcp_access_token || null;
+
+            let schemaSnapshot: SchemaSnapshot | null = existing?.schema_snapshot ?? null;
             if (databaseUrl) {
                 try {
                     await validateDatabaseUrl(databaseUrl);
@@ -143,29 +379,31 @@ export const supabaseController = {
                 }
             }
 
-            const existing = await loadUserConnection(req.user.id);
-            const resolvedMcpToken = mcpAccessToken || existing?.mcp_access_token || null;
-
             await getPool().query(
                 `INSERT INTO public.user_supabase_connections
-                   (user_id, project_url, anon_key, service_role_key, database_url, mcp_access_token, project_ref, schema_snapshot, enabled, created_at, updated_at)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true, NOW(), NOW())
+                   (user_id, project_url, anon_key, service_role_key, database_url, mcp_access_token, project_ref,
+                    schema_snapshot, enabled, oauth_refresh_token, oauth_expires_at, connection_source,
+                    created_at, updated_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true, NULL, NULL, 'manual', NOW(), NOW())
                  ON CONFLICT (user_id) DO UPDATE SET
                    project_url = EXCLUDED.project_url,
                    anon_key = EXCLUDED.anon_key,
-                   service_role_key = EXCLUDED.service_role_key,
-                   database_url = EXCLUDED.database_url,
+                   service_role_key = COALESCE(EXCLUDED.service_role_key, public.user_supabase_connections.service_role_key),
+                   database_url = COALESCE(EXCLUDED.database_url, public.user_supabase_connections.database_url),
                    mcp_access_token = COALESCE(EXCLUDED.mcp_access_token, public.user_supabase_connections.mcp_access_token),
                    project_ref = EXCLUDED.project_ref,
-                   schema_snapshot = EXCLUDED.schema_snapshot,
+                   schema_snapshot = COALESCE(EXCLUDED.schema_snapshot, public.user_supabase_connections.schema_snapshot),
+                   oauth_refresh_token = NULL,
+                   oauth_expires_at = NULL,
+                   connection_source = 'manual',
                    enabled = true,
                    updated_at = NOW()`,
                 [
                     req.user.id,
                     projectUrl,
-                    anonKey,
-                    serviceRoleKey || null,
-                    databaseUrl || null,
+                    resolvedAnonKey,
+                    resolvedServiceRoleKey,
+                    resolvedDatabaseUrl,
                     resolvedMcpToken,
                     projectRef,
                     schemaSnapshot ? JSON.stringify(schemaSnapshot) : null,
@@ -178,19 +416,15 @@ export const supabaseController = {
                 requestId: req.requestId,
                 internalUserId: req.user.id,
                 projectRef,
-                migrationsEnabled: Boolean(databaseUrl),
+                migrationsEnabled: Boolean(resolvedDatabaseUrl),
                 mcpConnected: Boolean(resolvedMcpToken),
+                connectionSource: 'manual',
             });
 
-            return res.json({
-                connected: true,
-                projectUrl,
-                projectRef,
-                migrationsEnabled: Boolean(databaseUrl),
-                hasServiceRole: Boolean(serviceRoleKey || existing?.service_role_key),
-                mcpConnected: Boolean(resolvedMcpToken),
-                tableCount: schemaSnapshot?.tables?.length ?? 0,
-            });
+            const conn = await loadUserConnection(req.user.id);
+            if (!conn) return res.status(500).json({ error: 'Failed to load connection after connect' });
+
+            return res.json(buildStatusPayload(conn));
         } catch (error) {
             log.error('supabase.connect_failed', { requestId: req.requestId, ...errorFields(error) });
             return res.status(500).json({ error: 'Failed to connect Supabase project' });
@@ -204,6 +438,7 @@ export const supabaseController = {
                 `DELETE FROM public.user_supabase_connections WHERE user_id = $1`,
                 [req.user.id],
             );
+            await clearOAuthSession(req.user.id);
             invalidateSupabaseConnectionCache(req.user.id);
             return res.json({ connected: false });
         } catch (error) {
@@ -317,7 +552,7 @@ export const supabaseController = {
             const docsQuery = typeof req.body?.docsQuery === 'string' ? req.body.docsQuery.trim() : undefined;
 
             const conn = await loadUserConnection(req.user.id);
-            const mcpConfig = getMcpConfigFromConnection(conn);
+            const mcpConfig = await getMcpConfigFromConnection(req.user.id, conn);
             if (!mcpConfig) {
                 return res.status(400).json({
                     error: 'Supabase MCP is not configured. Connect a project and add a personal access token.',
@@ -351,10 +586,18 @@ export const getUserSupabaseContext = async (userId: string): Promise<SupabasePr
     return context;
 };
 
-const getMcpConfigFromConnection = (conn: SupabaseConnectionRow | null) => {
-    if (!conn?.mcp_access_token || !conn.project_ref) return undefined;
+const getMcpConfigFromConnection = async (userId: string, conn: SupabaseConnectionRow | null) => {
+    if (!conn?.project_ref) return undefined;
+
+    const accessToken = await ensureFreshConnectionAccessToken(userId, conn);
+    if (!accessToken) return undefined;
+
+    if (accessToken !== conn.mcp_access_token) {
+        invalidateSupabaseConnectionCache(userId);
+    }
+
     return {
-        accessToken: conn.mcp_access_token,
+        accessToken,
         projectRef: conn.project_ref,
         enabled: true,
         readOnly: true,
@@ -366,7 +609,7 @@ export const getUserSupabaseMcpConfig = async (userId: string) => {
     return mcpConfig;
 };
 
-export type SupabaseMcpConfig = NonNullable<ReturnType<typeof getMcpConfigFromConnection>>;
+export type SupabaseMcpConfig = NonNullable<Awaited<ReturnType<typeof getMcpConfigFromConnection>>>;
 
 export interface SupabaseIntegration {
     context: SupabasePromptContext | null;
@@ -388,7 +631,7 @@ export const getUserSupabaseIntegration = async (userId: string): Promise<Supaba
             schema: conn.schema_snapshot,
             appliedMigrations,
         },
-        mcpConfig: getMcpConfigFromConnection(conn),
+        mcpConfig: await getMcpConfigFromConnection(userId, conn),
     };
 };
 

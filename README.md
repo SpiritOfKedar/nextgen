@@ -227,6 +227,18 @@ Base URL (local): `http://localhost:3001/api`
 - `GET /github/link/:threadId` – last pushed repo for thread
 - `POST /github/push` – push WebContainer project files to GitHub
 
+### Supabase backend
+- `GET /supabase/status` – connection mode (none | client | database), MCP, OAuth flags
+- `GET /supabase/oauth/start` – returns `{ authorizeUrl }` for one-click OAuth connect
+- `GET /supabase/oauth/callback` – OAuth redirect handler (public; validates PKCE state)
+- `GET /supabase/oauth/projects` – list projects after OAuth authorization
+- `POST /supabase/oauth/complete` – `{ projectRef }` finalize connection (URL, anon key, MCP)
+- `POST /supabase/connect` – manual credential connect (advanced fallback)
+- `DELETE /supabase/disconnect` – remove stored connection
+- `GET /supabase/env` – browser-safe project URL + anon key for sandbox injection
+- `POST /supabase/migrations/apply` – apply SQL migrations (requires database URL)
+- `POST /supabase/inspect` – fetch MCP schema/advisors/docs context
+
 ### Terminal
 - `GET /terminal/:threadId/session`
 - `POST /terminal/:threadId/events`
@@ -311,6 +323,11 @@ STITCH_MCP_URL=https://stitch.googleapis.com/mcp
 STITCH_MCP_API_KEY=
 STITCH_MCP_TIMEOUT_MS=45000
 
+# Optional Supabase OAuth (enables "Connect with Supabase" in the UI)
+SUPABASE_OAUTH_CLIENT_ID=
+SUPABASE_OAUTH_CLIENT_SECRET=
+SUPABASE_OAUTH_REDIRECT_URI=http://localhost:3003/api/supabase/oauth/callback
+
 # Optional logging
 LOG_LEVEL=info
 LOG_FORMAT=text
@@ -357,6 +374,25 @@ Frontend default URL:
 4. The backend resolves design context via `https://stitch.googleapis.com/mcp` and injects it into the system prompt.
 
 Optional server fallback env vars: `STITCH_MCP_ENABLED`, `STITCH_MCP_API_KEY`, `STITCH_MCP_URL`.
+
+### Supabase backend (OAuth + MCP)
+
+**One-click connect (recommended):**
+
+1. Register an OAuth app in the [Supabase dashboard](https://supabase.com/dashboard/org/_/integrations) (OAuth Apps).
+2. Set the redirect URI to your backend callback, e.g. `http://localhost:3003/api/supabase/oauth/callback` (must match `SUPABASE_OAUTH_REDIRECT_URI`).
+3. Grant at least **Projects Read** and **Secrets Read** scopes.
+4. Add to `backend/.env`:
+   - `SUPABASE_OAUTH_CLIENT_ID`
+   - `SUPABASE_OAUTH_CLIENT_SECRET`
+   - `SUPABASE_OAUTH_REDIRECT_URI`
+5. In the chat toolbar, open **Supabase** → **Connect with Supabase** → authorize → pick a project.
+
+This auto-configures project URL, publishable/anon key, and MCP (using the OAuth access token). To enable server-side migrations, add a database URL afterward (Session pooler URI from Supabase → Database settings).
+
+**Advanced manual setup:** paste project URL, anon key, optional MCP PAT, service role, and database URL in the panel.
+
+Optional platform MCP fallback env vars: `SUPABASE_MCP_ENABLED`, `SUPABASE_MCP_ACCESS_TOKEN`, `SUPABASE_MCP_PROJECT_REF`.
 
 ### GitHub Push
 

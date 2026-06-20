@@ -18,6 +18,25 @@ const DOT_BY_MODE: Record<SupabaseConnectionMode, string> = {
     database: 'bg-emerald-400',
 };
 
+const readOAuthReturn = (): { status: 'success' | 'error' | null; detail: string | null } => {
+    const params = new URLSearchParams(window.location.search);
+    const value = params.get('supabase_oauth');
+    if (value === 'success') {
+        return { status: 'success', detail: null };
+    }
+    if (value === 'error') {
+        return { status: 'error', detail: params.get('supabase_oauth_detail') };
+    }
+    return { status: null, detail: null };
+};
+
+const clearOAuthQueryParams = (): void => {
+    const url = new URL(window.location.href);
+    url.searchParams.delete('supabase_oauth');
+    url.searchParams.delete('supabase_oauth_detail');
+    window.history.replaceState({}, '', url.pathname + url.search + url.hash);
+};
+
 export const SupabaseToolbarButton: React.FC<SupabaseToolbarButtonProps> = ({
     iconBtnClass,
     activeClass,
@@ -27,6 +46,8 @@ export const SupabaseToolbarButton: React.FC<SupabaseToolbarButtonProps> = ({
     const [supabaseContext, setSupabaseContext] = useAtom(supabaseContextAtom);
     const [showSupabasePanel, setShowSupabasePanel] = useState(false);
     const [connectionMode, setConnectionMode] = useState<SupabaseConnectionMode>('none');
+    const [oauthReturn, setOauthReturn] = useState<'success' | 'error' | null>(null);
+    const [oauthErrorDetail, setOauthErrorDetail] = useState<string | null>(null);
     const supabaseButtonRef = useRef<HTMLButtonElement>(null);
     const isActive = showSupabasePanel || !!supabaseContext;
 
@@ -45,10 +66,23 @@ export const SupabaseToolbarButton: React.FC<SupabaseToolbarButtonProps> = ({
         void refreshStatus();
     }, [refreshStatus]);
 
-    // Re-check whenever the panel closes (user may have just connected / added DB URL).
+    useEffect(() => {
+        const { status, detail } = readOAuthReturn();
+        if (!status) return;
+        setOauthReturn(status);
+        setOauthErrorDetail(detail);
+        setShowSupabasePanel(true);
+    }, []);
+
     useEffect(() => {
         if (!showSupabasePanel) void refreshStatus();
     }, [showSupabasePanel, refreshStatus]);
+
+    const handleOAuthReturnHandled = useCallback(() => {
+        setOauthReturn(null);
+        setOauthErrorDetail(null);
+        clearOAuthQueryParams();
+    }, []);
 
     const dotTitle = connectionMode === 'database'
         ? 'Supabase connected (database + client)'
@@ -78,6 +112,9 @@ export const SupabaseToolbarButton: React.FC<SupabaseToolbarButtonProps> = ({
                 onClose={() => setShowSupabasePanel(false)}
                 supabaseContext={supabaseContext}
                 onSupabaseContextChange={setSupabaseContext}
+                oauthReturn={oauthReturn}
+                oauthErrorDetail={oauthErrorDetail}
+                onOAuthReturnHandled={handleOAuthReturnHandled}
             />
         </>
     );

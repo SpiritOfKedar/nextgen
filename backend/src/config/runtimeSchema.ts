@@ -95,6 +95,42 @@ export const ensureRuntimeSchema = async (pool: Pool): Promise<void> => {
         ALTER TABLE public.user_supabase_connections
         ADD COLUMN IF NOT EXISTS mcp_access_token TEXT NULL
     `);
+    await pool.query(`
+        ALTER TABLE public.user_supabase_connections
+        ADD COLUMN IF NOT EXISTS oauth_refresh_token TEXT NULL
+    `);
+    await pool.query(`
+        ALTER TABLE public.user_supabase_connections
+        ADD COLUMN IF NOT EXISTS oauth_expires_at TIMESTAMPTZ NULL
+    `);
+    await pool.query(`
+        ALTER TABLE public.user_supabase_connections
+        ADD COLUMN IF NOT EXISTS connection_source TEXT NOT NULL DEFAULT 'manual'
+    `);
+
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS public.supabase_oauth_states (
+            state TEXT PRIMARY KEY,
+            user_id UUID NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
+            code_verifier TEXT NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+    `);
+    await pool.query(`
+        CREATE INDEX IF NOT EXISTS idx_supabase_oauth_states_created
+        ON public.supabase_oauth_states(created_at)
+    `);
+
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS public.user_supabase_oauth_sessions (
+            user_id UUID PRIMARY KEY REFERENCES public.users(id) ON DELETE CASCADE,
+            access_token TEXT NOT NULL,
+            refresh_token TEXT NOT NULL,
+            expires_at TIMESTAMPTZ NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+    `);
 
     await pool.query(`
         CREATE TABLE IF NOT EXISTS public.user_supabase_migrations (

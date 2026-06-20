@@ -98,6 +98,14 @@ router.post('/github/push', authMiddleware, githubController.push);
 
 // Supabase backend integration endpoints
 // @ts-ignore
+router.get('/supabase/oauth/callback', supabaseController.oauthCallback);
+// @ts-ignore
+router.get('/supabase/oauth/start', authMiddleware, supabaseController.startOAuth);
+// @ts-ignore
+router.get('/supabase/oauth/projects', authMiddleware, supabaseController.listOAuthProjects);
+// @ts-ignore
+router.post('/supabase/oauth/complete', authMiddleware, supabaseController.completeOAuth);
+// @ts-ignore
 router.get('/supabase/status', authMiddleware, supabaseController.getStatus);
 // @ts-ignore
 router.post('/supabase/connect', authMiddleware, supabaseController.connect);
