@@ -26,7 +26,7 @@ import { useNavigate } from 'react-router-dom';
 import { BoltParser } from '../lib/boltProtocol';
 import type { BoltAction } from '../lib/boltProtocol';
 import { detectTerminalIssue } from '../lib/terminalIssues';
-import { RECOVERY_LLM_MODEL, shouldAutoRecover } from '../lib/terminalAutoFix';
+import { shouldAutoRecover, resolveRecoveryModel } from '../lib/terminalAutoFix';
 import { scheduleAutoTerminalRecovery, resetAutoRecoveryAttempts } from '../lib/terminalAutoRecovery';
 import { runIterativeRecovery } from '../lib/terminalRecoveryLoop';
 import {
@@ -37,10 +37,12 @@ import {
     resetSyncedShellCwd,
     syncShellWorkingDirectory,
     buildSpawnOptions,
+    writeProjectFile,
+    readProjectFile,
 } from '../lib/webContainerShell';
 import { repairViteScriptsForWebContainer } from '../lib/webContainerScripts';
 import {
-    ensureProjectDependencies,
+    ensureDepsReadyForDev,
     filterInstallShellCommands,
     getCriticalConfigFingerprint,
     getDependencyFingerprint,
@@ -54,6 +56,7 @@ import {
     type SupabaseMigrationInput,
 } from '../lib/supabaseSandboxEnv';
 import { upgradeUiComponents } from '../lib/scaffolds/uiComponents';
+import { ensureProjectScaffold, ensureScaffoldOnDisk, needsProjectScaffold, SCAFFOLD_PATHS } from '../lib/projectScaffold';
 import { collectMigrationsFromFileMap, mergeMigrationInputs } from '../lib/supabaseMigrationCollect';
 import { supabaseContextAtom } from '../store/mcpAttachments';
 import type { WebContainer } from '@webcontainer/api';
@@ -73,7 +76,8 @@ Build React routes, components, contexts/hooks that read/write Supabase (not loc
 Follow the plan's component breakdown and wire auth, feed, posts, comments, and communities. Start the dev server when ready.`;
 
 const FULL_BUILD_PROMPT = `Implement the approved plan above exactly. Follow the saved plan context — create all listed files, install dependencies, and start the dev server.
-When Supabase is connected, emit supabase-migration actions for all schema changes before or alongside UI files.`;
+When Supabase is connected, emit supabase-migration actions for all schema changes before or alongside UI files.
+Use <boltArtifact> and <boltAction> XML tags for all file output (not <artifact> or <action>).`;
 
 const ENHANCEMENT_META_PATTERNS = [
     /\bI need (?:the )?original prompt\b/i,
@@ -97,16 +101,7 @@ const queueBoltFileWrite = (
 ) => {
     chainRef.current = chainRef.current.then(async () => {
         try {
-            const absPath = '/' + filePath.replace(/^\//, '');
-            const dir = absPath.substring(0, absPath.lastIndexOf('/'));
-            if (dir && dir !== '/') {
-                try {
-                    await wc.fs.mkdir(dir, { recursive: true });
-                } catch {
-                    // Directory may already exist
-                }
-            }
-            await wc.fs.writeFile(absPath, fileContent);
+            await writeProjectFile(wc, filePath, fileContent);
             markPreviewStale();
         } catch (err) {
             console.error(`[Bolt] Failed to write ${filePath}:`, err);
@@ -121,22 +116,21 @@ const stripBoltTags = (text: string): string => {
     let narrative = text
         .replace(/<boltAction[^>]*>[\s\S]*?<\/boltAction>/g, '');
 
-    // 2. Remove any UNCLOSED boltAction tag and everything after it
-    //    (during streaming, the closing tag hasn't arrived yet)
-    const unclosedActionIdx = narrative.indexOf('<boltAction');
+    // 2. Remove any UNCLOSED action tag and everything after it (streaming edge case)
+    const unclosedActionIdx = narrative.search(/<(?:bolt)?[Aa]ction\b/);
     if (unclosedActionIdx !== -1) {
         narrative = narrative.substring(0, unclosedActionIdx);
     }
 
     // 3. Remove artifact wrapper tags
     narrative = narrative
-        .replace(/<boltArtifact[^>]*>/g, '')
-        .replace(/<\/boltArtifact>/g, '')
-        .replace(/<\/boltAction>/g, '')
+        .replace(/<(?:bolt)?[Aa]rtifact[^>]*>/g, '')
+        .replace(/<\/(?:bolt)?[Aa]rtifact>/gi, '')
+        .replace(/<\/(?:bolt)?[Aa]ction>/gi, '')
         .trim();
 
-    // 4. Also strip anything after an unclosed <boltArtifact (streaming edge case)
-    const unclosedArtifactIdx = narrative.indexOf('<boltArtifact');
+    // 4. Also strip anything after an unclosed artifact (streaming edge case)
+    const unclosedArtifactIdx = narrative.search(/<(?:bolt)?[Aa]rtifact\b/);
     if (unclosedArtifactIdx !== -1) {
         narrative = narrative.substring(0, unclosedArtifactIdx).trim();
     }
@@ -173,7 +167,7 @@ const stripBoltTags = (text: string): string => {
 const extractFileActions = (content: string): BoltAction[] => {
     const actions: BoltAction[] = [];
     // Match boltAction with type and filePath in any order
-    const regex = /<boltAction\s+(?:[^>]*?)type="file"(?:[^>]*?)filePath="([^"]+)"[^>]*>([\s\S]*?)<\/boltAction>/g;
+    const regex = /<(?:bolt)?[Aa]ction\s+(?:[^>]*?)type="file"(?:[^>]*?)filePath="([^"]+)"[^>]*>([\s\S]*?)<\/(?:bolt)?[Aa]ction>/g;
     let match;
     while ((match = regex.exec(content)) !== null) {
         actions.push({
@@ -183,7 +177,7 @@ const extractFileActions = (content: string): BoltAction[] => {
         });
     }
     // Also try reverse attribute order: filePath before type
-    const regex2 = /<boltAction\s+(?:[^>]*?)filePath="([^"]+)"(?:[^>]*?)type="file"[^>]*>([\s\S]*?)<\/boltAction>/g;
+    const regex2 = /<(?:bolt)?[Aa]ction\s+(?:[^>]*?)filePath="([^"]+)"(?:[^>]*?)type="file"[^>]*>([\s\S]*?)<\/(?:bolt)?[Aa]ction>/g;
     while ((match = regex2.exec(content)) !== null) {
         // Avoid duplicates
         if (!actions.some(a => a.filePath === match![1])) {
@@ -259,19 +253,16 @@ const getRootPackageJsonFromMap = (writtenFiles: Map<string, string>): string | 
     return undefined;
 };
 
-/** Readable valid root package.json on disk (WebContainer may use `package.json` or `/package.json`). */
+/** Readable valid root package.json on disk (workdir-relative path). */
 async function hasValidRootPackageJsonOnDisk(wc: any): Promise<boolean> {
-    for (const p of ['package.json', '/package.json']) {
-        try {
-            const raw = await wc.fs.readFile(p, 'utf-8');
-            if (!raw?.trim()) continue;
-            JSON.parse(raw);
-            return true;
-        } catch {
-            /* missing or invalid */
-        }
+    const raw = await readProjectFile(wc, 'package.json');
+    if (!raw) return false;
+    try {
+        JSON.parse(raw);
+        return true;
+    } catch {
+        return false;
     }
-    return false;
 }
 
 /**
@@ -282,19 +273,17 @@ async function repairRootForNpm(wc: any, announce = true): Promise<void> {
     if (!wc) return;
     if (await hasValidRootPackageJsonOnDisk(wc)) return;
 
-    for (const lock of ['package-lock.json', '/package-lock.json']) {
+    for (const lock of ['package-lock.json']) {
         try {
             await wc.fs.rm(lock);
         } catch {
             /* */
         }
     }
-    for (const p of ['package.json', '/package.json']) {
-        try {
-            await wc.fs.writeFile(p, MINIMAL_ROOT_PACKAGE_JSON);
-        } catch {
-            /* try alternate path */
-        }
+    try {
+        await writeProjectFile(wc, 'package.json', MINIMAL_ROOT_PACKAGE_JSON);
+    } catch {
+        /* */
     }
     if (announce) {
         writeShellOutput(
@@ -312,6 +301,7 @@ async function ensureRootPackageJsonExists(
     wc: any,
     setFileSystem: (updater: (prev: FileSystemItem[]) => FileSystemItem[]) => void,
 ): Promise<void> {
+    ensureProjectScaffold(writtenFiles);
     const fromMap = getRootPackageJsonFromMap(writtenFiles);
     if (fromMap) {
         try {
@@ -326,10 +316,10 @@ async function ensureRootPackageJsonExists(
     }
 
     if (wc) {
-        for (const p of ['/package.json', 'package.json']) {
+        for (const p of ['package.json']) {
             try {
-                const existing = await wc.fs.readFile(p, 'utf-8');
-                if (existing?.trim()) {
+                const existing = await readProjectFile(wc, p);
+                if (existing) {
                     try {
                         JSON.parse(existing);
                         writtenFiles.set('package.json', existing);
@@ -412,10 +402,10 @@ async function patchMissingDependencies(
     const patchedPkg = JSON.stringify(pkg, null, 2);
     writtenFiles.set('package.json', patchedPkg);
 
-    // Write patched package.json to WebContainer
+    // Write patched package.json to WebContainer workdir
     if (wc) {
         try {
-            await wc.fs.writeFile('/package.json', patchedPkg);
+            await writeProjectFile(wc, 'package.json', patchedPkg);
         } catch (err) {
             console.error('[useChat] Failed to write patched package.json:', err);
         }
@@ -542,6 +532,7 @@ const buildFileMap = (
 
 const RECOVERY_BOOTSTRAP_ISSUE_CODES = new Set([
     'cwd_package_json_missing',
+    'deps_not_installed',
     'install_failed',
     'dev_server_failed',
     'vite_permission_denied',
@@ -551,6 +542,9 @@ const RECOVERY_BOOTSTRAP_ISSUE_CODES = new Set([
     'vite_plugin_missing',
     'wrong_working_directory',
     'invalid_shell_chain',
+    'postcss_css_error',
+    'typescript_error',
+    'vite_pre_transform_error',
 ]);
 
 export const useChat = () => {
@@ -658,8 +652,8 @@ export const useChat = () => {
             model?: string;
         },
     ) => {
-        const { threadId, triggerSource, terminalOutput = '', issue = null } = input;
-        const recoveryModel = RECOVERY_LLM_MODEL;
+        const { threadId, triggerSource, terminalOutput = '', issue = null, model: inputModel } = input;
+        const recoveryModel = resolveRecoveryModel(inputModel ?? selectedModel);
         if (!threadId || !isLoaded || !isSignedIn) return;
         const initialToken = await getToken();
         if (!initialToken) return;
@@ -804,6 +798,7 @@ export const useChat = () => {
         isSignedIn,
         refreshTerminalSession,
         openEditorTab,
+        selectedModel,
         setFileSystem,
         setPreviewStatus,
         setPreviewStatusMessage,
@@ -832,119 +827,7 @@ export const useChat = () => {
         };
         if (abortIfStale('start')) return;
 
-        // If the AI didn't generate package.json, index.html, or vite.config,
-        // provide sensible defaults so npm install can work.
-        if (!fileMap.has('package.json')) {
-            const defaultPkg = JSON.stringify({
-                name: 'restored-project',
-                private: true,
-                version: '0.0.0',
-                type: 'module',
-                scripts: {
-                    dev: 'node ./node_modules/vite/bin/vite.js',
-                    build: 'node ./node_modules/vite/bin/vite.js build',
-                },
-                dependencies: {
-                    'react': '^18.3.1',
-                    'react-dom': '^18.3.1',
-                    'lucide-react': '^0.400.0',
-                    'clsx': '^2.1.0',
-                    'tailwind-merge': '^2.2.0',
-                    'class-variance-authority': '^0.7.0',
-                    '@radix-ui/react-slot': '^1.0.0',
-                },
-                devDependencies: {
-                    '@types/react': '^18.3.0',
-                    '@types/react-dom': '^18.3.0',
-                    '@vitejs/plugin-react': '^4.3.0',
-                    'typescript': '^5.5.0',
-                    'vite': '^5.4.0',
-                    'tailwindcss': '^4.0.0',
-                    '@tailwindcss/vite': '^4.0.0',
-                },
-            }, null, 2);
-            fileMap.set('package.json', defaultPkg);
-        }
-
-        if (!fileMap.has('index.html')) {
-            const defaultHtml = `<!DOCTYPE html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>App</title>
-  </head>
-  <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
-  </body>
-</html>`;
-            fileMap.set('index.html', defaultHtml);
-        }
-
-        if (!fileMap.has('vite.config.ts')) {
-            const defaultVite = `import { defineConfig } from 'vite';
-import react from '@vitejs/plugin-react';
-import tailwindcss from '@tailwindcss/vite';
-
-export default defineConfig({
-  plugins: [react(), tailwindcss()],
-  server: {
-    host: true,
-  },
-});
-`;
-            fileMap.set('vite.config.ts', defaultVite);
-        }
-
-        if (!fileMap.has('tsconfig.json')) {
-            const defaultTsconfig = JSON.stringify({
-                compilerOptions: {
-                    target: 'ES2020',
-                    useDefineForClassFields: true,
-                    lib: ['ES2020', 'DOM', 'DOM.Iterable'],
-                    module: 'ESNext',
-                    skipLibCheck: true,
-                    moduleResolution: 'bundler',
-                    allowImportingTsExtensions: true,
-                    resolveJsonModule: true,
-                    isolatedModules: true,
-                    noEmit: true,
-                    jsx: 'react-jsx',
-                    strict: true,
-                },
-                include: ['src'],
-            }, null, 2);
-            fileMap.set('tsconfig.json', defaultTsconfig);
-        }
-
-        // Tailwind v4: ensure src/index.css uses @import "tailwindcss" (not v3 directives)
-        const existingCss = fileMap.get('src/index.css') || '';
-        if (!existingCss.includes('@import "tailwindcss"') && !existingCss.includes("@import 'tailwindcss'")) {
-            const fixedCss = '@import "tailwindcss";\n' + existingCss.replace(/@tailwind\s+(base|components|utilities);?\s*/g, '');
-            fileMap.set('src/index.css', fixedCss);
-        }
-
-        // Ensure src/main.tsx imports index.css
-        if (!fileMap.has('src/main.tsx')) {
-            const defaultMain = `import { StrictMode } from 'react';
-import { createRoot } from 'react-dom/client';
-import './index.css';
-import App from './App';
-
-createRoot(document.getElementById('root')!).render(
-  <StrictMode>
-    <App />
-  </StrictMode>
-);
-`;
-            fileMap.set('src/main.tsx', defaultMain);
-        } else {
-            const mainContent = fileMap.get('src/main.tsx')!;
-            if (!mainContent.includes('index.css')) {
-                fileMap.set('src/main.tsx', "import './index.css';\n" + mainContent);
-            }
-        }
+        ensureProjectScaffold(fileMap);
 
         // Patch missing dependencies before writing files
         await patchMissingDependencies(fileMap, wc, setFileSystem);
@@ -973,7 +856,7 @@ createRoot(document.getElementById('root')!).render(
         try {
             if (abortIfStale('before_install_gate')) return;
 
-            const depResult = await ensureProjectDependencies({
+            const depResult = await ensureDepsReadyForDev({
                 wc,
                 threadId,
                 fileMap,
@@ -1310,6 +1193,20 @@ createRoot(document.getElementById('root')!).render(
             // Track all files written during this stream for dependency patching
             const writtenFiles = new Map<string, string>();
             const fsWriteChain = { current: Promise.resolve() };
+            let scaffoldQueued = false;
+
+            const queueScaffoldIfNeeded = (wcInstance: WebContainer) => {
+                if (scaffoldQueued || !needsProjectScaffold(writtenFiles)) return;
+                scaffoldQueued = true;
+                ensureProjectScaffold(writtenFiles);
+                for (const path of SCAFFOLD_PATHS) {
+                    const content = writtenFiles.get(path);
+                    if (!content) continue;
+                    setFileSystem((prev) => upsertFile(prev, path, content));
+                    queueBoltFileWrite(fsWriteChain, wcInstance, path, content);
+                }
+                void fsWriteChain.current.then(() => ensureScaffoldOnDisk(wcInstance, writtenFiles));
+            };
 
             // ── Phase 1: Read the stream — write files immediately, queue shell commands ──
             // Navigate only after the first bytes arrive so the TCP reader is not starved by
@@ -1347,6 +1244,11 @@ createRoot(document.getElementById('root')!).render(
 
                         // Track for dependency patching
                         writtenFiles.set(path.replace(/^\//, ''), fileContent);
+
+                        const wcForScaffold = wc ?? getWebContainerInstance();
+                        if (wcForScaffold) {
+                            queueScaffoldIfNeeded(wcForScaffold);
+                        }
 
                         // Update file system atom (file tree + editor)
                         setFileSystem((prev) => upsertFile(prev, path, fileContent));
@@ -1413,8 +1315,14 @@ createRoot(document.getElementById('root')!).render(
 
             if (effectiveMode === 'build') {
                 const wcForNpm = webContainerInstance ?? getWebContainerInstance();
+                ensureProjectScaffold(writtenFiles);
                 await ensureRootPackageJsonExists(writtenFiles, wcForNpm, setFileSystem);
                 await patchMissingDependencies(writtenFiles, wcForNpm, setFileSystem);
+
+                if (wcForNpm) {
+                    await ensureScaffoldOnDisk(wcForNpm, writtenFiles);
+                    await syncShellWorkingDirectory(shellWriter, wcForNpm, wcForNpm.workdir, true);
+                }
 
                 const authToken = (await getToken()) ?? token ?? '';
 
@@ -1455,7 +1363,7 @@ createRoot(document.getElementById('root')!).render(
                     const depFingerprint = getDependencyFingerprint(installFileMap);
                     const criticalFingerprint = getCriticalConfigFingerprint(installFileMap);
 
-                    const depResult = await ensureProjectDependencies({
+                    const depResult = await ensureDepsReadyForDev({
                         wc,
                         threadId: buildThreadId,
                         fileMap: installFileMap,
@@ -2162,14 +2070,20 @@ createRoot(document.getElementById('root')!).render(
         action: PlanAction,
         feedback = '',
     ): Promise<SendMessageResult> => {
-        const supabaseCtx = supabaseContextAttachment ?? { ...DEFAULT_SUPABASE_MCP_CONTEXT };
+        const token = await getToken();
+        let supabaseCtx = supabaseContextAttachment;
+        if (!supabaseCtx && token) {
+            const status = await fetchSupabaseStatus(token);
+            if (status.connected) {
+                supabaseCtx = { ...DEFAULT_SUPABASE_MCP_CONTEXT };
+            }
+        }
 
         if (action === 'build') {
             // A new build gets a fresh automatic-recovery budget so prior failures don't
             // permanently suppress recovery for this thread.
             if (currentThreadId) resetAutoRecoveryAttempts(currentThreadId);
 
-            const token = await getToken();
             let migrationsEnabled = false;
             if (token) {
                 const status = await fetchSupabaseStatus(token);
@@ -2184,7 +2098,7 @@ createRoot(document.getElementById('root')!).render(
                     [],
                     [],
                     null,
-                    supabaseCtx,
+                    supabaseCtx ?? null,
                     { mode: 'build', buildPhase: 'backend' },
                 );
                 if (!backendResult.ok) return backendResult;
@@ -2193,19 +2107,17 @@ createRoot(document.getElementById('root')!).render(
                     [],
                     [],
                     null,
-                    supabaseCtx,
+                    supabaseCtx ?? null,
                     { mode: 'build', buildPhase: 'ui' },
                 );
             }
 
-            // No DB-connected Supabase: build the full app anyway. Generated code includes
-            // src/lib/supabase.ts reading VITE_SUPABASE_* and degrades gracefully if unset.
             return sendMessage(
                 FULL_BUILD_PROMPT,
                 [],
                 [],
                 null,
-                supabaseCtx,
+                supabaseCtx ?? null,
                 { mode: 'build' },
             );
         }
@@ -2218,7 +2130,7 @@ createRoot(document.getElementById('root')!).render(
                 [],
                 [],
                 null,
-                supabaseCtx,
+                supabaseCtx ?? null,
                 { mode: 'plan' },
             );
         }
@@ -2231,7 +2143,7 @@ createRoot(document.getElementById('root')!).render(
                 [],
                 [],
                 null,
-                supabaseCtx,
+                supabaseCtx ?? null,
                 { mode: 'plan' },
             );
         }

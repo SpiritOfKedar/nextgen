@@ -6,9 +6,12 @@ export const extractPathsFromTerminalOutput = (terminalOutput: string): string[]
         /Failed to resolve import\s+["'][^"']+["']\s+from\s+["']([^"']+)["']/gi,
         /(?:^|\s)(src\/[\w./-]+\.(?:tsx?|jsx?|css|json))(?:\:|'|"|\s|$)/gim,
         /(?:^|\s)((?:[\w.-]+\/)+[\w.-]+\.(?:tsx?|jsx?|css))(?:\:|'|"|\s|$)/gim,
-        /at\s+([^\s(]+\.(?:tsx?|jsx?))/gi,
-        /in\s+([^\s(]+\.(?:tsx?|jsx?))/gi,
+        /at\s+([^\s(]+\.(?:tsx?|jsx?|css))/gi,
+        /in\s+([^\s(]+\.(?:tsx?|jsx?|css))/gi,
         /file:\s*\/(?:home\/[^/]+\/)?([\w./-]+\.(?:tsx?|jsx?|css|json))/gi,
+        // PostCSS / CSS errors reference the CSS file directly
+        /\[postcss\]\s+([^\s:]+\.css)/gi,
+        /Plugin:\s*([\w./-]+\.(?:ts|js|cjs))/gi,
     ];
 
     for (const pattern of patterns) {
@@ -17,7 +20,7 @@ export const extractPathsFromTerminalOutput = (terminalOutput: string): string[]
         while ((match = pattern.exec(terminalOutput)) !== null) {
             const raw = match[1]?.replace(/^\.\//, '').replace(/^\//, '');
             if (!raw || raw.includes('node_modules')) continue;
-            if (/\.(tsx?|jsx?|css|json|html)$/.test(raw) || raw === 'package.json' || raw.startsWith('src/')) {
+            if (/\.(tsx?|jsx?|css|json|html|ts|js|cjs)$/.test(raw) || raw === 'package.json' || raw.startsWith('src/')) {
                 paths.add(raw);
             }
         }
@@ -25,6 +28,14 @@ export const extractPathsFromTerminalOutput = (terminalOutput: string): string[]
 
     return [...paths];
 };
+
+/** True when the terminal output suggests a CSS / PostCSS / Tailwind error. */
+export const isPostCSSError = (terminalOutput: string): boolean =>
+    /\[postcss\]|postcss-import|Unknown word "use strict"|@tailwind\s+(base|components|utilities)/i.test(terminalOutput);
+
+/** True when the output suggests a TypeScript compilation error. */
+export const isTypeScriptError = (terminalOutput: string): boolean =>
+    /error TS\d+:|TypeScript error/i.test(terminalOutput);
 
 /** Pull the most error-dense lines so the recovery LLM sees the signal, not 12k of noise. */
 export const extractErrorSnippets = (terminalOutput: string, maxLines = 48): string => {
@@ -60,6 +71,26 @@ export const selectRecoveryFiles = (
         'tsconfig.json',
         'index.html',
     ];
+
+    // Always include CSS + PostCSS config files when CSS/PostCSS error is detected
+    if (isPostCSSError(terminalOutput)) {
+        priority.push(
+            'src/index.css',
+            'src/App.css',
+            'src/styles.css',
+            'postcss.config.js',
+            'postcss.config.ts',
+            'postcss.config.cjs',
+            'tailwind.config.js',
+            'tailwind.config.ts',
+        );
+    }
+
+    // Always include tsconfig variants for TS errors
+    if (isTypeScriptError(terminalOutput)) {
+        priority.push('tsconfig.app.json', 'tsconfig.node.json');
+    }
+
     const picked = new Map<string, { filePath: string; content: string }>();
 
     for (const p of priority) {
@@ -68,14 +99,22 @@ export const selectRecoveryFiles = (
     }
 
     for (const pathFromError of extractPathsFromTerminalOutput(terminalOutput)) {
-        if (picked.size >= 12) break;
+        if (picked.size >= 14) break;
         const normalized = pathFromError.replace(/^\//, '');
         const match = files.find((f) => f.filePath === normalized || f.filePath.endsWith(`/${normalized}`));
         if (match) picked.set(match.filePath, match);
     }
 
+    // Include CSS files in src/ as fallback (especially for styling errors)
     for (const f of files) {
-        if (picked.size >= 12) break;
+        if (picked.size >= 14) break;
+        if (f.filePath.startsWith('src/') && /\.css$/.test(f.filePath)) {
+            picked.set(f.filePath, f);
+        }
+    }
+
+    for (const f of files) {
+        if (picked.size >= 14) break;
         if (f.filePath.startsWith('src/') && /\.(tsx?|jsx?)$/.test(f.filePath)) {
             picked.set(f.filePath, f);
         }

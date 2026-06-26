@@ -113,6 +113,85 @@ const DEFAULT_COMMAND_TIMEOUT_MS = 120_000;
 
 export const normalizeWrittenPath = (p: string) => p.replace(/^\//, '').replace(/\\/g, '/');
 
+/** WebContainer fs paths must be workdir-relative — never prefix with `/` (that lands outside the project). */
+export const toWorkdirRelativePath = (filePath: string): string =>
+    normalizeWrittenPath(filePath);
+
+export async function writeProjectFile(
+    wc: WebContainer,
+    filePath: string,
+    content: string,
+): Promise<void> {
+    const rel = toWorkdirRelativePath(filePath);
+    const dir = rel.substring(0, rel.lastIndexOf('/'));
+    if (dir) {
+        try {
+            await wc.fs.mkdir(dir, { recursive: true });
+        } catch {
+            /* directory may already exist */
+        }
+    }
+    await wc.fs.writeFile(rel, content);
+}
+
+export async function readProjectFile(
+    wc: WebContainer,
+    filePath: string,
+): Promise<string | null> {
+    const rel = toWorkdirRelativePath(filePath);
+    try {
+        const raw = await wc.fs.readFile(rel, 'utf-8');
+        return raw?.trim() ? raw : null;
+    } catch {
+        return null;
+    }
+}
+
+export async function projectFileExists(wc: WebContainer, filePath: string): Promise<boolean> {
+    const content = await readProjectFile(wc, filePath);
+    return content !== null;
+}
+
+/**
+ * Map a path relative to the project root into a WebContainer fs path (workdir-relative).
+ * npm install and wc.fs.writeFile('package.json') use this layout — not absolute /home/... paths.
+ */
+export function resolveProjectFsPath(
+    wc: WebContainer,
+    projectDir: string,
+    relativePath: string,
+): string {
+    const workdir = wc.workdir;
+    const absolute = normalizeProjectDir(wc, projectDir);
+    const rel = toWorkdirRelativePath(relativePath);
+    if (absolute === workdir) return rel;
+    if (absolute.startsWith(`${workdir}/`)) {
+        const projectRel = absolute.slice(workdir.length + 1);
+        return projectRel ? `${projectRel}/${rel}` : rel;
+    }
+    return rel;
+}
+
+export async function hasViteInstalled(wc: WebContainer, projectDir: string): Promise<boolean> {
+    const vitePath = resolveProjectFsPath(wc, projectDir, 'node_modules/vite/bin/vite.js');
+    try {
+        await wc.fs.readFile(vitePath);
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+export async function hasNodeModulesInstalled(wc: WebContainer, projectDir: string): Promise<boolean> {
+    const nmPath = resolveProjectFsPath(wc, projectDir, 'node_modules');
+    try {
+        const entries = await wc.fs.readdir(nmPath);
+        return Array.isArray(entries) && entries.length > 0;
+    } catch {
+        return false;
+    }
+}
+
 export const normalizeWebContainerPath = (path: string): string => {
     const normalized = path.replace(/\\/g, '/').trim();
     if (!normalized) return '/';
@@ -334,21 +413,70 @@ export const resetSyncedShellCwd = (): void => {
     lastSyncedShellCwd = null;
 };
 
+/** Absolute path for interactive shell `cd` — `~` in jsh is /home, not the project workdir. */
+export function getShellProjectCdCommand(wc: WebContainer, projectDir: string): string {
+    const target = normalizeProjectDir(wc, projectDir);
+    const escaped = target.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    return `cd "${escaped}"`;
+}
+
+/**
+ * Build a single shell line that always runs from the project root (zsh/powershell-like).
+ * User `cd` commands are passed through unchanged.
+ */
+export function formatInteractiveShellSubmit(
+    wc: WebContainer,
+    line: string,
+    projectDir?: string,
+): string {
+    const trimmed = line.trim();
+    if (!trimmed) return '\n';
+    if (/^cd(\s|$)/i.test(trimmed)) return `${trimmed}\n`;
+    const cd = getShellProjectCdCommand(wc, projectDir ?? wc.workdir);
+    return `${cd} && ${trimmed}\n`;
+}
+
+/** @deprecated Use formatInteractiveShellSubmit — kept for programmatic cwd-only sync */
+export function shouldSyncShellCwdBeforeCommand(line: string): boolean {
+    const trimmed = line.trim();
+    if (!trimmed) return false;
+    if (/^cd(\s|$)/i.test(trimmed)) return false;
+    return /^(ls|ll|la|npm|npx|node|pnpm|yarn|cat|pwd|head|tail|grep|find|tree|vite|tsc)\b/i.test(trimmed);
+}
+
 export const syncShellWorkingDirectory = async (
     shellWriter: WritableStreamDefaultWriter<string> | null,
     wc: WebContainer,
     projectDir: string,
+    force = false,
 ): Promise<void> => {
     if (!shellWriter) return;
     const target = normalizeProjectDir(wc, projectDir);
-    if (lastSyncedShellCwd === target) return;
+    if (!force && lastSyncedShellCwd === target) return;
     try {
-        await shellWriter.write(`cd "${target}"\n`);
+        await shellWriter.write(`${getShellProjectCdCommand(wc, projectDir)}\n`);
         lastSyncedShellCwd = target;
     } catch {
         // best effort only
     }
 };
+
+const SUBMIT_KEY_RE = /[\r\n]/;
+
+/** True for Ctrl+C, Ctrl+U, arrows, etc. — forwarded immediately, not line-buffered. */
+export function isInteractiveShellControlInput(data: string): boolean {
+    if (data.length === 0) return false;
+    if (data === '\t') return true;
+    if (data.length === 1) {
+        const code = data.charCodeAt(0);
+        return code < 32 || code === 127;
+    }
+    return data.startsWith('\x1b');
+}
+
+export function isInteractiveShellSubmitInput(data: string): boolean {
+    return SUBMIT_KEY_RE.test(data);
+}
 
 export const runProcessAndCollectExit = async (proc: { exit: Promise<number> }, timeoutMs: number): Promise<number> => {
     const timeout = new Promise<number>((resolve) => setTimeout(() => resolve(-1), timeoutMs));

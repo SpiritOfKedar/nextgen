@@ -11,18 +11,27 @@ import {
     terminalStatusByThreadAtom,
     recoveryAuditsByThreadAtom,
 } from '../../store/webContainer';
-import { currentThreadIdAtom } from '../../store/atoms';
+import { currentThreadIdAtom, selectedModelAtom } from '../../store/atoms';
 import { detectTerminalIssue } from '../../lib/terminalIssues';
-import { shouldAutoRecover, RECOVERY_LLM_MODEL } from '../../lib/terminalAutoFix';
+import { shouldAutoRecover, resolveRecoveryModel } from '../../lib/terminalAutoFix';
+import { getModelById } from '../../lib/models';
 import { scheduleAutoTerminalRecovery } from '../../lib/terminalAutoRecovery';
 import { useAuth } from '@clerk/clerk-react';
+import { getWebContainerInstance } from '../../hooks/useWebContainer';
+import {
+    formatInteractiveShellSubmit,
+    isInteractiveShellControlInput,
+    isInteractiveShellSubmitInput,
+    resetSyncedShellCwd,
+} from '../../lib/webContainerShell';
 import { useChat } from '../../hooks/useChat';
 import { X } from 'lucide-react';
 import 'xterm/css/xterm.css';
 
 /**
  * Terminal display — jsh shell is managed by useWebContainer.
- * Layout uses flex so banners/footer never overlap the scrollable xterm area.
+ * Input is line-buffered: commands run as `cd <project> && <your command>` on Enter
+ * so cwd never glues to typed text (the old `lscd` bug).
  */
 export const TerminalPanel: React.FC = () => {
     const terminalRef = useRef<HTMLDivElement>(null);
@@ -30,11 +39,16 @@ export const TerminalPanel: React.FC = () => {
     const shellWriterRef = useRef<WritableStreamDefaultWriter<string> | null>(null);
     const shellWriter = useAtomValue(shellInputWriterAtom);
     const currentThreadId = useAtomValue(currentThreadIdAtom);
+    const selectedModel = useAtomValue(selectedModelAtom);
+    const recoveryModelId = resolveRecoveryModel(selectedModel);
+    const recoveryModelLabel = getModelById(recoveryModelId)?.label ?? recoveryModelId;
     const setTerminalIssueByThread = useSetAtom(terminalIssueByThreadAtom);
     const setTerminalStatusByThread = useSetAtom(terminalStatusByThreadAtom);
     const { getToken } = useAuth();
     const { runTerminalRecovery } = useChat();
     const outputBufferRef = useRef('');
+    const inputLineBufferRef = useRef('');
+    const shellInputQueueRef = useRef(Promise.resolve());
     const eventBufferRef = useRef<Array<{ eventType: string; payload: string; cwd?: string; exitCode?: number | null }>>([]);
     const [dismissedIssueCode, setDismissedIssueCode] = useState<string | null>(null);
 
@@ -160,13 +174,42 @@ export const TerminalPanel: React.FC = () => {
         ro.observe(terminalRef.current);
 
         term.onData((data) => {
-            const writer = shellWriterRef.current;
             if (currentThreadId) {
                 eventBufferRef.current.push({ eventType: 'input', payload: data });
             }
-            if (writer) {
-                writer.write(data).catch(() => undefined);
-            }
+
+            shellInputQueueRef.current = shellInputQueueRef.current.then(async () => {
+                const writer = shellWriterRef.current;
+                if (!writer) return;
+
+                if (isInteractiveShellSubmitInput(data)) {
+                    const line = inputLineBufferRef.current;
+                    inputLineBufferRef.current = '';
+                    const wc = getWebContainerInstance();
+                    if (wc) {
+                        resetSyncedShellCwd();
+                        await writer.write(formatInteractiveShellSubmit(wc, line, wc.workdir));
+                    } else {
+                        await writer.write(line ? `${line}\n` : '\n');
+                    }
+                    return;
+                }
+
+                if (data === '\x7f' || data === '\b') {
+                    inputLineBufferRef.current = inputLineBufferRef.current.slice(0, -1);
+                    return;
+                }
+
+                if (isInteractiveShellControlInput(data)) {
+                    if (data === '\x03' || data === '\x15') {
+                        inputLineBufferRef.current = '';
+                    }
+                    await writer.write(data);
+                    return;
+                }
+
+                inputLineBufferRef.current += data;
+            }).catch(() => undefined);
         });
 
         term.onResize(({ cols, rows }) => {
@@ -218,7 +261,7 @@ export const TerminalPanel: React.FC = () => {
         <div className="flex h-full min-h-0 flex-col bg-zinc-950">
             {isRecovering && (
                 <div className="shrink-0 border-b border-blue-800/40 bg-blue-950/30 px-3 py-1.5 text-xs text-blue-200">
-                    Diagnosing and verifying fix (up to 3 rounds) · model: <span className="font-medium text-blue-100">{RECOVERY_LLM_MODEL}</span>
+                    Diagnosing and verifying fix (up to 3 rounds) · model: <span className="font-medium text-blue-100">{recoveryModelLabel}</span>
                 </div>
             )}
 
@@ -258,7 +301,7 @@ export const TerminalPanel: React.FC = () => {
                             ) : null}
                         </>
                     ) : (
-                        <span>Errors auto-fix via agent ({RECOVERY_LLM_MODEL})</span>
+                        <span>Commands run in project root · try <span className="text-zinc-400">ls</span>, <span className="text-zinc-400">pwd</span>, <span className="text-zinc-400">npm install</span></span>
                     )}
                 </div>
                 {currentThreadId && (
@@ -267,7 +310,7 @@ export const TerminalPanel: React.FC = () => {
                         className="shrink-0 rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800 hover:text-white disabled:opacity-50"
                         disabled={isRecovering}
                         onClick={() => invokeRecovery('manual')}
-                        title={`Run recovery with ${RECOVERY_LLM_MODEL}`}
+                        title={`Run recovery with ${recoveryModelLabel}`}
                     >
                         {isRecovering ? 'Recovering…' : 'Fix with agent'}
                     </button>
