@@ -1,4 +1,8 @@
 <p align="center">
+  <img src="docs/assets/nextgen-logo.png" alt="NextGen logo" width="120" />
+</p>
+
+<p align="center">
   <img src="docs/assets/under-catstruction.png" alt="Under Catstruction — NextGen is always improving" width="480" />
 </p>
 
@@ -1304,17 +1308,24 @@ flowchart TD
 ---
 
 <p align="center">
-  <img src="docs/assets/under-catstruction.png" alt="Under Catstruction" width="200" />
-  <br />
-  <em>Built with 🐱 by the NextGen team — always under catstruction, always shipping.</em>
+  <strong>Meet the team.</strong>
 </p>
 
-<br />
+<p align="center">
+  <img src="docs/assets/family-guy-team.png" alt="The NextGen engineering team recording their weekly architecture podcast at The Drunken Clam" width="520" />
+</p>
 
 <p align="center">
-  <img src="docs/assets/brian-frustration.png" alt="The face you make after the 47th npm install in WebContainer" width="320" />
-  <br />
-  <em>Every line of this project was written somewhere between "this will be easy" and whatever this is.</em>
-  <br />
-  <sub>Streaming parsers · advisory locks · orphan message cleanup · terminal auto-recovery at 2 AM · "why is node_modules 400MB again"</sub>
+  <em>
+    Weekly sync at The Drunken Clam. Four mics, four beers, zero unit tests.<br />
+    Peter hosts the podcast. Quagmire "reviews PRs." Cleveland monitors uptime. Joe runs retros — seated, always.
+  </em>
+</p>
+
+<p align="center">
+  <sub>
+    None of them have read the README. Two of them aren't sure what an API is.<br />
+    All of them pushed directly to main at least once. The third one was a force push.<br />
+    If this app works, that's a bug we haven't gotten around to fixing yet.
+  </sub>
 </p>
