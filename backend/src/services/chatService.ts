@@ -1,4 +1,5 @@
 import OpenAI from 'openai';
+import { toFile } from 'openai/uploads';
 import Anthropic from '@anthropic-ai/sdk';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import dotenv from 'dotenv';
@@ -91,6 +92,7 @@ type FigmaLinkInput = {
 const MAX_ATTACHMENTS = 6;
 const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
 const MAX_TEXT_ATTACHMENT_CHARS = 80_000;
+const MAX_TRANSCRIPTION_AUDIO_BYTES = 15 * 1024 * 1024;
 
 const sanitizeAttachments = (raw: unknown): ChatAttachment[] => {
     if (!Array.isArray(raw)) return [];
@@ -1127,6 +1129,30 @@ export class ChatService {
             yield word + ' ';
             await new Promise((r) => setTimeout(r, 50));
         }
+    }
+
+    async transcribeAudio(
+        audioBuffer: Buffer,
+        mimeType: string,
+        originalFileName: string | null,
+    ): Promise<string> {
+        if (!this.openai) throw new Error('OpenAI API Key not configured');
+        if (!audioBuffer || audioBuffer.length === 0) throw new Error('Audio file is empty');
+        if (audioBuffer.length > MAX_TRANSCRIPTION_AUDIO_BYTES) {
+            throw new Error('Audio file is too large (max 15MB)');
+        }
+
+        const safeName = (originalFileName || 'audio-input.webm').replace(/[^a-zA-Z0-9._-]/g, '_');
+        const file = await toFile(audioBuffer, safeName, { type: mimeType || 'application/octet-stream' });
+        const transcription = await this.openai.audio.transcriptions.create({
+            file,
+            model: 'whisper-1',
+        });
+        const text = typeof transcription.text === 'string' ? transcription.text.trim() : '';
+        if (!text) {
+            throw new Error('Transcription returned empty text');
+        }
+        return text;
     }
 
     // ── Read APIs used by the controller ──
