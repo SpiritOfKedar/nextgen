@@ -67,9 +67,25 @@ export const AVAILABLE_MODELS: AIModel[] = [
     }
 ];
 
+export const AUTO_MODEL_ID = 'auto';
+export const DEFAULT_RECOVERY_MODEL = 'claude-haiku-4.5';
+export const DEFAULT_FALLBACK_MODEL = 'claude-haiku-4.5';
+
+export const isGeminiModel = (modelId: string): boolean =>
+    modelId.startsWith('gemini-');
+
+/** Terminal recovery: use the user's explicit pick; never default to Gemini. */
+export const resolveRecoveryModel = (requestedModel?: string | null): string => {
+    const model = requestedModel?.trim();
+    if (model && model !== AUTO_MODEL_ID) {
+        return model;
+    }
+    return DEFAULT_RECOVERY_MODEL;
+};
+
 export const getModelConfig = (modelId: string): AIModel | undefined => {
     return AVAILABLE_MODELS.find(m => m.id === modelId) ||
-        AVAILABLE_MODELS.find(m => m.id === 'gemini-2.5-flash'); // Default to Gemini 2.5 Flash
+        AVAILABLE_MODELS.find(m => m.id === DEFAULT_FALLBACK_MODEL);
 };
 
 export const usesOpenAIResponsesApi = (model: AIModel): boolean =>

@@ -8,6 +8,19 @@ export interface ModelOption {
 }
 
 export const AUTO_MODEL_ID = 'auto';
+export const DEFAULT_RECOVERY_MODEL = 'claude-haiku-4.5';
+
+export const isGeminiModel = (modelId: string): boolean =>
+    modelId.startsWith('gemini-');
+
+/** Terminal recovery: honor explicit user selection; never default to Gemini. */
+export const resolveRecoveryModel = (requestedModel?: string | null): string => {
+    const model = requestedModel?.trim();
+    if (model && model !== AUTO_MODEL_ID) {
+        return model;
+    }
+    return DEFAULT_RECOVERY_MODEL;
+};
 
 export const MODELS: ModelOption[] = [
     {
@@ -76,6 +89,6 @@ export const getModelById = (id: string): ModelOption | undefined =>
     MODELS.find((m) => m.id === id);
 
 export const getProviderForModel = (id: string): ModelProvider =>
-    getModelById(id)?.provider ?? 'google';
+    getModelById(id)?.provider ?? 'anthropic';
 
 export const isAutoModel = (id: string): boolean => id === AUTO_MODEL_ID;

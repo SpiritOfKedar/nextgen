@@ -4,7 +4,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import dotenv from 'dotenv';
 import { SYSTEM_PROMPT } from '../prompts/systemPrompt';
-import { getModelConfig, usesOpenAIResponsesApi } from '../config/models';
+import { getModelConfig, resolveRecoveryModel, usesOpenAIResponsesApi } from '../config/models';
 import { withThreadLock, withTransaction } from '../config/db';
 import * as threadsRepo from '../repositories/threads';
 import * as messagesRepo from '../repositories/messages';
@@ -220,8 +220,8 @@ export type AutoModelContext = {
 };
 
 export const resolveAutoModel = (ctx: AutoModelContext): string => {
-    if (ctx.mode === 'plan') return 'gemini-2.5-flash';
-    if (ctx.hasFigma || ctx.hasStitch || ctx.hasSupabaseMcp || ctx.hasAttachments) return 'gemini-3-pro';
+    if (ctx.mode === 'plan') return 'claude-haiku-4.5';
+    if (ctx.hasFigma || ctx.hasStitch || ctx.hasSupabaseMcp || ctx.hasAttachments) return 'claude-sonnet-4.5';
     if ((ctx.messageLength ?? 0) > 2000) return 'claude-sonnet-4.5';
     return 'gpt-4o-mini';
 };
@@ -234,7 +234,7 @@ export const resolveModelForMode = (
     if (requestedModel === AUTO_MODEL_ID) {
         return resolveAutoModel({ mode, ...autoCtx });
     }
-    if (mode === 'plan' && !requestedModel?.trim()) return 'gemini-2.5-flash';
+    if (mode === 'plan' && !requestedModel?.trim()) return 'claude-haiku-4.5';
     return requestedModel;
 };
 
@@ -1144,12 +1144,9 @@ export class ChatService {
     async streamRecoveryCompletion(
         systemPrompt: string,
         userContent: string,
-        model = 'gemini-2.5-flash',
+        model = 'claude-haiku-4.5',
     ): Promise<AsyncGenerator<string>> {
-        const effectiveModel = resolveModelForMode(model, 'build', {
-            mode: 'build',
-            messageLength: userContent.length,
-        });
+        const effectiveModel = resolveRecoveryModel(model);
         const modelConfig = getModelConfig(effectiveModel);
         const messages = [{ role: 'user', content: userContent }];
         if (!modelConfig) {

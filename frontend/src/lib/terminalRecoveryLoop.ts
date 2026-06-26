@@ -1,5 +1,5 @@
 import type { WebContainer } from '@webcontainer/api';
-import { BoltParser } from './boltProtocol';
+import { BoltParser, applyPatchToContent } from './boltProtocol';
 import { detectTerminalIssue } from './terminalIssues';
 import type { TerminalIssue } from '../store/webContainer';
 import {
@@ -28,7 +28,8 @@ import {
     syncShellWorkingDirectory,
     buildSpawnOptions,
 } from './webContainerShell';
-import { applyDeterministicTerminalFixes, isDeterministicFixCode, RECOVERY_LLM_MODEL } from './terminalAutoFix';
+import { applyDeterministicTerminalFixes, isDeterministicFixCode } from './terminalAutoFix';
+import { DEFAULT_RECOVERY_MODEL, resolveRecoveryModel } from './models';
 import { repairViteScriptsForWebContainer, terminalShowsVitePermissionError } from './webContainerScripts';
 
 export const MAX_RECOVERY_ROUNDS = 3;
@@ -111,13 +112,16 @@ export async function verifyRecoveryFix(input: VerifyRecoveryInput): Promise<{
         await sleep(VERIFY_WAIT_AFTER_DEV_MS);
         const since = getShellOutputSince(verifyMark);
         const issue = detectTerminalIssue(since);
-        if (viteReadyPattern.test(since) && (!issue || issue.confidence < 0.82)) {
+        // Also scan for runtime errors that appear after "ready" (e.g. PostCSS, HMR errors)
+        const hasRuntimeError = /\[postcss\]|Pre-transform error|Internal server error|error TS\d+:/i.test(since);
+        if (viteReadyPattern.test(since) && (!issue || issue.confidence < 0.82) && !hasRuntimeError) {
             writeShellOutput('\r\n\x1b[32m✓ Dev server ready — error appears fixed\x1b[0m\r\n');
             return { success: true, output: since };
         }
+        const runtimeDetail = hasRuntimeError ? 'Runtime errors detected after dev server start' : undefined;
         return {
             success: false,
-            detail: issue?.message ?? 'Dev server did not become ready after fix',
+            detail: runtimeDetail ?? issue?.message ?? 'Dev server did not become ready after fix',
             output: since,
         };
     }
@@ -138,6 +142,7 @@ export async function verifyRecoveryFix(input: VerifyRecoveryInput): Promise<{
 
 type ParseRecoveryStreamCallbacks = {
     onFile: (path: string, content: string) => void;
+    onPatch: (path: string, patchContent: string) => void;
     onShell: (command: string) => void;
 };
 
@@ -155,6 +160,9 @@ async function parseRecoveryStream(
         for (const action of actions) {
             if (action.type === 'file' && action.filePath) {
                 callbacks.onFile(action.filePath, action.content);
+            }
+            if (action.type === 'patch' && action.filePath) {
+                callbacks.onPatch(action.filePath, action.content);
             }
             if (action.type === 'shell') {
                 callbacks.onShell(action.content.trim());
@@ -200,7 +208,7 @@ export async function runIterativeRecovery(input: RunIterativeRecoveryInput): Pr
         threadId,
         getToken,
         apiUrl,
-        model = RECOVERY_LLM_MODEL,
+        model = DEFAULT_RECOVERY_MODEL,
         initialTerminalOutput,
         initialIssue,
         getFileMap,
@@ -243,6 +251,7 @@ export async function runIterativeRecovery(input: RunIterativeRecoveryInput): Pr
         fileMap: getFileMap(),
         repairRootForNpm,
         onPackageJsonPatched: (content) => onFileWritten('package.json', content),
+        onFilePatched: (path, content) => onFileWritten(path, content),
         syncShellCwd: () => syncShellWorkingDirectory(shellWriter, wc, projectDir, true),
     });
     if (preFixes.some((f) => f.applied)) {
@@ -352,14 +361,42 @@ export async function runIterativeRecovery(input: RunIterativeRecoveryInput): Pr
 
         const pendingShellCommands: string[] = [];
         const writtenThisRound = new Map<string, string>();
+        const pendingPatches: Array<{ path: string; patchContent: string }> = [];
 
         await parseRecoveryStream(response, {
             onFile: (path, content) => {
                 const normalized = path.replace(/^\//, '');
                 writtenThisRound.set(normalized, content);
             },
+            onPatch: (path, patchContent) => {
+                pendingPatches.push({ path: path.replace(/^\//, ''), patchContent });
+            },
             onShell: (command) => pendingShellCommands.push(command),
         });
+
+        // Apply patches: read current file, apply search/replace hunks, write back
+        for (const { path, patchContent } of pendingPatches) {
+            const existing =
+                writtenThisRound.get(path) ??
+                getFileMap().get(path) ??
+                getFileMap().get(path.replace(/^\//, ''));
+            let base = existing;
+            if (!base) {
+                try { base = await wc.fs.readFile(path, 'utf-8'); } catch { /* new file */ }
+            }
+            if (base) {
+                const patched = applyPatchToContent(base, patchContent);
+                if (patched !== null) {
+                    writtenThisRound.set(path, patched);
+                    writeShellOutput(`\r\n\x1b[36m⬢ Applied patch to ${path}\x1b[0m\r\n`);
+                } else {
+                    writeShellOutput(`\r\n\x1b[33m⚠ Patch for ${path} — search text not found, skipping\x1b[0m\r\n`);
+                }
+            } else {
+                // No existing file: treat patch content as full file content
+                writtenThisRound.set(path, patchContent);
+            }
+        }
 
         if (writtenThisRound.size === 0 && pendingShellCommands.length === 0) {
             const snippets = extractErrorSnippets(terminalOutput);

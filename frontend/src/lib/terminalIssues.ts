@@ -60,6 +60,40 @@ const PATTERNS: PatternRule[] = [
     ],
   },
   {
+    code: 'postcss_css_error',
+    regex: /\[postcss\]|postcss-import.*Unknown word|Unknown word "use strict"|postcss.*SyntaxError|Internal server error.*postcss|@tailwind\s+(base|components|utilities)/i,
+    confidence: 0.95,
+    message: 'PostCSS / CSS parse error — likely Tailwind v3 syntax in a v4 project.',
+    diagnosticHints: [
+      'Check src/index.css: replace @tailwind base/components/utilities with @import "tailwindcss"; (Tailwind v4 syntax).',
+      'Ensure vite.config.ts imports tailwindcss from "@tailwindcss/vite" and uses it as a Vite plugin — do NOT add postcss.config.js for Tailwind v4.',
+      'Remove postcss.config.js / postcss.config.ts if they import tailwindcss as a PostCSS plugin — Tailwind v4 uses the Vite plugin only.',
+      'The file src/index.css MUST start with @import "tailwindcss"; as its first line.',
+    ],
+  },
+  {
+    code: 'typescript_error',
+    regex: /error TS\d+:|TypeScript error|Expected \d+,? arguments/i,
+    confidence: 0.9,
+    message: 'TypeScript compilation error in source file.',
+    diagnosticHints: [
+      'Read the error TS#### line — it includes the file path and line number.',
+      'Fix the type error in the referenced source file. Do not disable noEmit or strict mode.',
+      'If types are missing, add the @types/* package to devDependencies in package.json.',
+    ],
+  },
+  {
+    code: 'vite_pre_transform_error',
+    regex: /Pre-transform error|Internal server error(?!.*postcss)|Transform failed|Unexpected token/i,
+    confidence: 0.87,
+    message: 'Vite failed to transform a source file (syntax or import error).',
+    diagnosticHints: [
+      'Find the file and line reported in the stack trace and fix the syntax or import.',
+      'Unexpected token often means JSX in a .js file — rename to .jsx or .tsx.',
+      'Check for invalid ES syntax (top-level await without module, etc.).',
+    ],
+  },
+  {
     code: 'module_resolution_failed',
     regex: /Failed to resolve import|Could not resolve(?!\s+dependency)/i,
     confidence: 0.85,

@@ -1,4 +1,4 @@
-export type BoltActionType = 'file' | 'shell' | 'supabase-migration';
+export type BoltActionType = 'file' | 'shell' | 'supabase-migration' | 'patch';
 
 export interface BoltAction {
     type: BoltActionType;
@@ -6,6 +6,48 @@ export interface BoltAction {
     /** Present on supabase-migration actions: the ordered migration id. */
     id?: string;
     content: string;
+}
+
+/**
+ * Apply a patch action to an existing file's content.
+ * Patch format uses search/replace blocks:
+ *
+ *   <<<<<<< SEARCH
+ *   exact text to find
+ *   =======
+ *   replacement text
+ *   >>>>>>> REPLACE
+ *
+ * Multiple blocks are applied in order. Returns null if any search string is not found.
+ */
+export function applyPatchToContent(original: string, patch: string): string | null {
+    const SEARCH_MARKER = '<<<<<<< SEARCH';
+    const SEP_MARKER = '=======';
+    const REPLACE_MARKER = '>>>>>>> REPLACE';
+
+    let result = original;
+    let remaining = patch;
+
+    while (remaining.includes(SEARCH_MARKER)) {
+        const searchStart = remaining.indexOf(SEARCH_MARKER);
+        const sepIdx = remaining.indexOf(SEP_MARKER, searchStart);
+        const replaceEnd = remaining.indexOf(REPLACE_MARKER, sepIdx);
+
+        if (searchStart === -1 || sepIdx === -1 || replaceEnd === -1) break;
+
+        const searchText = remaining.slice(searchStart + SEARCH_MARKER.length, sepIdx).replace(/^\n/, '').replace(/\n$/, '');
+        const replaceText = remaining.slice(sepIdx + SEP_MARKER.length, replaceEnd).replace(/^\n/, '').replace(/\n$/, '');
+
+        if (!result.includes(searchText)) {
+            // Search string not found — patch cannot be applied
+            return null;
+        }
+
+        result = result.replace(searchText, replaceText);
+        remaining = remaining.slice(replaceEnd + REPLACE_MARKER.length);
+    }
+
+    return result;
 }
 
 export interface BoltArtifact {

@@ -26,7 +26,7 @@ import { useNavigate } from 'react-router-dom';
 import { BoltParser } from '../lib/boltProtocol';
 import type { BoltAction } from '../lib/boltProtocol';
 import { detectTerminalIssue } from '../lib/terminalIssues';
-import { RECOVERY_LLM_MODEL, shouldAutoRecover } from '../lib/terminalAutoFix';
+import { shouldAutoRecover, resolveRecoveryModel } from '../lib/terminalAutoFix';
 import { scheduleAutoTerminalRecovery, resetAutoRecoveryAttempts } from '../lib/terminalAutoRecovery';
 import { runIterativeRecovery } from '../lib/terminalRecoveryLoop';
 import {
@@ -542,6 +542,9 @@ const RECOVERY_BOOTSTRAP_ISSUE_CODES = new Set([
     'vite_plugin_missing',
     'wrong_working_directory',
     'invalid_shell_chain',
+    'postcss_css_error',
+    'typescript_error',
+    'vite_pre_transform_error',
 ]);
 
 export const useChat = () => {
@@ -649,8 +652,8 @@ export const useChat = () => {
             model?: string;
         },
     ) => {
-        const { threadId, triggerSource, terminalOutput = '', issue = null } = input;
-        const recoveryModel = RECOVERY_LLM_MODEL;
+        const { threadId, triggerSource, terminalOutput = '', issue = null, model: inputModel } = input;
+        const recoveryModel = resolveRecoveryModel(inputModel ?? selectedModel);
         if (!threadId || !isLoaded || !isSignedIn) return;
         const initialToken = await getToken();
         if (!initialToken) return;
@@ -795,6 +798,7 @@ export const useChat = () => {
         isSignedIn,
         refreshTerminalSession,
         openEditorTab,
+        selectedModel,
         setFileSystem,
         setPreviewStatus,
         setPreviewStatusMessage,
