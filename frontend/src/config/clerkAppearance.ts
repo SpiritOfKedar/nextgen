@@ -3,6 +3,9 @@ import nextgenLogo from '../assets/nextgen-logo.png';
 
 export const clerkAppearance = {
   baseTheme: dark,
+  layout: {
+    unsafe_disableDevelopmentModeWarnings: true,
+  },
   variables: {
     colorPrimary: '#00e599',
     colorPrimaryForeground: '#09090b',
@@ -15,7 +18,7 @@ export const clerkAppearance = {
     colorBorder: '#27272a',
     colorNeutral: '#27272a',
     colorRing: '#00e599',
-    colorModalBackdrop: 'rgba(0, 0, 0, 0.6)',
+    colorModalBackdrop: 'rgba(0, 0, 0, 0.72)',
     fontFamily: "'Inter', sans-serif",
     fontFamilyButtons: "'Inter', sans-serif",
     borderRadius: '0.75rem',
@@ -32,10 +35,17 @@ export const clerkAppearance = {
       width: '100%',
     },
     card: {
-      backgroundColor: '#09090b',
+      backgroundColor: '#18181b',
       border: '1px solid #27272a',
-      borderRadius: '0.75rem',
-      boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.5)',
+      borderRadius: '0.875rem',
+      boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.65), 0 0 0 1px rgba(255, 255, 255, 0.03)',
+    },
+    cardBox: {
+      width: '100%',
+      maxWidth: '26rem',
+    },
+    main: {
+      gap: '1.25rem',
     },
     header: {
       gap: '0.75rem',
@@ -133,6 +143,70 @@ export const clerkAppearance = {
     },
     alertText: {
       color: '#a1a1aa',
+    },
+    footer: {
+      background: 'transparent',
+    },
+    // UserButton popover
+    userButtonTrigger: {
+      '&:focus': {
+        boxShadow: '0 0 0 2px rgba(0, 229, 153, 0.35)',
+      },
+    },
+    userButtonAvatarBox: {
+      width: '2rem',
+      height: '2rem',
+      border: '1px solid #3f3f46',
+      transition: 'border-color 150ms ease',
+      '&:hover': {
+        borderColor: '#52525b',
+      },
+    },
+    userButtonPopoverCard: {
+      backgroundColor: '#18181b',
+      border: '1px solid #27272a',
+      borderRadius: '0.75rem',
+      boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.65)',
+      overflow: 'hidden',
+      minWidth: '16rem',
+    },
+    userButtonPopoverMain: {
+      padding: '1rem 1rem 0.75rem',
+      borderBottom: '1px solid #27272a',
+    },
+    userButtonPopoverActions: {
+      padding: '0.375rem',
+    },
+    userButtonPopoverActionButton: {
+      color: '#e4e4e7',
+      borderRadius: '0.5rem',
+      padding: '0.625rem 0.75rem',
+      fontSize: '0.875rem',
+      fontWeight: '500',
+      '&:hover': {
+        backgroundColor: '#27272a',
+        color: '#ffffff',
+      },
+    },
+    userButtonPopoverActionButtonIcon: {
+      color: '#a1a1aa',
+    },
+    userButtonPopoverFooter: {
+      backgroundColor: '#09090b',
+      borderTop: '1px solid #27272a',
+      padding: '0.625rem 1rem',
+    },
+    userPreviewMainIdentifier: {
+      color: '#ffffff',
+      fontWeight: '600',
+      fontSize: '0.875rem',
+    },
+    userPreviewSecondaryIdentifier: {
+      color: '#a1a1aa',
+      fontSize: '0.8125rem',
+    },
+    userPreviewAvatarContainer: {
+      border: '1px solid #3f3f46',
     },
   },
 };

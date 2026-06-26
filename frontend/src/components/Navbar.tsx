@@ -33,7 +33,7 @@ export const Navbar: React.FC = () => {
                     <a href="#" aria-label="LinkedIn" className="hidden sm:block hover:text-white transition-colors"><Linkedin className="w-4.5 h-4.5" /></a>
                     <a href="#" aria-label="Twitter" className="hidden sm:block hover:text-white transition-colors"><Twitter className="w-4.5 h-4.5" /></a>
                     <SignedIn>
-                        <UserButton />
+                        <UserButton afterSignOutUrl="/" />
                     </SignedIn>
                     <SignedOut>
                         <SignInButton mode="modal">

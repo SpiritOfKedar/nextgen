@@ -102,3 +102,40 @@ textarea,
   font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
 }
 
+/* Clerk auth UI — reinforce NextGen dark theme */
+.cl-userButtonPopoverCard {
+  background-color: #18181b;
+  border: 1px solid #27272a;
+  border-radius: 0.75rem;
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.65);
+}
+
+.cl-userButtonPopoverActionButton {
+  color: #e4e4e7;
+}
+
+.cl-userButtonPopoverActionButton:hover {
+  background-color: #27272a;
+  color: #ffffff;
+}
+
+.cl-userButtonPopoverActionButtonIcon {
+  opacity: 0.85;
+}
+
+.cl-userPreviewMainIdentifier {
+  color: #ffffff;
+}
+
+.cl-userPreviewSecondaryIdentifier {
+  color: #a1a1aa;
+}
+
+.cl-modalBackdrop {
+  backdrop-filter: blur(4px);
+}
+
+.cl-card {
+  background-color: #18181b;
+}
+
