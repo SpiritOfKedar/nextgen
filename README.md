@@ -1308,3 +1308,13 @@ flowchart TD
   <br />
   <em>Built with 🐱 by the NextGen team — always under catstruction, always shipping.</em>
 </p>
+
+<br />
+
+<p align="center">
+  <img src="docs/assets/brian-frustration.png" alt="The face you make after the 47th npm install in WebContainer" width="320" />
+  <br />
+  <em>Every line of this project was written somewhere between "this will be easy" and whatever this is.</em>
+  <br />
+  <sub>Streaming parsers · advisory locks · orphan message cleanup · terminal auto-recovery at 2 AM · "why is node_modules 400MB again"</sub>
+</p>
