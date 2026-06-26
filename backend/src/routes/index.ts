@@ -15,12 +15,15 @@ const router = Router();
 
 const jsonDefault = express.json({ limit: '256kb' });
 const jsonLarge = express.json({ limit: '10mb' });
+const audioRaw = express.raw({ limit: '15mb', type: ['audio/*', 'application/octet-stream'] });
 
 // Routes that accept large JSON bodies (must declare parser before default)
 // @ts-ignore
 router.post('/chat', jsonLarge, authMiddleware, chatController.sendMessage);
 // @ts-ignore
 router.post('/chat/enhance-prompt', jsonDefault, authMiddleware, chatController.enhancePrompt);
+// @ts-ignore
+router.post('/chat/transcribe', audioRaw, authMiddleware, chatController.transcribeAudio);
 // @ts-ignore
 router.post('/terminal/:threadId/events', jsonLarge, authMiddleware, terminalController.appendEvents);
 // @ts-ignore

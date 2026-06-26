@@ -45,19 +45,19 @@ export const AVAILABLE_MODELS: AIModel[] = [
         id: 'claude-opus-4.5',
         label: 'Claude Opus 4.5',
         provider: 'anthropic',
-        apiModelId: 'claude-haiku-4-5'
+        apiModelId: 'claude-sonnet-4-5'
     },
     {
         id: 'claude-opus-4.6',
         label: 'Claude Opus 4.6',
         provider: 'anthropic',
-        apiModelId: 'claude-haiku-4-5'
+        apiModelId: 'claude-sonnet-4-5'
     },
     {
         id: 'claude-sonnet-4.5',
         label: 'Claude Sonnet 4.5',
         provider: 'anthropic',
-        apiModelId: 'claude-haiku-4-5'
+        apiModelId: 'claude-sonnet-4-5'
     },
     {
         id: 'claude-haiku-4.5',

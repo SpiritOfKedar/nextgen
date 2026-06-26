@@ -275,4 +275,42 @@ export const chatController = {
             });
         }
     },
+
+    async transcribeAudio(req: Request, res: Response) {
+        try {
+            if (!req.user) {
+                return res.status(401).json({ error: 'Unauthorized' });
+            }
+            const body = req.body;
+            const audioBuffer = Buffer.isBuffer(body) ? body : Buffer.from([]);
+            if (!audioBuffer.length) {
+                return res.status(400).json({ error: 'Audio body is required' });
+            }
+
+            const mimeType = typeof req.headers['content-type'] === 'string'
+                ? req.headers['content-type']
+                : 'application/octet-stream';
+            const encodedFileName = req.headers['x-audio-filename'];
+            let fileName: string | null = null;
+            if (typeof encodedFileName === 'string' && encodedFileName) {
+                try {
+                    fileName = decodeURIComponent(encodedFileName);
+                } catch {
+                    fileName = encodedFileName;
+                }
+            }
+
+            const text = await chatService.transcribeAudio(audioBuffer, mimeType, fileName);
+            res.json({ text });
+        } catch (error) {
+            log.error('chat.transcribe_audio_controller_failed', {
+                requestId: req.requestId,
+                internalUserId: req.user?.id,
+                ...errorFields(error),
+            });
+            res.status(500).json({
+                error: error instanceof Error ? error.message : 'Failed to transcribe audio',
+            });
+        }
+    },
 };

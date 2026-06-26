@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { motion } from 'framer-motion';
-import { Paperclip, ArrowRight, X, Figma, MessageSquare, Loader2, Plus, Sparkles } from 'lucide-react';
+import { Paperclip, ArrowRight, X, Figma, MessageSquare, Loader2, Plus, Sparkles, Mic } from 'lucide-react';
 import { SignInButton, useAuth } from '@clerk/clerk-react';
 import { useChat } from '../../hooks/useChat';
 import { ModelSelector } from './ModelSelector';
@@ -52,7 +52,7 @@ export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default', compa
     const [manualFigmaLinks, setManualFigmaLinks] = useAtom(manualFigmaLinksAtom);
     const [stitchContext, setStitchContext] = useAtom(stitchContextAtom);
     const [supabaseContext, setSupabaseContext] = useAtom(supabaseContextAtom);
-    const { sendMessage, enhancePrompt, isLoading, fetchThreads, loadThread, deleteThread } = useChat();
+    const { sendMessage, enhancePrompt, transcribeAudio, isLoading, fetchThreads, loadThread, deleteThread } = useChat();
     const [chatMode, setChatMode] = useAtom(chatModeAtom);
     const threads = useAtomValue(threadsAtom);
     const threadSwitchState = useAtomValue(threadSwitchStateAtom);
@@ -62,8 +62,10 @@ export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default', compa
     const [historyError, setHistoryError] = useState<string | null>(null);
     const [submitError, setSubmitError] = useState<string | null>(null);
     const [isEnhancing, setIsEnhancing] = useState(false);
+    const [isTranscribing, setIsTranscribing] = useState(false);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
+    const audioInputRef = useRef<HTMLInputElement>(null);
     const figmaButtonRef = useRef<HTMLButtonElement>(null);
     const stitchButtonRef = useRef<HTMLButtonElement>(null);
     const MAX_FILE_CHARS = 25_000;
@@ -317,6 +319,25 @@ export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default', compa
             setInputValue(result.enhanced);
         } finally {
             setIsEnhancing(false);
+        }
+    };
+
+    const handleAudioSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        e.target.value = '';
+        if (!file || isTranscribing || isLoading) return;
+
+        setSubmitError(null);
+        setIsTranscribing(true);
+        try {
+            const result = await transcribeAudio(file);
+            if (!result.ok) {
+                setSubmitError(result.error);
+                return;
+            }
+            setInputValue((prev) => (prev.trim() ? `${prev}\n${result.text}` : result.text));
+        } finally {
+            setIsTranscribing(false);
         }
     };
 
@@ -762,6 +783,13 @@ export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default', compa
                             mergeFilesDeduped(files);
                         }}
                     />
+                    <input
+                        type="file"
+                        ref={audioInputRef}
+                        className="hidden"
+                        accept="audio/*"
+                        onChange={(e) => void handleAudioSelected(e)}
+                    />
 
                     <div className="flex items-center gap-1.5 shrink-0">
                         <button
@@ -787,6 +815,20 @@ export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default', compa
                             aria-label="Add files"
                         >
                             <Paperclip className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => audioInputRef.current?.click()}
+                            disabled={isTranscribing || isLoading}
+                            className={`${iconBtnClass} disabled:opacity-40 disabled:cursor-not-allowed`}
+                            title="Transcribe audio to text (Whisper)"
+                            aria-label="Transcribe audio"
+                        >
+                            {isTranscribing ? (
+                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            ) : (
+                                <Mic className="w-3.5 h-3.5" />
+                            )}
                         </button>
 
                         <SupabaseToolbarButton
