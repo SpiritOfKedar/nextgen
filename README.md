@@ -1,12 +1,10 @@
 <p align="center">
-  <img src="docs/assets/nextgen-logo.png" alt="NextGen logo" width="120" />
+  <img src="docs/assets/nextgen-logo.png" alt="NextGen" width="180" />
 </p>
 
 <p align="center">
   <img src="docs/assets/under-catstruction.png" alt="Under Catstruction — NextGen is always improving" width="480" />
 </p>
-
-<h1 align="center">NextGen</h1>
 
 <p align="center">
   <strong>AI-powered no-code platform — describe what you want, watch it build, run it live in your browser.</strong>
