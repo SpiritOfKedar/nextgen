@@ -40,6 +40,16 @@ const PATTERNS: PatternRule[] = [
     ],
   },
   {
+    code: 'deps_not_installed',
+    regex: /MODULE_NOT_FOUND[\s\S]*node_modules\/vite|Cannot find module ['"].*node_modules\/vite/i,
+    confidence: 0.97,
+    message: 'Dependencies are not installed (vite missing from node_modules).',
+    diagnosticHints: [
+      'Run npm install in the project workdir (~) — node_modules is empty or incomplete.',
+      'Do not start npm run dev until install completes successfully.',
+    ],
+  },
+  {
     code: 'vite_missing_binary',
     regex: /command not found:\s*vite|sh:\s*1:\s*vite:\s*not found/i,
     confidence: 0.95,
@@ -51,7 +61,7 @@ const PATTERNS: PatternRule[] = [
   },
   {
     code: 'module_resolution_failed',
-    regex: /Failed to resolve import|Cannot find module|Could not resolve/i,
+    regex: /Failed to resolve import|Could not resolve(?!\s+dependency)/i,
     confidence: 0.85,
     message: 'Import could not be resolved.',
     diagnosticHints: [

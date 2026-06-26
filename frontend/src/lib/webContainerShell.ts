@@ -113,6 +113,85 @@ const DEFAULT_COMMAND_TIMEOUT_MS = 120_000;
 
 export const normalizeWrittenPath = (p: string) => p.replace(/^\//, '').replace(/\\/g, '/');
 
+/** WebContainer fs paths must be workdir-relative — never prefix with `/` (that lands outside the project). */
+export const toWorkdirRelativePath = (filePath: string): string =>
+    normalizeWrittenPath(filePath);
+
+export async function writeProjectFile(
+    wc: WebContainer,
+    filePath: string,
+    content: string,
+): Promise<void> {
+    const rel = toWorkdirRelativePath(filePath);
+    const dir = rel.substring(0, rel.lastIndexOf('/'));
+    if (dir) {
+        try {
+            await wc.fs.mkdir(dir, { recursive: true });
+        } catch {
+            /* directory may already exist */
+        }
+    }
+    await wc.fs.writeFile(rel, content);
+}
+
+export async function readProjectFile(
+    wc: WebContainer,
+    filePath: string,
+): Promise<string | null> {
+    const rel = toWorkdirRelativePath(filePath);
+    try {
+        const raw = await wc.fs.readFile(rel, 'utf-8');
+        return raw?.trim() ? raw : null;
+    } catch {
+        return null;
+    }
+}
+
+export async function projectFileExists(wc: WebContainer, filePath: string): Promise<boolean> {
+    const content = await readProjectFile(wc, filePath);
+    return content !== null;
+}
+
+/**
+ * Map a path relative to the project root into a WebContainer fs path (workdir-relative).
+ * npm install and wc.fs.writeFile('package.json') use this layout — not absolute /home/... paths.
+ */
+export function resolveProjectFsPath(
+    wc: WebContainer,
+    projectDir: string,
+    relativePath: string,
+): string {
+    const workdir = wc.workdir;
+    const absolute = normalizeProjectDir(wc, projectDir);
+    const rel = toWorkdirRelativePath(relativePath);
+    if (absolute === workdir) return rel;
+    if (absolute.startsWith(`${workdir}/`)) {
+        const projectRel = absolute.slice(workdir.length + 1);
+        return projectRel ? `${projectRel}/${rel}` : rel;
+    }
+    return rel;
+}
+
+export async function hasViteInstalled(wc: WebContainer, projectDir: string): Promise<boolean> {
+    const vitePath = resolveProjectFsPath(wc, projectDir, 'node_modules/vite/bin/vite.js');
+    try {
+        await wc.fs.readFile(vitePath);
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+export async function hasNodeModulesInstalled(wc: WebContainer, projectDir: string): Promise<boolean> {
+    const nmPath = resolveProjectFsPath(wc, projectDir, 'node_modules');
+    try {
+        const entries = await wc.fs.readdir(nmPath);
+        return Array.isArray(entries) && entries.length > 0;
+    } catch {
+        return false;
+    }
+}
+
 export const normalizeWebContainerPath = (path: string): string => {
     const normalized = path.replace(/\\/g, '/').trim();
     if (!normalized) return '/';
@@ -338,12 +417,14 @@ export const syncShellWorkingDirectory = async (
     shellWriter: WritableStreamDefaultWriter<string> | null,
     wc: WebContainer,
     projectDir: string,
+    force = false,
 ): Promise<void> => {
     if (!shellWriter) return;
     const target = normalizeProjectDir(wc, projectDir);
-    if (lastSyncedShellCwd === target) return;
+    if (!force && lastSyncedShellCwd === target) return;
     try {
-        await shellWriter.write(`cd "${target}"\n`);
+        // `~` resolves to the WebContainer workdir in jsh — safer than absolute `/` paths.
+        await shellWriter.write('cd ~\n');
         lastSyncedShellCwd = target;
     } catch {
         // best effort only

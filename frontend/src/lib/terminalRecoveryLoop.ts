@@ -9,7 +9,7 @@ import {
     writeShellOutput,
 } from '../store/webContainer';
 import {
-    ensureProjectDependencies,
+    ensureDepsReadyForDev,
     filterInstallShellCommands,
     syncProjectFiles,
 } from './sandboxInstall';
@@ -243,11 +243,12 @@ export async function runIterativeRecovery(input: RunIterativeRecoveryInput): Pr
         fileMap: getFileMap(),
         repairRootForNpm,
         onPackageJsonPatched: (content) => onFileWritten('package.json', content),
+        syncShellCwd: () => syncShellWorkingDirectory(shellWriter, wc, projectDir, true),
     });
     if (preFixes.some((f) => f.applied)) {
         const preToken = await getToken();
         if (preToken) {
-            const preDep = await ensureProjectDependencies({
+            const preDep = await ensureDepsReadyForDev({
                 wc,
                 threadId,
                 fileMap: getFileMap(),
@@ -408,7 +409,7 @@ export async function runIterativeRecovery(input: RunIterativeRecoveryInput): Pr
         let devServerStartedThisRound = false;
         const roundCommands: string[] = [];
 
-        const depResult = await ensureProjectDependencies({
+        const depResult = await ensureDepsReadyForDev({
             wc,
             threadId,
             fileMap: recoveryFileMap,

@@ -6,8 +6,11 @@ import {
     buildSpawnEnv,
     buildSpawnOptions,
     ensureNpmCacheDir,
+    hasNodeModulesInstalled,
+    hasViteInstalled,
     inferProjectDirectory,
     resolveProjectDirectoryForNpm,
+    resolveProjectFsPath,
     runProcessAndCollectExit,
 } from './webContainerShell';
 import { applyDeterministicTerminalFixes } from './terminalAutoFix';
@@ -188,18 +191,18 @@ const isTarAvailable = async (wc: WebContainer): Promise<boolean> => {
 
 const createZipArchiveFromDirectory = async (wc: WebContainer, rootDir: string): Promise<Uint8Array | null> => {
     const zip = new JSZip();
-    const walk = async (absPath: string, relPath: string): Promise<void> => {
-        const entries = await wc.fs.readdir(absPath);
+    const walk = async (fsPath: string, relPath: string): Promise<void> => {
+        const entries = await wc.fs.readdir(fsPath);
         for (const entry of entries as string[]) {
-            const childAbs = absPath === '/' ? `/${entry}` : `${absPath}/${entry}`;
+            const childFs = `${fsPath}/${entry}`;
             const childRel = relPath ? `${relPath}/${entry}` : entry;
             try {
-                await wc.fs.readdir(childAbs);
+                await wc.fs.readdir(childFs);
                 zip.folder(childRel);
-                await walk(childAbs, childRel);
+                await walk(childFs, childRel);
             } catch {
                 try {
-                    const content = await wc.fs.readFile(childAbs);
+                    const content = await wc.fs.readFile(childFs);
                     zip.file(childRel, content);
                 } catch {
                     /* ignore */
@@ -208,7 +211,7 @@ const createZipArchiveFromDirectory = async (wc: WebContainer, rootDir: string):
         }
     };
     try {
-        await walk(rootDir === '/' ? '/node_modules' : `${rootDir}/node_modules`, 'node_modules');
+        await walk(resolveProjectFsPath(wc, rootDir, 'node_modules'), 'node_modules');
         return zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
     } catch {
         return null;
@@ -219,21 +222,21 @@ const createNodeModulesSnapshot = async (
     wc: WebContainer,
     projectDir: string,
 ): Promise<{ bytes: Uint8Array; format: 'tar.gz' | 'zip' } | null> => {
-    const cwd = projectDir || '/';
+    const nmRel = resolveProjectFsPath(wc, projectDir, 'node_modules');
     const tarAvailable = await isTarAvailable(wc);
     if (!tarAvailable) {
-        console.info('[SandboxPerf] tar_unavailable_using_js_fallback', { cwd });
-        const zipBytes = await createZipArchiveFromDirectory(wc, cwd);
+        console.info('[SandboxPerf] tar_unavailable_using_js_fallback', { projectDir });
+        const zipBytes = await createZipArchiveFromDirectory(wc, projectDir);
         if (!zipBytes) return null;
         return { bytes: zipBytes, format: 'zip' };
     }
-    const proc = await wc.spawn('sh', ['-lc', `tar -czf "${SNAPSHOT_ARCHIVE_PATH}" -C "${cwd}" node_modules`], {
-        env: buildSpawnEnv(cwd),
+    const proc = await wc.spawn('sh', ['-lc', `tar -czf "${SNAPSHOT_ARCHIVE_PATH.replace(/^\//, '')}" -C . "${nmRel}"`], {
+        ...buildSpawnOptions(wc, projectDir),
     });
     const exitCode = await runProcessAndCollectExit(proc, 120_000);
     if (exitCode !== 0) return null;
     try {
-        const archive = await wc.fs.readFile(SNAPSHOT_ARCHIVE_PATH);
+        const archive = await wc.fs.readFile(SNAPSHOT_ARCHIVE_PATH.replace(/^\//, ''));
         return {
             bytes: archive instanceof Uint8Array ? archive : new Uint8Array(archive),
             format: 'tar.gz',
@@ -261,13 +264,13 @@ const extractZipArchiveToDirectory = async (
                 batch.map(async (entry) => {
                     const normalized = entry.name.replace(/\\/g, '/').replace(/^\/+/, '');
                     if (!normalized) return;
-                    const absPath = projectDir === '/' ? `/${normalized}` : `${projectDir}/${normalized}`;
-                    const folderPath = absPath.slice(0, absPath.lastIndexOf('/'));
+                    const fsPath = resolveProjectFsPath(wc, projectDir, normalized);
+                    const folderPath = fsPath.slice(0, fsPath.lastIndexOf('/'));
                     if (folderPath) {
                         await wc.fs.mkdir(folderPath, { recursive: true });
                     }
                     const fileBytes = await entry.async('uint8array');
-                    await wc.fs.writeFile(absPath, fileBytes);
+                    await wc.fs.writeFile(fsPath, fileBytes);
                 }),
             );
         }
@@ -284,19 +287,19 @@ const restoreNodeModulesSnapshot = async (
     archiveFormat: 'tar.gz' | 'zip' = 'tar.gz',
     onProgress?: (message: string) => void,
 ): Promise<boolean> => {
-    const cwd = projectDir || '/';
     if (archiveFormat === 'zip') {
-        return extractZipArchiveToDirectory(wc, cwd, archiveBytes, onProgress);
+        return extractZipArchiveToDirectory(wc, projectDir, archiveBytes, onProgress);
     }
     const tarAvailable = await isTarAvailable(wc);
     if (!tarAvailable) {
-        return extractZipArchiveToDirectory(wc, cwd, archiveBytes, onProgress);
+        return extractZipArchiveToDirectory(wc, projectDir, archiveBytes, onProgress);
     }
     try {
-        await wc.fs.mkdir('/.boltly', { recursive: true });
-        await wc.fs.writeFile(SNAPSHOT_ARCHIVE_PATH, archiveBytes);
-        const proc = await wc.spawn('sh', ['-lc', `mkdir -p "${cwd}" && tar -xzf "${SNAPSHOT_ARCHIVE_PATH}" -C "${cwd}"`], {
-            env: buildSpawnEnv(cwd),
+        await wc.fs.mkdir('.boltly', { recursive: true });
+        await wc.fs.writeFile(SNAPSHOT_ARCHIVE_PATH.replace(/^\//, ''), archiveBytes);
+        const archiveRel = SNAPSHOT_ARCHIVE_PATH.replace(/^\//, '');
+        const proc = await wc.spawn('sh', ['-lc', `tar -xzf "${archiveRel}" -C .`], {
+            ...buildSpawnOptions(wc, projectDir),
         });
         const exitCode = await runProcessAndCollectExit(proc, 120_000);
         return exitCode === 0;
@@ -340,7 +343,7 @@ const attemptRestoreFingerprintSnapshot = async (
 
 const readInstalledDependencyFingerprint = async (wc: WebContainer): Promise<string | null> => {
     try {
-        const marker = await wc.fs.readFile(DEP_FINGERPRINT_MARKER_PATH, 'utf-8');
+        const marker = await wc.fs.readFile(DEP_FINGERPRINT_MARKER_PATH.replace(/^\//, ''), 'utf-8');
         const normalized = typeof marker === 'string' ? marker.trim() : '';
         return normalized || null;
     } catch {
@@ -350,23 +353,23 @@ const readInstalledDependencyFingerprint = async (wc: WebContainer): Promise<str
 
 export const persistInstalledDependencyFingerprint = async (wc: WebContainer, fingerprint: string): Promise<void> => {
     try {
-        await wc.fs.mkdir('/.boltly', { recursive: true });
-        await wc.fs.writeFile(DEP_FINGERPRINT_MARKER_PATH, fingerprint);
+        await wc.fs.mkdir('.boltly', { recursive: true });
+        await wc.fs.writeFile(DEP_FINGERPRINT_MARKER_PATH.replace(/^\//, ''), fingerprint);
     } catch {
         /* best effort */
     }
 };
 
-const hasInstalledNodeModules = async (wc: WebContainer, projectDir: string): Promise<boolean> => {
-    const normalizedProjectDir = projectDir === '/' ? '' : projectDir;
-    const nodeModulesPath = `${normalizedProjectDir}/node_modules`;
+export const clearDependencyCacheMarker = async (wc: WebContainer): Promise<void> => {
     try {
-        const entries = await wc.fs.readdir(nodeModulesPath || '/node_modules');
-        return Array.isArray(entries) && entries.length > 0;
+        await wc.fs.rm(DEP_FINGERPRINT_MARKER_PATH.replace(/^\//, ''));
     } catch {
-        return false;
+        /* best effort */
     }
 };
+
+const hasInstalledNodeModules = (wc: WebContainer, projectDir: string) =>
+    hasNodeModulesInstalled(wc, projectDir);
 
 const findBestAncestorSnapshot = (
     currentDepNames: Set<string>,
@@ -453,7 +456,8 @@ export async function ensureProjectDependencies(
     const restoreStart = performance.now();
     const localInstalledFingerprint = await readInstalledDependencyFingerprint(wc);
     const nodeModulesPresent = await hasInstalledNodeModules(wc, projectDir);
-    hasLocalDependencyCache = nodeModulesPresent && localInstalledFingerprint === depFingerprint;
+    const vitePresent = await hasViteInstalled(wc, projectDir);
+    hasLocalDependencyCache = nodeModulesPresent && vitePresent && localInstalledFingerprint === depFingerprint;
 
     let cachedDependencyPlan: { snapshotState?: string; uploadAttemptCount?: number } | null = null;
     try {
@@ -600,18 +604,24 @@ export async function ensureProjectDependencies(
     }
 
     if (!shouldInstall) {
-        return {
-            ok: true,
-            depFingerprint,
-            criticalFingerprint,
-            projectDir,
-            installed: false,
-            cacheHit: true,
-            decisionSource,
-            deltaPackages,
-            restoreMs,
-            installMs: 0,
-        };
+        const viteOk = await hasViteInstalled(wc, projectDir);
+        if (viteOk) {
+            return {
+                ok: true,
+                depFingerprint,
+                criticalFingerprint,
+                projectDir,
+                installed: false,
+                cacheHit: true,
+                decisionSource,
+                deltaPackages,
+                restoreMs,
+                installMs: 0,
+            };
+        }
+        writeShellOutput(
+            '\r\n\x1b[33m⚠ Dependency cache marker found but vite is missing — running npm install…\x1b[0m\r\n',
+        );
     }
 
     const installStart = performance.now();
@@ -734,6 +744,22 @@ export async function ensureProjectDependencies(
         restoreMs,
         installMs,
     };
+}
+
+/** Run install gate and verify vite exists on disk before starting the dev server. */
+export async function ensureDepsReadyForDev(
+    input: EnsureProjectDependenciesInput,
+): Promise<EnsureProjectDependenciesResult> {
+    let result = await ensureProjectDependencies(input);
+    if (!result.ok) return result;
+    if (await hasViteInstalled(input.wc, result.projectDir)) return result;
+
+    input.writeShellOutput(
+        '\r\n\x1b[33m⚠ vite missing from node_modules — clearing stale cache marker and running npm install…\x1b[0m\r\n',
+    );
+    await clearDependencyCacheMarker(input.wc);
+    result = await ensureProjectDependencies(input);
+    return result;
 }
 
 export type SyncProjectFilesResult = {

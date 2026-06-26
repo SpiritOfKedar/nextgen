@@ -37,10 +37,12 @@ import {
     resetSyncedShellCwd,
     syncShellWorkingDirectory,
     buildSpawnOptions,
+    writeProjectFile,
+    readProjectFile,
 } from '../lib/webContainerShell';
 import { repairViteScriptsForWebContainer } from '../lib/webContainerScripts';
 import {
-    ensureProjectDependencies,
+    ensureDepsReadyForDev,
     filterInstallShellCommands,
     getCriticalConfigFingerprint,
     getDependencyFingerprint,
@@ -54,6 +56,7 @@ import {
     type SupabaseMigrationInput,
 } from '../lib/supabaseSandboxEnv';
 import { upgradeUiComponents } from '../lib/scaffolds/uiComponents';
+import { ensureProjectScaffold, ensureScaffoldOnDisk, needsProjectScaffold, SCAFFOLD_PATHS } from '../lib/projectScaffold';
 import { collectMigrationsFromFileMap, mergeMigrationInputs } from '../lib/supabaseMigrationCollect';
 import { supabaseContextAtom } from '../store/mcpAttachments';
 import type { WebContainer } from '@webcontainer/api';
@@ -97,16 +100,7 @@ const queueBoltFileWrite = (
 ) => {
     chainRef.current = chainRef.current.then(async () => {
         try {
-            const absPath = '/' + filePath.replace(/^\//, '');
-            const dir = absPath.substring(0, absPath.lastIndexOf('/'));
-            if (dir && dir !== '/') {
-                try {
-                    await wc.fs.mkdir(dir, { recursive: true });
-                } catch {
-                    // Directory may already exist
-                }
-            }
-            await wc.fs.writeFile(absPath, fileContent);
+            await writeProjectFile(wc, filePath, fileContent);
             markPreviewStale();
         } catch (err) {
             console.error(`[Bolt] Failed to write ${filePath}:`, err);
@@ -259,19 +253,16 @@ const getRootPackageJsonFromMap = (writtenFiles: Map<string, string>): string | 
     return undefined;
 };
 
-/** Readable valid root package.json on disk (WebContainer may use `package.json` or `/package.json`). */
+/** Readable valid root package.json on disk (workdir-relative path). */
 async function hasValidRootPackageJsonOnDisk(wc: any): Promise<boolean> {
-    for (const p of ['package.json', '/package.json']) {
-        try {
-            const raw = await wc.fs.readFile(p, 'utf-8');
-            if (!raw?.trim()) continue;
-            JSON.parse(raw);
-            return true;
-        } catch {
-            /* missing or invalid */
-        }
+    const raw = await readProjectFile(wc, 'package.json');
+    if (!raw) return false;
+    try {
+        JSON.parse(raw);
+        return true;
+    } catch {
+        return false;
     }
-    return false;
 }
 
 /**
@@ -282,19 +273,17 @@ async function repairRootForNpm(wc: any, announce = true): Promise<void> {
     if (!wc) return;
     if (await hasValidRootPackageJsonOnDisk(wc)) return;
 
-    for (const lock of ['package-lock.json', '/package-lock.json']) {
+    for (const lock of ['package-lock.json']) {
         try {
             await wc.fs.rm(lock);
         } catch {
             /* */
         }
     }
-    for (const p of ['package.json', '/package.json']) {
-        try {
-            await wc.fs.writeFile(p, MINIMAL_ROOT_PACKAGE_JSON);
-        } catch {
-            /* try alternate path */
-        }
+    try {
+        await writeProjectFile(wc, 'package.json', MINIMAL_ROOT_PACKAGE_JSON);
+    } catch {
+        /* */
     }
     if (announce) {
         writeShellOutput(
@@ -312,6 +301,7 @@ async function ensureRootPackageJsonExists(
     wc: any,
     setFileSystem: (updater: (prev: FileSystemItem[]) => FileSystemItem[]) => void,
 ): Promise<void> {
+    ensureProjectScaffold(writtenFiles);
     const fromMap = getRootPackageJsonFromMap(writtenFiles);
     if (fromMap) {
         try {
@@ -326,10 +316,10 @@ async function ensureRootPackageJsonExists(
     }
 
     if (wc) {
-        for (const p of ['/package.json', 'package.json']) {
+        for (const p of ['package.json']) {
             try {
-                const existing = await wc.fs.readFile(p, 'utf-8');
-                if (existing?.trim()) {
+                const existing = await readProjectFile(wc, p);
+                if (existing) {
                     try {
                         JSON.parse(existing);
                         writtenFiles.set('package.json', existing);
@@ -412,10 +402,10 @@ async function patchMissingDependencies(
     const patchedPkg = JSON.stringify(pkg, null, 2);
     writtenFiles.set('package.json', patchedPkg);
 
-    // Write patched package.json to WebContainer
+    // Write patched package.json to WebContainer workdir
     if (wc) {
         try {
-            await wc.fs.writeFile('/package.json', patchedPkg);
+            await writeProjectFile(wc, 'package.json', patchedPkg);
         } catch (err) {
             console.error('[useChat] Failed to write patched package.json:', err);
         }
@@ -542,6 +532,7 @@ const buildFileMap = (
 
 const RECOVERY_BOOTSTRAP_ISSUE_CODES = new Set([
     'cwd_package_json_missing',
+    'deps_not_installed',
     'install_failed',
     'dev_server_failed',
     'vite_permission_denied',
@@ -832,119 +823,7 @@ export const useChat = () => {
         };
         if (abortIfStale('start')) return;
 
-        // If the AI didn't generate package.json, index.html, or vite.config,
-        // provide sensible defaults so npm install can work.
-        if (!fileMap.has('package.json')) {
-            const defaultPkg = JSON.stringify({
-                name: 'restored-project',
-                private: true,
-                version: '0.0.0',
-                type: 'module',
-                scripts: {
-                    dev: 'node ./node_modules/vite/bin/vite.js',
-                    build: 'node ./node_modules/vite/bin/vite.js build',
-                },
-                dependencies: {
-                    'react': '^18.3.1',
-                    'react-dom': '^18.3.1',
-                    'lucide-react': '^0.400.0',
-                    'clsx': '^2.1.0',
-                    'tailwind-merge': '^2.2.0',
-                    'class-variance-authority': '^0.7.0',
-                    '@radix-ui/react-slot': '^1.0.0',
-                },
-                devDependencies: {
-                    '@types/react': '^18.3.0',
-                    '@types/react-dom': '^18.3.0',
-                    '@vitejs/plugin-react': '^4.3.0',
-                    'typescript': '^5.5.0',
-                    'vite': '^5.4.0',
-                    'tailwindcss': '^4.0.0',
-                    '@tailwindcss/vite': '^4.0.0',
-                },
-            }, null, 2);
-            fileMap.set('package.json', defaultPkg);
-        }
-
-        if (!fileMap.has('index.html')) {
-            const defaultHtml = `<!DOCTYPE html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>App</title>
-  </head>
-  <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
-  </body>
-</html>`;
-            fileMap.set('index.html', defaultHtml);
-        }
-
-        if (!fileMap.has('vite.config.ts')) {
-            const defaultVite = `import { defineConfig } from 'vite';
-import react from '@vitejs/plugin-react';
-import tailwindcss from '@tailwindcss/vite';
-
-export default defineConfig({
-  plugins: [react(), tailwindcss()],
-  server: {
-    host: true,
-  },
-});
-`;
-            fileMap.set('vite.config.ts', defaultVite);
-        }
-
-        if (!fileMap.has('tsconfig.json')) {
-            const defaultTsconfig = JSON.stringify({
-                compilerOptions: {
-                    target: 'ES2020',
-                    useDefineForClassFields: true,
-                    lib: ['ES2020', 'DOM', 'DOM.Iterable'],
-                    module: 'ESNext',
-                    skipLibCheck: true,
-                    moduleResolution: 'bundler',
-                    allowImportingTsExtensions: true,
-                    resolveJsonModule: true,
-                    isolatedModules: true,
-                    noEmit: true,
-                    jsx: 'react-jsx',
-                    strict: true,
-                },
-                include: ['src'],
-            }, null, 2);
-            fileMap.set('tsconfig.json', defaultTsconfig);
-        }
-
-        // Tailwind v4: ensure src/index.css uses @import "tailwindcss" (not v3 directives)
-        const existingCss = fileMap.get('src/index.css') || '';
-        if (!existingCss.includes('@import "tailwindcss"') && !existingCss.includes("@import 'tailwindcss'")) {
-            const fixedCss = '@import "tailwindcss";\n' + existingCss.replace(/@tailwind\s+(base|components|utilities);?\s*/g, '');
-            fileMap.set('src/index.css', fixedCss);
-        }
-
-        // Ensure src/main.tsx imports index.css
-        if (!fileMap.has('src/main.tsx')) {
-            const defaultMain = `import { StrictMode } from 'react';
-import { createRoot } from 'react-dom/client';
-import './index.css';
-import App from './App';
-
-createRoot(document.getElementById('root')!).render(
-  <StrictMode>
-    <App />
-  </StrictMode>
-);
-`;
-            fileMap.set('src/main.tsx', defaultMain);
-        } else {
-            const mainContent = fileMap.get('src/main.tsx')!;
-            if (!mainContent.includes('index.css')) {
-                fileMap.set('src/main.tsx', "import './index.css';\n" + mainContent);
-            }
-        }
+        ensureProjectScaffold(fileMap);
 
         // Patch missing dependencies before writing files
         await patchMissingDependencies(fileMap, wc, setFileSystem);
@@ -973,7 +852,7 @@ createRoot(document.getElementById('root')!).render(
         try {
             if (abortIfStale('before_install_gate')) return;
 
-            const depResult = await ensureProjectDependencies({
+            const depResult = await ensureDepsReadyForDev({
                 wc,
                 threadId,
                 fileMap,
@@ -1310,6 +1189,20 @@ createRoot(document.getElementById('root')!).render(
             // Track all files written during this stream for dependency patching
             const writtenFiles = new Map<string, string>();
             const fsWriteChain = { current: Promise.resolve() };
+            let scaffoldQueued = false;
+
+            const queueScaffoldIfNeeded = (wcInstance: WebContainer) => {
+                if (scaffoldQueued || !needsProjectScaffold(writtenFiles)) return;
+                scaffoldQueued = true;
+                ensureProjectScaffold(writtenFiles);
+                for (const path of SCAFFOLD_PATHS) {
+                    const content = writtenFiles.get(path);
+                    if (!content) continue;
+                    setFileSystem((prev) => upsertFile(prev, path, content));
+                    queueBoltFileWrite(fsWriteChain, wcInstance, path, content);
+                }
+                void fsWriteChain.current.then(() => ensureScaffoldOnDisk(wcInstance, writtenFiles));
+            };
 
             // ── Phase 1: Read the stream — write files immediately, queue shell commands ──
             // Navigate only after the first bytes arrive so the TCP reader is not starved by
@@ -1347,6 +1240,11 @@ createRoot(document.getElementById('root')!).render(
 
                         // Track for dependency patching
                         writtenFiles.set(path.replace(/^\//, ''), fileContent);
+
+                        const wcForScaffold = wc ?? getWebContainerInstance();
+                        if (wcForScaffold) {
+                            queueScaffoldIfNeeded(wcForScaffold);
+                        }
 
                         // Update file system atom (file tree + editor)
                         setFileSystem((prev) => upsertFile(prev, path, fileContent));
@@ -1413,8 +1311,14 @@ createRoot(document.getElementById('root')!).render(
 
             if (effectiveMode === 'build') {
                 const wcForNpm = webContainerInstance ?? getWebContainerInstance();
+                ensureProjectScaffold(writtenFiles);
                 await ensureRootPackageJsonExists(writtenFiles, wcForNpm, setFileSystem);
                 await patchMissingDependencies(writtenFiles, wcForNpm, setFileSystem);
+
+                if (wcForNpm) {
+                    await ensureScaffoldOnDisk(wcForNpm, writtenFiles);
+                    await syncShellWorkingDirectory(shellWriter, wcForNpm, wcForNpm.workdir, true);
+                }
 
                 const authToken = (await getToken()) ?? token ?? '';
 
@@ -1455,7 +1359,7 @@ createRoot(document.getElementById('root')!).render(
                     const depFingerprint = getDependencyFingerprint(installFileMap);
                     const criticalFingerprint = getCriticalConfigFingerprint(installFileMap);
 
-                    const depResult = await ensureProjectDependencies({
+                    const depResult = await ensureDepsReadyForDev({
                         wc,
                         threadId: buildThreadId,
                         fileMap: installFileMap,

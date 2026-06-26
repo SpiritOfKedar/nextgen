@@ -2,6 +2,7 @@ import type { WebContainer } from '@webcontainer/api';
 import { detectTerminalIssue } from './terminalIssues';
 import { repairViteScriptsForWebContainer, terminalShowsVitePermissionError } from './webContainerScripts';
 import { ensureNpmCacheDir } from './webContainerShell';
+import { ensureScaffoldOnDisk } from './projectScaffold';
 import { writeShellOutput } from '../store/webContainer';
 
 export type DeterministicFixResult = {
@@ -20,8 +21,18 @@ export async function applyDeterministicTerminalFixes(input: {
     fileMap: Map<string, string>;
     repairRootForNpm?: (announce?: boolean) => Promise<void>;
     onPackageJsonPatched?: (content: string) => void;
+    shellWriter?: WritableStreamDefaultWriter<string> | null;
+    syncShellCwd?: () => Promise<void>;
 }): Promise<DeterministicFixResult[]> {
-    const { wc, terminalOutput, projectDir, fileMap, repairRootForNpm, onPackageJsonPatched } = input;
+    const {
+        wc,
+        terminalOutput,
+        projectDir,
+        fileMap,
+        repairRootForNpm,
+        onPackageJsonPatched,
+        syncShellCwd,
+    } = input;
     const results: DeterministicFixResult[] = [];
     const tail = terminalOutput.slice(-12_000);
 
@@ -59,7 +70,34 @@ export async function applyDeterministicTerminalFixes(input: {
         });
     }
 
+    if (/MODULE_NOT_FOUND[\s\S]*node_modules\/vite|Cannot find module ['"].*node_modules\/vite/i.test(tail)) {
+        if (syncShellCwd) {
+            try {
+                await syncShellCwd();
+            } catch {
+                /* best effort */
+            }
+        }
+        results.push({
+            code: 'deps_not_installed',
+            applied: true,
+            message: 'vite missing from node_modules — npm install will be retried',
+        });
+    }
+
     if (/ENOENT[\s\S]*package\.json|Could not read package\.json/i.test(tail)) {
+        if (syncShellCwd) {
+            try {
+                await syncShellCwd();
+            } catch {
+                /* best effort */
+            }
+        }
+        try {
+            await ensureScaffoldOnDisk(wc, fileMap);
+        } catch {
+            /* best effort */
+        }
         if (repairRootForNpm) {
             try {
                 await repairRootForNpm(true);
@@ -90,6 +128,7 @@ export const DETERMINISTIC_FIX_CODES = new Set([
     'npm_cache_eacces',
     'vite_permission_denied',
     'cwd_package_json_missing',
+    'deps_not_installed',
     'wrong_working_directory',
 ]);
 

@@ -16,6 +16,8 @@ import { detectTerminalIssue } from '../../lib/terminalIssues';
 import { shouldAutoRecover, RECOVERY_LLM_MODEL } from '../../lib/terminalAutoFix';
 import { scheduleAutoTerminalRecovery } from '../../lib/terminalAutoRecovery';
 import { useAuth } from '@clerk/clerk-react';
+import { getWebContainerInstance } from '../../hooks/useWebContainer';
+import { resetSyncedShellCwd, syncShellWorkingDirectory } from '../../lib/webContainerShell';
 import { useChat } from '../../hooks/useChat';
 import { X } from 'lucide-react';
 import 'xterm/css/xterm.css';
@@ -35,6 +37,7 @@ export const TerminalPanel: React.FC = () => {
     const { getToken } = useAuth();
     const { runTerminalRecovery } = useChat();
     const outputBufferRef = useRef('');
+    const inputLineBufferRef = useRef('');
     const eventBufferRef = useRef<Array<{ eventType: string; payload: string; cwd?: string; exitCode?: number | null }>>([]);
     const [dismissedIssueCode, setDismissedIssueCode] = useState<string | null>(null);
 
@@ -164,6 +167,20 @@ export const TerminalPanel: React.FC = () => {
             if (currentThreadId) {
                 eventBufferRef.current.push({ eventType: 'input', payload: data });
             }
+
+            inputLineBufferRef.current += data;
+            if (data.includes('\r') || data.includes('\n')) {
+                const line = inputLineBufferRef.current.trim();
+                inputLineBufferRef.current = '';
+                if (/^(npm\s+(install|i|ci)\b|cd\s+\/|ls\b)/i.test(line)) {
+                    const wc = getWebContainerInstance();
+                    if (wc && writer) {
+                        resetSyncedShellCwd();
+                        void syncShellWorkingDirectory(writer, wc, wc.workdir, true);
+                    }
+                }
+            }
+
             if (writer) {
                 writer.write(data).catch(() => undefined);
             }

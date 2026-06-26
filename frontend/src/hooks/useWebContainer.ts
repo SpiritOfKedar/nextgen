@@ -98,7 +98,7 @@ export const useWebContainer = () => {
 
                         // jsh starts outside the project workdir — cd there so manual
                         // `npm run dev` finds package.json (same dir programmatic spawns use).
-                        void syncShellWorkingDirectory(writer, instance, instance.workdir);
+                        void syncShellWorkingDirectory(writer, instance, instance.workdir, true);
 
                         setShellResizeFn((dims) => shellProcess.resize?.(dims));
 
