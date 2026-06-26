@@ -96,9 +96,13 @@ export const useWebContainer = () => {
                         setShellWriter(writer);
                         setShellReady(true);
 
-                        // jsh starts outside the project workdir — cd there so manual
-                        // `npm run dev` finds package.json (same dir programmatic spawns use).
-                        void syncShellWorkingDirectory(writer, instance, instance.workdir, true);
+                        await syncShellWorkingDirectory(writer, instance, instance.workdir, true);
+                        writeShellOutput(
+                            '\r\n\x1b[2m⬢ Project shell — commands run in your project folder (like cd project && …)\x1b[0m\r\n',
+                        );
+                        writeShellOutput(
+                            '\x1b[2m   Try: \x1b[36mls\x1b[2m  \x1b[36mpwd\x1b[2m  \x1b[36mnpm install\x1b[2m  \x1b[36mnpm run dev\x1b[0m\r\n',
+                        );
 
                         setShellResizeFn((dims) => shellProcess.resize?.(dims));
 

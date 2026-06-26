@@ -1,9 +1,10 @@
 import OpenAI from 'openai';
+import type { ResponseInput } from 'openai/resources/responses/responses';
 import Anthropic from '@anthropic-ai/sdk';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import dotenv from 'dotenv';
 import { SYSTEM_PROMPT } from '../prompts/systemPrompt';
-import { getModelConfig } from '../config/models';
+import { getModelConfig, usesOpenAIResponsesApi } from '../config/models';
 import { withThreadLock, withTransaction } from '../config/db';
 import * as threadsRepo from '../repositories/threads';
 import * as messagesRepo from '../repositories/messages';
@@ -183,6 +184,7 @@ const BUILD_MODE_PROMPT = `
 You are in BUILD MODE.
 - Implement requested changes directly.
 - Emit valid <boltArtifact> and <boltAction> blocks for file and shell operations when needed.
+- NEVER use <artifact> or <action> — only <boltArtifact> and <boltAction> are parsed.
 - Keep changes minimal and consistent with existing project files.
 `.trim();
 
@@ -364,12 +366,12 @@ interface ExtractedFile {
 
 const extractFilesFromRaw = (raw: string): ExtractedFile[] => {
     const files: ExtractedFile[] = [];
-    const regex = /<boltAction\s+[^>]*?type="file"[^>]*?filePath="([^"]+)"[^>]*>([\s\S]*?)<\/boltAction>/g;
+    const regex = /<(?:bolt)?[Aa]ction\s+[^>]*?type="file"[^>]*?filePath="([^"]+)"[^>]*>([\s\S]*?)<\/(?:bolt)?[Aa]ction>/g;
     let m;
     while ((m = regex.exec(raw)) !== null) {
         files.push({ filePath: m[1], content: m[2] });
     }
-    const regex2 = /<boltAction\s+[^>]*?filePath="([^"]+)"[^>]*?type="file"[^>]*>([\s\S]*?)<\/boltAction>/g;
+    const regex2 = /<(?:bolt)?[Aa]ction\s+[^>]*?filePath="([^"]+)"[^>]*?type="file"[^>]*>([\s\S]*?)<\/(?:bolt)?[Aa]ction>/g;
     while ((m = regex2.exec(raw)) !== null) {
         if (!files.some((f) => f.filePath === m![1])) {
             files.push({ filePath: m[1], content: m[2] });
@@ -380,7 +382,7 @@ const extractFilesFromRaw = (raw: string): ExtractedFile[] => {
 
 const extractShellCommands = (raw: string): string[] => {
     const cmds: string[] = [];
-    const regex = /<boltAction\s+[^>]*?type="shell"[^>]*>([\s\S]*?)<\/boltAction>/g;
+    const regex = /<(?:bolt)?[Aa]ction\s+[^>]*?type="shell"[^>]*>([\s\S]*?)<\/(?:bolt)?[Aa]ction>/g;
     let m;
     while ((m = regex.exec(raw)) !== null) {
         cmds.push(m[1].trim());
@@ -390,9 +392,9 @@ const extractShellCommands = (raw: string): string[] => {
 
 const stripBoltTags = (raw: string): string =>
     raw
-        .replace(/<boltAction[^>]*>[\s\S]*?<\/boltAction>/g, '')
-        .replace(/<boltArtifact[^>]*>/g, '')
-        .replace(/<\/boltArtifact>/g, '')
+        .replace(/<(?:bolt)?[Aa]ction[^>]*>[\s\S]*?<\/(?:bolt)?[Aa]ction>/gi, '')
+        .replace(/<(?:bolt)?[Aa]rtifact[^>]*>/gi, '')
+        .replace(/<\/(?:bolt)?[Aa]rtifact>/gi, '')
         .replace(/\n{3,}/g, '\n\n')
         .trim() || 'Generated code.';
 
@@ -748,7 +750,9 @@ export class ChatService {
             } else {
                 switch (modelConfig.provider) {
                     case 'openai':
-                        providerStream = this.streamOpenAI(messages, attachments, conversationMode, modelConfig.apiModelId, enhancedSystemPrompt);
+                        providerStream = usesOpenAIResponsesApi(modelConfig)
+                            ? this.streamOpenAIResponses(messages, attachments, conversationMode, modelConfig.apiModelId, enhancedSystemPrompt)
+                            : this.streamOpenAI(messages, attachments, conversationMode, modelConfig.apiModelId, enhancedSystemPrompt);
                         break;
                     case 'anthropic':
                         providerStream = this.streamAnthropic(messages, attachments, conversationMode, modelConfig.apiModelId, enhancedSystemPrompt);
@@ -983,6 +987,48 @@ export class ChatService {
         }
     }
 
+    private async *streamOpenAIResponses(
+        messages: { role: string; content: string }[],
+        attachments: ChatAttachment[],
+        _mode: ConversationMode,
+        apiModelId: string,
+        systemPrompt: string,
+    ) {
+        if (!this.openai) throw new Error('OpenAI API Key not configured');
+        const textAttachmentContext = buildTextAttachmentContext(attachments);
+        const imageAttachments = attachments.filter((a) => a.kind === 'image' && a.dataBase64);
+        const input: ResponseInput = messages.map((m, idx) => {
+            const role = m.role === 'assistant' ? 'assistant' as const : 'user' as const;
+            const isLast = idx === messages.length - 1;
+            const isLastUser = isLast && m.role === 'user';
+            if (!isLastUser || (imageAttachments.length === 0 && !textAttachmentContext)) {
+                return { role, content: m.content };
+            }
+            return {
+                role,
+                content: [
+                    { type: 'input_text' as const, text: `${m.content}${textAttachmentContext}` },
+                    ...imageAttachments.map((image) => ({
+                        type: 'input_image' as const,
+                        detail: 'auto' as const,
+                        image_url: `data:${image.mimeType};base64,${image.dataBase64}`,
+                    })),
+                ],
+            };
+        });
+        const stream = await this.openai.responses.create({
+            model: apiModelId,
+            instructions: systemPrompt,
+            input,
+            stream: true,
+        });
+        for await (const event of stream) {
+            if (event.type === 'response.output_text.delta' && event.delta) {
+                yield event.delta;
+            }
+        }
+    }
+
     private async *streamAnthropic(
         messages: { role: string; content: string }[],
         attachments: ChatAttachment[],
@@ -1111,7 +1157,9 @@ export class ChatService {
         }
         switch (modelConfig.provider) {
             case 'openai':
-                return this.streamOpenAI(messages, [], 'build', modelConfig.apiModelId, systemPrompt);
+                return usesOpenAIResponsesApi(modelConfig)
+                    ? this.streamOpenAIResponses(messages, [], 'build', modelConfig.apiModelId, systemPrompt)
+                    : this.streamOpenAI(messages, [], 'build', modelConfig.apiModelId, systemPrompt);
             case 'anthropic':
                 return this.streamAnthropic(messages, [], 'build', modelConfig.apiModelId, systemPrompt);
             case 'google':

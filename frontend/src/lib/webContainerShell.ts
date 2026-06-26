@@ -413,6 +413,37 @@ export const resetSyncedShellCwd = (): void => {
     lastSyncedShellCwd = null;
 };
 
+/** Absolute path for interactive shell `cd` — `~` in jsh is /home, not the project workdir. */
+export function getShellProjectCdCommand(wc: WebContainer, projectDir: string): string {
+    const target = normalizeProjectDir(wc, projectDir);
+    const escaped = target.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    return `cd "${escaped}"`;
+}
+
+/**
+ * Build a single shell line that always runs from the project root (zsh/powershell-like).
+ * User `cd` commands are passed through unchanged.
+ */
+export function formatInteractiveShellSubmit(
+    wc: WebContainer,
+    line: string,
+    projectDir?: string,
+): string {
+    const trimmed = line.trim();
+    if (!trimmed) return '\n';
+    if (/^cd(\s|$)/i.test(trimmed)) return `${trimmed}\n`;
+    const cd = getShellProjectCdCommand(wc, projectDir ?? wc.workdir);
+    return `${cd} && ${trimmed}\n`;
+}
+
+/** @deprecated Use formatInteractiveShellSubmit — kept for programmatic cwd-only sync */
+export function shouldSyncShellCwdBeforeCommand(line: string): boolean {
+    const trimmed = line.trim();
+    if (!trimmed) return false;
+    if (/^cd(\s|$)/i.test(trimmed)) return false;
+    return /^(ls|ll|la|npm|npx|node|pnpm|yarn|cat|pwd|head|tail|grep|find|tree|vite|tsc)\b/i.test(trimmed);
+}
+
 export const syncShellWorkingDirectory = async (
     shellWriter: WritableStreamDefaultWriter<string> | null,
     wc: WebContainer,
@@ -423,13 +454,29 @@ export const syncShellWorkingDirectory = async (
     const target = normalizeProjectDir(wc, projectDir);
     if (!force && lastSyncedShellCwd === target) return;
     try {
-        // `~` resolves to the WebContainer workdir in jsh — safer than absolute `/` paths.
-        await shellWriter.write('cd ~\n');
+        await shellWriter.write(`${getShellProjectCdCommand(wc, projectDir)}\n`);
         lastSyncedShellCwd = target;
     } catch {
         // best effort only
     }
 };
+
+const SUBMIT_KEY_RE = /[\r\n]/;
+
+/** True for Ctrl+C, Ctrl+U, arrows, etc. — forwarded immediately, not line-buffered. */
+export function isInteractiveShellControlInput(data: string): boolean {
+    if (data.length === 0) return false;
+    if (data === '\t') return true;
+    if (data.length === 1) {
+        const code = data.charCodeAt(0);
+        return code < 32 || code === 127;
+    }
+    return data.startsWith('\x1b');
+}
+
+export function isInteractiveShellSubmitInput(data: string): boolean {
+    return SUBMIT_KEY_RE.test(data);
+}
 
 export const runProcessAndCollectExit = async (proc: { exit: Promise<number> }, timeoutMs: number): Promise<number> => {
     const timeout = new Promise<number>((resolve) => setTimeout(() => resolve(-1), timeoutMs));

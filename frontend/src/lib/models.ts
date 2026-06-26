@@ -35,6 +35,12 @@ export const MODELS: ModelOption[] = [
         provider: 'openai',
     },
     {
+        id: 'codex-5.3',
+        label: 'Codex 5.3',
+        description: 'Agentic Coding',
+        provider: 'openai',
+    },
+    {
         id: 'gemini-3-pro',
         label: 'Gemini 3 Pro',
         description: 'Multimodal',

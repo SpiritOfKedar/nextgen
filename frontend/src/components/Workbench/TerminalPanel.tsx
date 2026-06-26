@@ -17,14 +17,20 @@ import { shouldAutoRecover, RECOVERY_LLM_MODEL } from '../../lib/terminalAutoFix
 import { scheduleAutoTerminalRecovery } from '../../lib/terminalAutoRecovery';
 import { useAuth } from '@clerk/clerk-react';
 import { getWebContainerInstance } from '../../hooks/useWebContainer';
-import { resetSyncedShellCwd, syncShellWorkingDirectory } from '../../lib/webContainerShell';
+import {
+    formatInteractiveShellSubmit,
+    isInteractiveShellControlInput,
+    isInteractiveShellSubmitInput,
+    resetSyncedShellCwd,
+} from '../../lib/webContainerShell';
 import { useChat } from '../../hooks/useChat';
 import { X } from 'lucide-react';
 import 'xterm/css/xterm.css';
 
 /**
  * Terminal display — jsh shell is managed by useWebContainer.
- * Layout uses flex so banners/footer never overlap the scrollable xterm area.
+ * Input is line-buffered: commands run as `cd <project> && <your command>` on Enter
+ * so cwd never glues to typed text (the old `lscd` bug).
  */
 export const TerminalPanel: React.FC = () => {
     const terminalRef = useRef<HTMLDivElement>(null);
@@ -38,6 +44,7 @@ export const TerminalPanel: React.FC = () => {
     const { runTerminalRecovery } = useChat();
     const outputBufferRef = useRef('');
     const inputLineBufferRef = useRef('');
+    const shellInputQueueRef = useRef(Promise.resolve());
     const eventBufferRef = useRef<Array<{ eventType: string; payload: string; cwd?: string; exitCode?: number | null }>>([]);
     const [dismissedIssueCode, setDismissedIssueCode] = useState<string | null>(null);
 
@@ -163,27 +170,42 @@ export const TerminalPanel: React.FC = () => {
         ro.observe(terminalRef.current);
 
         term.onData((data) => {
-            const writer = shellWriterRef.current;
             if (currentThreadId) {
                 eventBufferRef.current.push({ eventType: 'input', payload: data });
             }
 
-            inputLineBufferRef.current += data;
-            if (data.includes('\r') || data.includes('\n')) {
-                const line = inputLineBufferRef.current.trim();
-                inputLineBufferRef.current = '';
-                if (/^(npm\s+(install|i|ci)\b|cd\s+\/|ls\b)/i.test(line)) {
-                    const wc = getWebContainerInstance();
-                    if (wc && writer) {
-                        resetSyncedShellCwd();
-                        void syncShellWorkingDirectory(writer, wc, wc.workdir, true);
-                    }
-                }
-            }
+            shellInputQueueRef.current = shellInputQueueRef.current.then(async () => {
+                const writer = shellWriterRef.current;
+                if (!writer) return;
 
-            if (writer) {
-                writer.write(data).catch(() => undefined);
-            }
+                if (isInteractiveShellSubmitInput(data)) {
+                    const line = inputLineBufferRef.current;
+                    inputLineBufferRef.current = '';
+                    const wc = getWebContainerInstance();
+                    if (wc) {
+                        resetSyncedShellCwd();
+                        await writer.write(formatInteractiveShellSubmit(wc, line, wc.workdir));
+                    } else {
+                        await writer.write(line ? `${line}\n` : '\n');
+                    }
+                    return;
+                }
+
+                if (data === '\x7f' || data === '\b') {
+                    inputLineBufferRef.current = inputLineBufferRef.current.slice(0, -1);
+                    return;
+                }
+
+                if (isInteractiveShellControlInput(data)) {
+                    if (data === '\x03' || data === '\x15') {
+                        inputLineBufferRef.current = '';
+                    }
+                    await writer.write(data);
+                    return;
+                }
+
+                inputLineBufferRef.current += data;
+            }).catch(() => undefined);
         });
 
         term.onResize(({ cols, rows }) => {
@@ -275,7 +297,7 @@ export const TerminalPanel: React.FC = () => {
                             ) : null}
                         </>
                     ) : (
-                        <span>Errors auto-fix via agent ({RECOVERY_LLM_MODEL})</span>
+                        <span>Commands run in project root · try <span className="text-zinc-400">ls</span>, <span className="text-zinc-400">pwd</span>, <span className="text-zinc-400">npm install</span></span>
                     )}
                 </div>
                 {currentThreadId && (

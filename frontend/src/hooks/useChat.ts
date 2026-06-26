@@ -76,7 +76,8 @@ Build React routes, components, contexts/hooks that read/write Supabase (not loc
 Follow the plan's component breakdown and wire auth, feed, posts, comments, and communities. Start the dev server when ready.`;
 
 const FULL_BUILD_PROMPT = `Implement the approved plan above exactly. Follow the saved plan context — create all listed files, install dependencies, and start the dev server.
-When Supabase is connected, emit supabase-migration actions for all schema changes before or alongside UI files.`;
+When Supabase is connected, emit supabase-migration actions for all schema changes before or alongside UI files.
+Use <boltArtifact> and <boltAction> XML tags for all file output (not <artifact> or <action>).`;
 
 const ENHANCEMENT_META_PATTERNS = [
     /\bI need (?:the )?original prompt\b/i,
@@ -115,22 +116,21 @@ const stripBoltTags = (text: string): string => {
     let narrative = text
         .replace(/<boltAction[^>]*>[\s\S]*?<\/boltAction>/g, '');
 
-    // 2. Remove any UNCLOSED boltAction tag and everything after it
-    //    (during streaming, the closing tag hasn't arrived yet)
-    const unclosedActionIdx = narrative.indexOf('<boltAction');
+    // 2. Remove any UNCLOSED action tag and everything after it (streaming edge case)
+    const unclosedActionIdx = narrative.search(/<(?:bolt)?[Aa]ction\b/);
     if (unclosedActionIdx !== -1) {
         narrative = narrative.substring(0, unclosedActionIdx);
     }
 
     // 3. Remove artifact wrapper tags
     narrative = narrative
-        .replace(/<boltArtifact[^>]*>/g, '')
-        .replace(/<\/boltArtifact>/g, '')
-        .replace(/<\/boltAction>/g, '')
+        .replace(/<(?:bolt)?[Aa]rtifact[^>]*>/g, '')
+        .replace(/<\/(?:bolt)?[Aa]rtifact>/gi, '')
+        .replace(/<\/(?:bolt)?[Aa]ction>/gi, '')
         .trim();
 
-    // 4. Also strip anything after an unclosed <boltArtifact (streaming edge case)
-    const unclosedArtifactIdx = narrative.indexOf('<boltArtifact');
+    // 4. Also strip anything after an unclosed artifact (streaming edge case)
+    const unclosedArtifactIdx = narrative.search(/<(?:bolt)?[Aa]rtifact\b/);
     if (unclosedArtifactIdx !== -1) {
         narrative = narrative.substring(0, unclosedArtifactIdx).trim();
     }
@@ -167,7 +167,7 @@ const stripBoltTags = (text: string): string => {
 const extractFileActions = (content: string): BoltAction[] => {
     const actions: BoltAction[] = [];
     // Match boltAction with type and filePath in any order
-    const regex = /<boltAction\s+(?:[^>]*?)type="file"(?:[^>]*?)filePath="([^"]+)"[^>]*>([\s\S]*?)<\/boltAction>/g;
+    const regex = /<(?:bolt)?[Aa]ction\s+(?:[^>]*?)type="file"(?:[^>]*?)filePath="([^"]+)"[^>]*>([\s\S]*?)<\/(?:bolt)?[Aa]ction>/g;
     let match;
     while ((match = regex.exec(content)) !== null) {
         actions.push({
@@ -177,7 +177,7 @@ const extractFileActions = (content: string): BoltAction[] => {
         });
     }
     // Also try reverse attribute order: filePath before type
-    const regex2 = /<boltAction\s+(?:[^>]*?)filePath="([^"]+)"(?:[^>]*?)type="file"[^>]*>([\s\S]*?)<\/boltAction>/g;
+    const regex2 = /<(?:bolt)?[Aa]ction\s+(?:[^>]*?)filePath="([^"]+)"(?:[^>]*?)type="file"[^>]*>([\s\S]*?)<\/(?:bolt)?[Aa]ction>/g;
     while ((match = regex2.exec(content)) !== null) {
         // Avoid duplicates
         if (!actions.some(a => a.filePath === match![1])) {
@@ -2066,14 +2066,20 @@ export const useChat = () => {
         action: PlanAction,
         feedback = '',
     ): Promise<SendMessageResult> => {
-        const supabaseCtx = supabaseContextAttachment ?? { ...DEFAULT_SUPABASE_MCP_CONTEXT };
+        const token = await getToken();
+        let supabaseCtx = supabaseContextAttachment;
+        if (!supabaseCtx && token) {
+            const status = await fetchSupabaseStatus(token);
+            if (status.connected) {
+                supabaseCtx = { ...DEFAULT_SUPABASE_MCP_CONTEXT };
+            }
+        }
 
         if (action === 'build') {
             // A new build gets a fresh automatic-recovery budget so prior failures don't
             // permanently suppress recovery for this thread.
             if (currentThreadId) resetAutoRecoveryAttempts(currentThreadId);
 
-            const token = await getToken();
             let migrationsEnabled = false;
             if (token) {
                 const status = await fetchSupabaseStatus(token);
@@ -2088,7 +2094,7 @@ export const useChat = () => {
                     [],
                     [],
                     null,
-                    supabaseCtx,
+                    supabaseCtx ?? null,
                     { mode: 'build', buildPhase: 'backend' },
                 );
                 if (!backendResult.ok) return backendResult;
@@ -2097,19 +2103,17 @@ export const useChat = () => {
                     [],
                     [],
                     null,
-                    supabaseCtx,
+                    supabaseCtx ?? null,
                     { mode: 'build', buildPhase: 'ui' },
                 );
             }
 
-            // No DB-connected Supabase: build the full app anyway. Generated code includes
-            // src/lib/supabase.ts reading VITE_SUPABASE_* and degrades gracefully if unset.
             return sendMessage(
                 FULL_BUILD_PROMPT,
                 [],
                 [],
                 null,
-                supabaseCtx,
+                supabaseCtx ?? null,
                 { mode: 'build' },
             );
         }
@@ -2122,7 +2126,7 @@ export const useChat = () => {
                 [],
                 [],
                 null,
-                supabaseCtx,
+                supabaseCtx ?? null,
                 { mode: 'plan' },
             );
         }
@@ -2135,7 +2139,7 @@ export const useChat = () => {
                 [],
                 [],
                 null,
-                supabaseCtx,
+                supabaseCtx ?? null,
                 { mode: 'plan' },
             );
         }

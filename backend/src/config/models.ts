@@ -4,6 +4,8 @@ export interface AIModel {
     description?: string;
     provider: 'openai' | 'anthropic' | 'google';
     apiModelId: string; // The actual ID sent to the API
+    /** OpenAI-only: which API surface to call (default: chat-completions). */
+    openaiApi?: 'chat-completions' | 'responses';
 }
 
 export const AVAILABLE_MODELS: AIModel[] = [
@@ -24,6 +26,14 @@ export const AVAILABLE_MODELS: AIModel[] = [
         label: 'ChatGPT 5.2',
         provider: 'openai',
         apiModelId: 'gpt-4o'
+    },
+    {
+        id: 'codex-5.3',
+        label: 'Codex 5.3',
+        description: 'Agentic coding',
+        provider: 'openai',
+        apiModelId: 'gpt-5.3-codex',
+        openaiApi: 'responses',
     },
     {
         id: 'gemini-3-pro',
@@ -61,3 +71,6 @@ export const getModelConfig = (modelId: string): AIModel | undefined => {
     return AVAILABLE_MODELS.find(m => m.id === modelId) ||
         AVAILABLE_MODELS.find(m => m.id === 'gemini-2.5-flash'); // Default to Gemini 2.5 Flash
 };
+
+export const usesOpenAIResponsesApi = (model: AIModel): boolean =>
+    model.provider === 'openai' && model.openaiApi === 'responses';
