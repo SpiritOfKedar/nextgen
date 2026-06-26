@@ -2208,10 +2208,57 @@ export const useChat = () => {
         }
     }, [API_URL, chatMode, getToken, isLoaded, isSignedIn]);
 
+    const transcribeAudio = useCallback(async (
+        file: File,
+    ): Promise<{ ok: true; text: string } | { ok: false; error: string }> => {
+        if (!file) return { ok: false, error: 'Audio file is required.' };
+        if (!isLoaded) {
+            return { ok: false, error: 'Still loading - try again in a moment.' };
+        }
+        if (!isSignedIn) {
+            return { ok: false, error: 'Sign in to transcribe audio.' };
+        }
+
+        try {
+            const token = await getToken();
+            if (!token) {
+                return { ok: false, error: 'Could not get auth token. Try signing in again.' };
+            }
+
+            const response = await fetch(`${API_URL}/chat/transcribe`, {
+                method: 'POST',
+                headers: {
+                    Authorization: `Bearer ${token}`,
+                    'Content-Type': file.type || 'application/octet-stream',
+                    'X-Audio-Filename': encodeURIComponent(file.name),
+                },
+                body: file,
+            });
+
+            const payload = await response.json().catch(() => null);
+            if (!response.ok) {
+                const message = typeof payload?.error === 'string'
+                    ? payload.error
+                    : `Transcription failed (${response.status})`;
+                return { ok: false, error: message };
+            }
+
+            const text = typeof payload?.text === 'string' ? payload.text.trim() : '';
+            if (!text) {
+                return { ok: false, error: 'Transcription returned empty text.' };
+            }
+            return { ok: true, text };
+        } catch (error) {
+            const message = error instanceof Error ? error.message : 'Failed to transcribe audio';
+            return { ok: false, error: message };
+        }
+    }, [API_URL, getToken, isLoaded, isSignedIn]);
+
     return {
         messages,
         sendMessage,
         enhancePrompt,
+        transcribeAudio,
         executePlanAction,
         fetchThreads,
         deleteThread,

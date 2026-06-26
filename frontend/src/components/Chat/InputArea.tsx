@@ -63,9 +63,11 @@ export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default', compa
     const [submitError, setSubmitError] = useState<string | null>(null);
     const [isEnhancing, setIsEnhancing] = useState(false);
     const [isTranscribing, setIsTranscribing] = useState(false);
+    const [isRecording, setIsRecording] = useState(false);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
-    const audioInputRef = useRef<HTMLInputElement>(null);
+    const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+    const audioChunksRef = useRef<Blob[]>([]);
     const figmaButtonRef = useRef<HTMLButtonElement>(null);
     const stitchButtonRef = useRef<HTMLButtonElement>(null);
     const MAX_FILE_CHARS = 25_000;
@@ -322,22 +324,60 @@ export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default', compa
         }
     };
 
-    const handleAudioSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
-        const file = e.target.files?.[0];
-        e.target.value = '';
-        if (!file || isTranscribing || isLoading) return;
+    const startRecording = async () => {
+        if (isRecording || isTranscribing || isLoading) return;
 
-        setSubmitError(null);
-        setIsTranscribing(true);
         try {
-            const result = await transcribeAudio(file);
-            if (!result.ok) {
-                setSubmitError(result.error);
-                return;
-            }
-            setInputValue((prev) => (prev.trim() ? `${prev}\n${result.text}` : result.text));
-        } finally {
-            setIsTranscribing(false);
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            const mediaRecorder = new MediaRecorder(stream);
+            audioChunksRef.current = [];
+
+            mediaRecorder.ondataavailable = (event) => {
+                if (event.data.size > 0) {
+                    audioChunksRef.current.push(event.data);
+                }
+            };
+
+            mediaRecorder.onstop = async () => {
+                const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+                stream.getTracks().forEach(track => track.stop());
+
+                setIsTranscribing(true);
+                try {
+                    const audioFile = new File([audioBlob], `recording-${Date.now()}.webm`, { type: 'audio/webm' });
+                    const result = await transcribeAudio(audioFile);
+                    if (!result.ok) {
+                        setSubmitError(result.error);
+                        return;
+                    }
+                    setInputValue((prev) => (prev.trim() ? `${prev}\n${result.text}` : result.text));
+                } finally {
+                    setIsTranscribing(false);
+                }
+            };
+
+            mediaRecorder.start();
+            mediaRecorderRef.current = mediaRecorder;
+            setIsRecording(true);
+            setSubmitError(null);
+        } catch (error) {
+            setSubmitError(error instanceof Error ? error.message : 'Failed to access microphone');
+        }
+    };
+
+    const stopRecording = () => {
+        if (mediaRecorderRef.current && isRecording) {
+            mediaRecorderRef.current.stop();
+            mediaRecorderRef.current = null;
+            setIsRecording(false);
+        }
+    };
+
+    const toggleRecording = () => {
+        if (isRecording) {
+            stopRecording();
+        } else {
+            startRecording();
         }
     };
 
@@ -783,13 +823,6 @@ export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default', compa
                             mergeFilesDeduped(files);
                         }}
                     />
-                    <input
-                        type="file"
-                        ref={audioInputRef}
-                        className="hidden"
-                        accept="audio/*"
-                        onChange={(e) => void handleAudioSelected(e)}
-                    />
 
                     <div className="flex items-center gap-1.5 shrink-0">
                         <button
@@ -818,16 +851,16 @@ export const InputArea: React.FC<InputAreaProps> = ({ variant = 'default', compa
                         </button>
                         <button
                             type="button"
-                            onClick={() => audioInputRef.current?.click()}
+                            onClick={toggleRecording}
                             disabled={isTranscribing || isLoading}
-                            className={`${iconBtnClass} disabled:opacity-40 disabled:cursor-not-allowed`}
-                            title="Transcribe audio to text (Whisper)"
-                            aria-label="Transcribe audio"
+                            className={`${iconBtnClass} ${isRecording ? 'bg-red-500/20 text-red-400 animate-pulse' : ''} disabled:opacity-40 disabled:cursor-not-allowed`}
+                            title={isRecording ? 'Stop recording' : 'Start voice recording (Whisper)'}
+                            aria-label={isRecording ? 'Stop recording' : 'Start recording'}
                         >
                             {isTranscribing ? (
                                 <Loader2 className="w-3.5 h-3.5 animate-spin" />
                             ) : (
-                                <Mic className="w-3.5 h-3.5" />
+                                <Mic className={`w-3.5 h-3.5 ${isRecording ? 'text-red-400' : ''}`} />
                             )}
                         </button>
 
