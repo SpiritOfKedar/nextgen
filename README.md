@@ -123,7 +123,7 @@ mindmap
 ### 1. Clone & configure
 
 ```bash
-git clone <your-repo-url> nextgen
+git clone https://github.com/SpiritOfKedar/nextgen
 cd nextgen
 ```
 
@@ -190,7 +190,7 @@ nextgen/
 ├── README.md                          # This file — single source of truth
 ├── docs/
 │   └── assets/
-│       └── under-catstruction.png     # README mascot 🐱
+│       └── under-catstruction.png     # README mascot 
 │
 ├── frontend/                          # React + Vite client
 │   ├── src/
