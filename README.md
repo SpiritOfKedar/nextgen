@@ -1313,8 +1313,10 @@ flowchart TD
   <img src="docs/assets/family-guy-team.png" alt="The NextGen engineering team recording their weekly architecture podcast at The Drunken Clam" width="520" />
 </p>
 
+
 <p align="center">
   <em>
+    yash kamble(peter), kedar bargule(quagmire), tejas patil, abhi rodage(handicap) </br>
     Weekly sync at The Drunken Clam. Four mics, four beers, zero unit tests.<br />
     Peter hosts the podcast. Quagmire "reviews PRs." Cleveland monitors uptime. Joe runs retros — seated, always.
   </em>
